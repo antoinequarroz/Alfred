@@ -687,7 +687,7 @@ describe('prise de rendez-vous : réservation', () => {
     const [b] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
     expect(b.status).toBe('confirmed');
     expect(b.eventState).toBe('ok');
-    expect(b.mailError).toContain('Confirmation au client non envoyé');
+    expect(b.mailError).toContain('Confirmation au client : envoi en échec');
     expect(b.mailError).toContain('connexion SMTP refusée');
     const test = await ctx.admin('/api/booking/mail/test', 'POST');
     expect(test.status).toBe(502);

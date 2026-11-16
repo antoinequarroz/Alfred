@@ -607,8 +607,8 @@ export class BookingService {
     results.forEach((r, i) => {
       if (r.status === 'rejected') {
         const reason = r.reason instanceof Error ? r.reason.message : String(r.reason);
-        console.error(`[alfred] e-mail non envoyé (${messages[i][0]}, réservation ${bookingId}) : ${reason}`);
-        errors.push(`${messages[i][0]} non envoyé : ${reason}`.slice(0, 300));
+        console.error(`[alfred] e-mail en échec (${messages[i][0]}, réservation ${bookingId}) : ${reason}`);
+        errors.push(`${messages[i][0]} : envoi en échec (${reason})`.slice(0, 300));
       }
     });
     this.data.setMailError(bookingId, errors.length > 0 ? errors.join(' ; ') : null);

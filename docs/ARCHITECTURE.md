@@ -25,6 +25,10 @@ Un seul processus Node.js sert l'API et l'app web. Pas de Postgres ni de Redis :
 | `server/service.ts` | Opérations sur les événements, que le calendrier soit local ou CalDAV |
 | `server/store.ts`, `server/db.ts` | Base SQLite |
 | `server/app.ts` | API HTTP, connexion, sécurité |
+| `server/booking/slots.ts` | Prise de RDV : calcul des créneaux libres (module pur, sans base ni horloge) |
+| `server/booking/service.ts`, `store.ts` | Prise de RDV : réglages, types, horaires, réservation, annulation |
+| `server/booking/routes.ts`, `ratelimit.ts` | Prise de RDV : routes publiques et privées, limitation de débit |
+| `server/booking/mail.ts` | Prise de RDV : e-mails (SMTP), pièce jointe iCalendar |
 | `web/src/` | App web (React) : vues, fenêtre d'événement, glisser-déposer |
 | `shared/types.ts` | Types partagés entre serveur et app |
 | `test/` | Tests du moteur, de l'API et de la synchro (contre Radicale) |
@@ -40,10 +44,23 @@ iCloud reste la référence : Alfred garde une copie locale pour afficher vite e
 
 Sans identifiants CalDAV, Alfred fonctionne avec un calendrier local, ce qui sert au développement.
 
+## La prise de rendez-vous (v1.1)
+
+Une page publique laisse un client choisir un type de rendez-vous puis un créneau libre ; la réservation crée l'événement dans le calendrier d'Antoine (donc dans iCloud) et envoie les e-mails. La description complète de l'API est dans [API-RDV.md](API-RDV.md).
+
+- **Fermée par défaut.** Rien n'est réservable tant qu'Antoine n'a pas activé la prise de rendez-vous dans les réglages.
+- **Créneaux.** Calculés à la demande sur la copie locale : horaires hebdomadaires, pas de 15, 30 ou 60 minutes, durée et tampons du type, préavis, horizon. Tout se raisonne en heure murale de `Europe/Zurich`, jour par jour, puis chaque créneau est converti en instant : les changements d'heure ne décalent rien. Bloquent : les occurrences des calendriers marqués « bloque les créneaux » (même masqués) et les réservations déjà enregistrées. Ne bloquent pas : les événements « disponible » (`TRANSP:TRANSPARENT`) et annulés.
+- **Réservation.** Validation stricte, synchro iCloud fraîche (au mieux, 4 s au plus), puis section critique en mémoire (un seul processus) : nouveau calcul de disponibilité, `CalendarService.create`, enregistrement. Deux demandes simultanées pour le même créneau : une seule réussit.
+- **Annulation.** Lien `/rdv/annulation/<jeton>` (32 octets aléatoires ; seule l'empreinte SHA-256 est en base), ou depuis l'admin. L'événement est retiré par `CalendarService.remove`, en tolérant qu'il ait déjà disparu.
+- **E-mails.** SMTP (Infomaniak par défaut) avec nodemailer, chargé au premier envoi seulement. Confirmation au client avec pièce jointe `.ics` (`METHOD:PUBLISH`, pas une invitation), avis à Antoine. Un échec d'envoi ne remet jamais en cause la réservation : il est journalisé et affiché dans l'admin. Sans SMTP configuré, tout fonctionne sauf l'envoi.
+- **Événement supprimé dans Apple Calendar.** Après la synchro, la réservation apparaît comme « événement supprimé » dans l'admin et reste confirmée (le créneau reste pris). Pas d'e-mail automatique en v1.1 : Antoine annule la réservation depuis l'admin pour prévenir le client et libérer le créneau. De même, un événement déplacé est signalé « déplacé » sans prévenir le client.
+- **Données.** Tables `booking_settings`, `booking_types`, `booking_hours`, `bookings`, et une colonne `blocks_booking` sur `calendars`, créées par une migration idempotente à l'ouverture de la base.
+
 ## Sécurité
 
 - Un seul utilisateur. Mot de passe stocké sous forme d'empreinte scrypt, session par cookie `HttpOnly`, `Secure`, `SameSite=Lax`, blocage après cinq essais ratés.
 - Protection CSRF, en-têtes de sécurité et politique CSP stricte.
+- Partie publique (`/api/public/booking/*`) : aucune session, aucun détail d'événement (seulement des débuts de créneaux libres), limitation de débit par adresse IP en mémoire bornée (dernier élément de `X-Forwarded-For`, posé par Caddy), champ piège anti-robot, corps limité à 16 Ko, mêmes réponses pour un jeton inconnu ou déjà utilisé, refus des écritures venues d'un autre site. Tout contenu saisi est échappé dans les e-mails et ne peut pas couper un en-tête.
 - Le mot de passe d'application iCloud ne vit que dans le `.env` du serveur. Il ne donne accès qu'aux données iCloud accessibles aux apps et se révoque en un clic chez Apple.
 
 ## Limites connues de la v1
@@ -56,7 +73,7 @@ Sans identifiants CalDAV, Alfred fonctionne avec un calendrier local, ce qui ser
 
 ## Comment la suite s'y branche
 
-- **Prise de RDV (v1.1).** Les disponibilités se calculent sur la copie locale (`Store.occurrences`), déjà à jour avec tous les calendriers. Une réservation appelle `CalendarService.create`, donc l'événement part dans iCloud comme n'importe quel autre. Il reste à ajouter : types de RDV, page publique, envoi d'e-mails (SMTP Infomaniak, depuis info@antoinequarroz.ch).
+- **Interface de la prise de RDV.** Le moteur et l'API sont en place ; il reste la page publique et l'écran d'administration, décrits dans [API-RDV.md](API-RDV.md).
 - **Visio (v2).** LiveKit tourne dans son propre conteneur. Alfred ne fait que délivrer des jetons d'accès et rattacher une salle à un événement (lien dans le champ lieu ou la description, visible aussi dans Apple Calendar).
 - **Apps Mac et mobile.** L'app web est déjà une PWA. Tauri (Mac) et Capacitor (iOS, Android) emballeront le même code.
 - **Agent IA.** L'API JSON est le point d'entrée : lire l'agenda, créer et déplacer des événements.

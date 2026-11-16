@@ -11,7 +11,7 @@ Assistant personnel tout-en-un, auto-hébergé sur VPS. Premier chantier : **le 
 | Étape | Contenu | État |
 |---|---|---|
 | **v1 : mon calendrier** | Vues jour, semaine et mois, création, modification, suppression, événements récurrents, synchro iCloud dans les deux sens, app installable (PWA) | ✅ Développé, à déployer |
-| v1.1 : prise de RDV | Page publique, types de RDV, créneaux calculés sur les vrais événements, e-mails de confirmation | À venir |
+| v1.1 : prise de RDV | Page publique, types de RDV, créneaux calculés sur les vrais événements, e-mails de confirmation | Moteur et API développés, interface à venir |
 | v2 : visio intégrée | Salles LiveKit liées aux événements (après agrandissement du VPS) | À venir |
 | Ensuite | Apps Mac (Tauri) et mobile (Capacitor), agent IA | À venir |
 
@@ -43,5 +43,6 @@ npm run build && npm start
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md) : comment c'est construit et comment la suite (RDV, visio) s'y branche
+- [API de la prise de rendez-vous](docs/API-RDV.md) : routes, formes JSON et codes d'erreur, pour construire l'interface
 - [Déploiement sur le VPS](docs/DEPLOIEMENT.md) : pas à pas, avec le mot de passe d'application iCloud
 - [Audit de faisabilité](docs/AUDIT.md) : l'étude de départ

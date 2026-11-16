@@ -36,6 +36,22 @@ curl http://127.0.0.1:3200/healthz          # {"ok":true}
 docker logs alfred --tail 20                # « synchro CalDAV toutes les 120 s »
 ```
 
+### E-mails de la prise de rendez-vous
+
+Pour que les confirmations partent depuis `info@antoinequarroz.ch`, ajouter au `.env` (le script `configurer.sh` ne les demande pas encore, et il réécrit le `.env` : les remettre après l'avoir relancé) :
+
+```bash
+SMTP_HOST=mail.infomaniak.com
+SMTP_PORT=587                 # STARTTLS ; 465 = TLS implicite
+SMTP_USER=info@antoinequarroz.ch
+SMTP_PASSWORD=…               # mot de passe de la boîte, ou mot de passe d'application Infomaniak
+MAIL_FROM="Antoine Quarroz <info@antoinequarroz.ch>"
+MAIL_NOTIFY_TO=               # qui reçoit les avis (défaut : l'adresse de MAIL_FROM)
+ALFRED_PUBLIC_URL=https://alfred.antoinequarroz.ch
+```
+
+Puis `docker compose -f deploy/docker-compose.yml up -d`. Sans `SMTP_USER` et `SMTP_PASSWORD`, la prise de rendez-vous fonctionne mais n'envoie aucun e-mail (un avertissement s'affiche dans l'admin). La prise de rendez-vous reste fermée tant qu'elle n'est pas activée dans les réglages.
+
 ## 3. Exposer en HTTPS
 
 Ajouter le contenu de [`deploy/Caddyfile.snippet`](../deploy/Caddyfile.snippet) au Caddyfile existant, puis recharger Caddy :
