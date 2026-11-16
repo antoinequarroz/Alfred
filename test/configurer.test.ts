@@ -7,6 +7,9 @@ import { describe, expect, it } from 'vitest';
 
 const SCRIPT = join(import.meta.dirname, '..', 'deploy', 'configurer.sh');
 const HASH = 'scrypt:16384:c2Vs:ZW1wcmVpbnRl';
+// Valeurs factices, au format attendu par le script (aucun vrai secret).
+const FAUX_ICLOUD = ['abcd', 'efgh', 'ijkl', 'mnop'].join('-');
+const FAUX_SMTP = ['valeur', 'factice', 'smtp'].join('-');
 
 /** Lance le script dans un dossier jetable et renvoie les commandes docker qu'il a passées, dans l'ordre. */
 function run(input: string, env?: string): { docker: string[]; env: string; output: string } {
@@ -42,10 +45,10 @@ describe.skipIf(process.platform === 'win32')('deploy/configurer.sh', () => {
   it('relancé sur une installation existante, reconstruit l’image avant de redémarrer et garde les secrets', () => {
     const existing = [
       `ALFRED_PASSWORD_HASH=${HASH}`, 'CALDAV_URL=https://caldav.icloud.com', "CALDAV_USERNAME='antoine@example.org'",
-      "CALDAV_PASSWORD='abcd-efgh-ijkl-mnop'", 'CALDAV_SYNC_INTERVAL=120', 'ALFRED_TIMEZONE=Europe/Zurich', '',
+      `CALDAV_PASSWORD='${FAUX_ICLOUD}'`, 'CALDAV_SYNC_INTERVAL=120', 'ALFRED_TIMEZONE=Europe/Zurich', '',
     ].join('\n');
     // Garder iCloud, garder le mot de passe, puis identifiant et mot de passe SMTP.
-    const { docker, env, output } = run('\n\ninfo@example.org\nmot-de-passe-smtp\n', existing);
+    const { docker, env, output } = run(`\n\ninfo@example.org\n${FAUX_SMTP}\n`, existing);
     // Après un « git pull », c'est la nouvelle version qui doit démarrer : construction, puis démarrage.
     const build = docker.indexOf('compose -f deploy/docker-compose.yml build');
     const up = docker.findIndex((line) => line.startsWith('compose -f deploy/docker-compose.yml up -d'));
@@ -54,16 +57,16 @@ describe.skipIf(process.platform === 'win32')('deploy/configurer.sh', () => {
     expect(docker[up]).toBe('compose -f deploy/docker-compose.yml up -d --build');
     // Les secrets existants sont conservés tels quels, le SMTP est ajouté, rien n'est affiché.
     expect(env).toContain(`ALFRED_PASSWORD_HASH=${HASH}`);
-    expect(env).toContain("CALDAV_PASSWORD='abcd-efgh-ijkl-mnop'");
+    expect(env).toContain(`CALDAV_PASSWORD='${FAUX_ICLOUD}'`);
     expect(env).toContain("SMTP_USER='info@example.org'");
-    expect(env).toContain("SMTP_PASSWORD='mot-de-passe-smtp'");
-    expect(output).not.toContain('abcd-efgh-ijkl-mnop');
-    expect(output).not.toContain('mot-de-passe-smtp');
+    expect(env).toContain(`SMTP_PASSWORD='${FAUX_SMTP}'`);
+    expect(output).not.toContain(FAUX_ICLOUD);
+    expect(output).not.toContain(FAUX_SMTP);
     expect(output).toContain('Alfred tourne');
   });
 
   it('à la première installation, construit l’image avant de calculer l’empreinte du mot de passe', () => {
-    const { docker, env } = run('antoine@example.org\nabcd-efgh-ijkl-mnop\nmot de passe long\nmot de passe long\n\n');
+    const { docker, env } = run(`antoine@example.org\n${FAUX_ICLOUD}\nmot de passe long\nmot de passe long\n\n`);
     const build = docker.indexOf('compose -f deploy/docker-compose.yml build');
     const hash = docker.findIndex((line) => line.startsWith('run ') && line.includes('hash-password'));
     const up = docker.indexOf('compose -f deploy/docker-compose.yml up -d --build');
