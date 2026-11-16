@@ -146,7 +146,12 @@ describe('salles', () => {
     const h = verifyAccessToken(host.token, SECRET) as { sub: string; name: string; video: Record<string, unknown> };
     expect(h).toMatchObject({ sub: 'host', name: 'Antoine Quarroz' });
     expect(h.video.roomAdmin).toBe(true);
-    expect(ctx.fake.rooms.get(`alfred-${room.id}`)?.max).toBe(4);
+    // Côté serveur de visio, plafond dur ; le réglage (4) est appliqué par Alfred. Jeton valable 2 minutes.
+    expect(ctx.fake.rooms.get(`alfred-${room.id}`)?.max).toBe(8);
+    const g2 = verifyAccessToken(guest.token, SECRET) as { exp: number; nbf: number };
+    expect(g2.exp - g2.nbf).toBe(130);
+    // Un invité ne peut pas prendre le nom de l'hôte.
+    expect((await ctx.json(`/api/public/video/rooms/${slug}/join`, 'POST', { name: 'antoine  QUARROZ' })).status).toBe(400);
   });
 
   it('refuse un invité quand la salle est pleine, en gardant une place pour l’hôte', async () => {
@@ -155,6 +160,12 @@ describe('salles', () => {
     const room = (await (await ctx.admin('/api/video/rooms', 'POST', {})).json()) as VideoRoom;
     const slug = slugOf(room);
     expect((await ctx.json(`/api/public/video/rooms/${slug}/join`, 'POST', { name: 'Un' })).status).toBe(200);
+    // Le jeton délivré compte comme une place prise avant même la connexion (entrées simultanées).
+    expect((await ctx.json(`/api/public/video/rooms/${slug}/join`, 'POST', { name: 'Deux' })).status).toBe(409);
+    // Jamais connecté : la place se libère après une minute.
+    ctx.clock.now = new Date(ctx.clock.now.getTime() + 61_000);
+    expect((await ctx.json(`/api/public/video/rooms/${slug}/join`, 'POST', { name: 'Un' })).status).toBe(200);
+    ctx.clock.now = new Date(ctx.clock.now.getTime() + 61_000);
     ctx.fake.rooms.get(`alfred-${room.id}`)!.participants.push({ identity: 'invite-1', name: 'Un' });
     const full = await ctx.json(`/api/public/video/rooms/${slug}/join`, 'POST', { name: 'Deux' });
     expect(full.status).toBe(409);
@@ -179,15 +190,20 @@ describe('salles', () => {
     expect(((await (await ctx.json(`/api/public/video/rooms/${slug}`)).json()) as PublicVideoRoom).status).toBe('closed');
   });
 
-  it('ferme une visio d’événement 6 heures après sa fin', async () => {
+  it('garde ouverte la visio d’un événement (déplacé, récurrent) mais la sort de la liste ; périme une réunion instantanée', async () => {
     const ctx = await setup();
     const res = await ctx.admin('/api/video/rooms', 'POST', { title: 'Séance', start: '2026-11-16T08:00:00Z', end: '2026-11-16T09:00:00Z' });
     const room = (await res.json()) as VideoRoom;
     expect(room.kind).toBe('event');
     ctx.clock.now = new Date('2026-11-16T14:59:00Z');
     expect((await ctx.json(`/api/public/video/rooms/${slugOf(room)}/join`, 'POST', { name: 'Un' })).status).toBe(200);
+    const instant = (await (await ctx.admin('/api/video/rooms', 'POST', {})).json()) as VideoRoom;
+    expect(((await (await ctx.admin('/api/video')).json()) as VideoAdminState).rooms).toHaveLength(2);
     ctx.clock.now = new Date('2026-11-16T15:01:00Z');
-    expect((await ctx.json(`/api/public/video/rooms/${slugOf(room)}/join`, 'POST', { name: 'Un' })).status).toBe(410);
+    expect((await ctx.json(`/api/public/video/rooms/${slugOf(room)}/join`, 'POST', { name: 'Un' })).status).toBe(200);
+    expect(((await (await ctx.admin('/api/video')).json()) as VideoAdminState).rooms.map((r) => r.id)).toEqual([instant.id]);
+    ctx.clock.now = new Date('2026-11-17T12:00:00Z');
+    expect((await ctx.json(`/api/public/video/rooms/${slugOf(instant)}/join`, 'POST', { name: 'Un' })).status).toBe(410);
     expect(((await (await ctx.admin('/api/video')).json()) as VideoAdminState).rooms).toHaveLength(0);
     expect((await ctx.admin('/api/video/rooms', 'POST', { start: 'demain', end: 'après' })).status).toBe(400);
   });
@@ -265,6 +281,25 @@ describe('rendez-vous en visio', () => {
     expect((await ctx.json(`/api/public/booking/cancel/${token}`, 'POST')).status).toBe(200);
     expect((await ctx.json(`/api/public/video/rooms/${slug}/join`, 'POST', { name: 'Élodie Müller' })).status).toBe(410);
     expect(((await (await ctx.admin('/api/video')).json()) as VideoAdminState).rooms).toHaveLength(0);
+  });
+
+  it('garde le lien du type (Zoom, Meet…) quand il en porte un, sans salle Alfred', async () => {
+    const ctx = await setup();
+    await ctx.admin('/api/booking/settings', 'PUT', { enabled: true });
+    await ctx.admin('/api/booking/types', 'POST', { name: 'Consultation', durationMin: 30, mode: 'visio', location: 'https://zoom.example/j/123' });
+    const confirmation = (await (await book(ctx)).json()) as BookingConfirmation;
+    expect(confirmation.booking.videoUrl).toBeNull();
+    expect(((await (await ctx.admin('/api/video')).json()) as VideoAdminState).rooms).toHaveLength(0);
+  });
+
+  it('ne diffuse plus le lien quand la visio est désactivée après coup', async () => {
+    const ctx = await setup();
+    await openVisio(ctx);
+    const confirmation = (await (await book(ctx)).json()) as BookingConfirmation;
+    expect(confirmation.booking.videoUrl).not.toBeNull();
+    await ctx.admin('/api/video/settings', 'PUT', { enabled: false });
+    const token = confirmation.cancelUrl.split('/').pop()!;
+    expect(((await (await ctx.json(`/api/public/booking/cancel/${token}`)).json()) as { videoUrl: string | null }).videoUrl).toBeNull();
   });
 
   it('laisse le rendez-vous tel quel quand la visio n’est pas disponible', async () => {

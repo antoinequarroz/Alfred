@@ -672,10 +672,13 @@ export class BookingService {
       const end = new Date(startMs + type.durationMin * 60_000).toISOString();
       const location = locationLabel(type.mode, type.location);
       // Rendez-vous « En visio » : une salle Alfred, dont le lien va dans l'événement (lieu cliquable dans Apple Calendar).
-      const room = type.mode === 'visio' ? this.video?.reserveForBooking(`${type.name} : ${name}`, start, end) ?? null : null;
+      // Sauf si le type porte déjà un lien (Zoom, Meet…) : c'est alors ce lien qui vaut, sans second lien concurrent.
+      const ownLink = /https?:\/\//i.test(type.location);
+      const room = type.mode === 'visio' && !ownLink ? this.video?.reserveForBooking(`${type.name} : ${name}`, start, end) ?? null : null;
       const description = [
         'Rendez-vous pris en ligne.',
         room ? `Visio : ${room.url}` : '',
+        room && type.location.trim() ? `Lieu : ${location}` : '',
         `Nom : ${name}`,
         `E-mail : ${email}`,
         phone ? `Téléphone : ${phone}` : '',
@@ -747,7 +750,9 @@ export class BookingService {
 
   /** État et horaire actuels d'une réservation, pour la salle de visio qui lui est liée. */
   videoLink(id: string): { status: 'confirmed' | 'cancelled'; start: string; end: string } | null {
-    const b = this.data.getBooking(id);
+    // L'horaire suit l'événement déplacé dans l'agenda : rapprochement avant lecture (immédiat si rien n'a changé).
+    this.reconcile();
+    const b = id ? this.data.getBooking(id) : undefined;
     return b ? { status: b.status, start: b.start_utc, end: b.end_utc } : null;
   }
 

@@ -9,7 +9,9 @@ rtc:
   tcp_port: 7881
   use_external_ip: false   # l'adresse annoncée est NODE_IP
 room:
-  auto_create: true
+  # Une salle n'existe que si Alfred l'a créée (à chaque entrée) : un ancien jeton ne peut pas
+  # rouvrir une salle fermée.
+  auto_create: false
   empty_timeout: 300       # une salle vide est libérée après 5 minutes
   departure_timeout: 60
   max_participants: 8      # plafond dur ; le réglage de l'app (2 à 8) s'applique salle par salle

@@ -107,7 +107,7 @@ Tout le reste (activer, nombre de participants, qualité) se règle dans l'app. 
 
 | Besoin | Commande |
 |---|---|
-| Mettre à jour | `cd /opt/alfred && git pull && docker compose -f deploy/docker-compose.yml up -d --build` |
+| Mettre à jour | `cd /opt/alfred && git pull && bash deploy/visio.sh` (Alfred et la visio ; coupe les appels en cours). Alfred seul : `docker compose -f deploy/docker-compose.yml up -d --build alfred` |
 | Voir les journaux | `docker logs alfred --tail 100` |
 | Sauvegarder la base et la clé | `docker cp alfred:/data ./alfred-data-$(date +%F)` |
 | Arrêter | `docker compose -f deploy/docker-compose.yml down` |

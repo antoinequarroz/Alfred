@@ -17,7 +17,15 @@ import './video.css';
 const BASE = '/api/public/video/rooms';
 const NAME_KEY = 'alfred:video-name';
 
-const slug = decodeURIComponent(location.pathname.replace(/^\/v\//, '').replace(/\/+$/, ''));
+// Un lien abîmé (mal encodé) doit mener à « lien introuvable », pas à une page blanche.
+const slug = (() => {
+  const raw = location.pathname.replace(/^\/v\//, '').replace(/\/+$/, '');
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return '-';
+  }
+})();
 
 function errorText(err: unknown): string {
   if (err instanceof ApiError) {
@@ -26,10 +34,19 @@ function errorText(err: unknown): string {
     if (err.status >= 500 && !err.code) return 'Une erreur est survenue. Réessayez dans un instant.';
     return err.message;
   }
-  if (err instanceof Error && /permission|notallowed/i.test(`${err.name} ${err.message}`)) {
-    return 'L’accès à la caméra ou au micro a été refusé. Autorisez-le dans les réglages du navigateur, puis réessayez.';
-  }
+  const media = mediaErrorText(err);
+  if (media) return media;
   return 'La connexion à la visio a échoué. Vérifiez votre réseau, puis réessayez.';
+}
+
+/** Erreur d'accès à la caméra ou au micro, dite simplement ; null si ce n'en est pas une. */
+function mediaErrorText(err: unknown): string | null {
+  if (!(err instanceof Error)) return null;
+  const kind = `${err.name} ${err.message}`;
+  if (/permission|notallowed|security/i.test(kind)) return 'L’accès à la caméra ou au micro a été refusé. Autorisez-le dans les réglages du navigateur, puis réessayez.';
+  if (/notfound|devicesnotfound|overconstrained/i.test(kind)) return 'Aucune caméra ou aucun micro détecté. Vous pouvez tout de même rejoindre la visio.';
+  if (/notreadable|trackstart|abort/i.test(kind)) return 'La caméra ou le micro est déjà utilisé par une autre application. Vous pouvez tout de même rejoindre la visio.';
+  return null;
 }
 
 function initials(name: string): string {
@@ -117,7 +134,7 @@ function AudioView({ track }: { track: Track }) {
   return <audio ref={ref} autoPlay />;
 }
 
-function Tile({ participant, local, speaking, hostName }: { participant: Participant; local: boolean; speaking: boolean; hostName: string }) {
+function Tile({ participant, local, speaking, hostName, mirror }: { participant: Participant; local: boolean; speaking: boolean; hostName: string; mirror?: boolean }) {
   const cam = participant.getTrackPublication(Track.Source.Camera);
   const mic = participant.getTrackPublication(Track.Source.Microphone);
   const video = cam && !cam.isMuted && cam.track ? cam.track : null;
@@ -125,10 +142,10 @@ function Tile({ participant, local, speaking, hostName }: { participant: Partici
   const muted = !mic || mic.isMuted;
   return (
     <div className={`vc-tile${speaking ? ' speaking' : ''}`}>
-      {video ? <VideoView track={video} mirror={local} /> : <span className="vc-avatar" aria-hidden="true">{initials(name)}</span>}
+      {video ? <VideoView track={video} mirror={local && mirror !== false} /> : <span className="vc-avatar" aria-hidden="true">{initials(name)}</span>}
       <span className="vc-label">
         {muted && <MicOffIcon />}
-        <span>{local ? `${name} (vous)` : name}</span>
+        <span>{local ? `${name} (vous)` : isHostParticipant(participant) ? `${name} · hôte` : name}</span>
       </span>
     </div>
   );
@@ -175,7 +192,7 @@ function Lobby({ room, onJoin, busy, error }: { room: PublicVideoRoom; onJoin: (
     }, (err: unknown) => {
       if (!cancelled) {
         setCamera(false);
-        setMediaError(errorText(err));
+        setMediaError(mediaErrorText(err) ?? 'La caméra ou le micro n’a pas pu être ouvert. Vous pouvez tout de même rejoindre la visio.');
       }
     });
     return () => {
@@ -196,7 +213,7 @@ function Lobby({ room, onJoin, busy, error }: { room: PublicVideoRoom; onJoin: (
     }, (err: unknown) => {
       if (!cancelled) {
         setMicrophone(false);
-        setMediaError(errorText(err));
+        setMediaError(mediaErrorText(err) ?? 'La caméra ou le micro n’a pas pu être ouvert. Vous pouvez tout de même rejoindre la visio.');
       }
     });
     return () => {
@@ -342,6 +359,8 @@ function Call({ room, info, publicRoom, onLeave }: { room: Room; info: VideoJoin
   const [toast, setToast] = useState<string | null>(null);
   const [canPlayAudio, setCanPlayAudio] = useState(room.canPlaybackAudio);
   const [confirmEnd, setConfirmEnd] = useState(false);
+  // Caméra demandée en dernier : certains navigateurs ne disent pas laquelle est active.
+  const [facing, setFacing] = useState<'user' | 'environment'>('user');
   const chatId = useRef(0);
   const chatOpenRef = useRef(chatOpen);
   chatOpenRef.current = chatOpen;
@@ -361,7 +380,7 @@ function Call({ room, info, publicRoom, onLeave }: { room: Room; info: VideoJoin
         const msg = JSON.parse(new TextDecoder().decode(payload)) as { text?: unknown };
         if (typeof msg.text !== 'string' || !msg.text.trim()) return;
         const text = msg.text.slice(0, 2000);
-        setChat((c) => [...c.slice(-199), { id: ++chatId.current, from: participant.name || 'Invité', text, mine: false }]);
+        setChat((c) => [...c.slice(-199), { id: ++chatId.current, from: `${participant.name || 'Invité'}${isHostParticipant(participant) ? ' · hôte' : ''}`, text, mine: false }]);
         if (!chatOpenRef.current) setUnread((n) => n + 1);
       } catch {
         // message illisible : ignoré
@@ -374,6 +393,8 @@ function Call({ room, info, publicRoom, onLeave }: { room: Room; info: VideoJoin
       else if (reason === DisconnectReason.CLIENT_INITIATED) onLeave('left');
       else onLeave('lost');
     };
+    // La salle a pu se fermer entre la connexion et l'affichage (réunion terminée, autre onglet).
+    if (room.state === ConnectionState.Disconnected) onLeave('lost');
     room.on(RoomEvent.ActiveSpeakersChanged, onSpeakers);
     room.on(RoomEvent.AudioPlaybackStatusChanged, onAudio);
     room.on(RoomEvent.DataReceived, onData);
@@ -432,8 +453,9 @@ function Call({ room, info, publicRoom, onLeave }: { room: Room; info: VideoJoin
     const pub = local.getTrackPublication(Track.Source.Camera);
     const track = pub?.track as LocalVideoTrack | undefined;
     if (!track) return;
-    const facing = track.mediaStreamTrack.getSettings().facingMode === 'environment' ? 'user' : 'environment';
-    await track.restartTrack({ facingMode: facing });
+    const next = facing === 'environment' ? 'user' : 'environment';
+    await track.restartTrack({ facingMode: next });
+    setFacing(next);
   });
 
   const copyLink = async () => {
@@ -473,7 +495,7 @@ function Call({ room, info, publicRoom, onLeave }: { room: Room; info: VideoJoin
         <div className="vc-stage-wrap">
           {reconnecting && <p className="vc-banner" role="status">Connexion perdue, reconnexion en cours…</p>}
           {!canPlayAudio && (
-            <button className="vc-banner action" onClick={() => void room.startAudio().then(() => setCanPlayAudio(true))}>
+            <button className="vc-banner action" onClick={() => void room.startAudio().then(() => setCanPlayAudio(true), () => setToast('Le son n’a pas pu être activé. Touchez à nouveau.'))}>
               Le navigateur a bloqué le son : touchez ici pour l’activer
             </button>
           )}
@@ -484,12 +506,12 @@ function Call({ room, info, publicRoom, onLeave }: { room: Room; info: VideoJoin
                 <span className="vc-label"><ScreenIcon /><span>Écran de {screen.who === local ? 'vous' : screen.who.name || 'Invité'}</span></span>
               </div>
               <div className="vc-strip">
-                {everyone.map((p) => <Tile key={p.identity} participant={p} local={p === local} speaking={speakers.has(p.identity)} hostName={publicRoom.hostName} />)}
+                {everyone.map((p) => <Tile key={p.identity} participant={p} local={p === local} speaking={speakers.has(p.identity)} hostName={publicRoom.hostName} mirror={facing === 'user'} />)}
               </div>
             </div>
           ) : (
             <div className={`vc-grid n${Math.min(everyone.length, 9)}`}>
-              {everyone.map((p) => <Tile key={p.identity} participant={p} local={p === local} speaking={speakers.has(p.identity)} hostName={publicRoom.hostName} />)}
+              {everyone.map((p) => <Tile key={p.identity} participant={p} local={p === local} speaking={speakers.has(p.identity)} hostName={publicRoom.hostName} mirror={facing === 'user'} />)}
             </div>
           )}
           {alone && !screen && (
@@ -637,12 +659,26 @@ export function VideoApp() {
         },
         audioCaptureDefaults: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
+      // Une déconnexion pendant l'ouverture de la caméra et du micro (réunion terminée, autre onglet,
+      // coupure) ne doit pas se perdre : l'écran d'appel n'écoute qu'une fois affiché.
+      let early: DisconnectReason | 'none' | undefined;
+      const onEarly = (reason?: DisconnectReason) => { early = reason ?? 'none'; };
+      room.on(RoomEvent.Disconnected, onEarly);
       await room.connect(info.url, info.token);
       roomRef.current = room;
       // Caméra et micro : un refus n'empêche pas d'entrer (on peut écouter et parler par messages).
       const problems: string[] = [];
       if (prefs.microphone) await room.localParticipant.setMicrophoneEnabled(true, { deviceId: prefs.microphoneId }).catch(() => problems.push('micro'));
       if (prefs.camera) await room.localParticipant.setCameraEnabled(true, { deviceId: prefs.cameraId }).catch(() => problems.push('caméra'));
+      room.off(RoomEvent.Disconnected, onEarly);
+      if (early !== undefined || room.state === ConnectionState.Disconnected) {
+        roomRef.current = null;
+        setPhase({
+          kind: 'left',
+          reason: early === DisconnectReason.ROOM_DELETED || early === DisconnectReason.PARTICIPANT_REMOVED ? 'ended' : early === DisconnectReason.DUPLICATE_IDENTITY ? 'replaced' : 'lost',
+        });
+        return;
+      }
       setPhase({ kind: 'call', room, info });
       if (problems.length > 0) setJoinError(`Impossible d’ouvrir : ${problems.join(' et ')}.`);
     } catch (err) {

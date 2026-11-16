@@ -156,7 +156,10 @@ else
 fi
 
 # Clés du serveur de visio : créées si elles manquent, sans question.
-if [[ -f deploy/visio.sh ]]; then bash deploy/visio.sh --env-only; fi
+# Un échec ici (adresse publique introuvable) ne doit pas empêcher Alfred de démarrer.
+if [[ -f deploy/visio.sh ]]; then
+  bash deploy/visio.sh --env-only || echo "Visio non préparée : relance ensuite « ALFRED_PUBLIC_IP=<adresse IPv4 du VPS> bash deploy/visio.sh »."
+fi
 
 docker compose -f deploy/docker-compose.yml up -d --build
 echo -n "Démarrage"

@@ -30,7 +30,11 @@ services:
     restart: unless-stopped
     command: --config /etc/livekit.yaml
     # LIVEKIT_KEYS et NODE_IP, écrits par deploy/visio.sh (pas le .env d'Alfred : ses secrets ne regardent pas LiveKit).
-    env_file: ../.env.livekit
+    # Facultatif pour que « docker compose up » d'Alfred ne soit jamais bloqué : sans ce fichier, seul
+    # ce conteneur ne démarre pas (pas de clés), Alfred tourne et annonce la visio comme non installée.
+    env_file:
+      - path: ../.env.livekit
+        required: false
     volumes:
       - ./livekit.yaml:/etc/livekit.yaml:ro
     ports:

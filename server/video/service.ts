@@ -68,8 +68,13 @@ interface RoomRow {
 const GRACE_MS = 6 * 3_600_000;
 /** Une réunion instantanée est prévue pour 12 heures. */
 const INSTANT_MS = 12 * 3_600_000;
-/** Validité d'un jeton d'entrée : le temps de se connecter, puis le serveur de visio le renouvelle lui-même. */
-const TOKEN_TTL_SEC = 6 * 3600;
+/**
+ * Validité d'un jeton d'entrée : le temps de se connecter, pas plus. Une fois connecté, le serveur
+ * de visio renouvelle lui-même le jeton ; un jeton copié ne sert donc plus à rien deux minutes après.
+ */
+const TOKEN_TTL_SEC = 120;
+/** Un jeton d'invité délivré compte comme une place prise pendant ce délai, le temps que l'invité se connecte. */
+const PENDING_MS = 60_000;
 /** Une salle vide est fermée côté serveur de visio après 5 minutes (elle se recrée à la prochaine entrée). */
 const EMPTY_TIMEOUT_SEC = 300;
 const DEFAULTS: VideoSettings = { enabled: true, maxParticipants: 4, quality: 'standard' };
@@ -118,6 +123,8 @@ export class VideoService {
   private readonly bookingLink: (bookingId: string) => BookingLink | null;
   private readonly now: () => Date;
   private healthCache: { at: number; ok: boolean } | null = null;
+  /** Jetons d'invités délivrés depuis peu, par salle : identité → échéance (ms). Ferme la course entre deux entrées simultanées. */
+  private readonly pending = new Map<string, Map<string, number>>();
 
   constructor(opts: VideoOptions) {
     this.db = opts.db;
@@ -239,11 +246,18 @@ export class VideoService {
     return { start: row.starts_at, end: row.ends_at, cancelled: false };
   }
 
+  /** Passée : fin prévue dépassée de plus de GRACE_MS. */
+  private isPast(end: string | null): boolean {
+    return Boolean(end && this.now().getTime() > Date.parse(end) + GRACE_MS);
+  }
+
   private status(row: RoomRow): VideoRoomStatus {
     if (!this.available) return 'unavailable';
     const s = this.schedule(row);
     if (row.closed_at || s.cancelled) return 'closed';
-    if (s.end && this.now().getTime() > Date.parse(s.end) + GRACE_MS) return 'ended';
+    // La visio d'un événement ne se périme pas : l'événement peut être déplacé ou se répéter, et son
+    // lien, écrit dans l'agenda, doit continuer d'ouvrir la salle. Elle sort seulement de la liste.
+    if (row.kind !== 'event' && this.isPast(s.end)) return 'ended';
     return 'open';
   }
 
@@ -292,15 +306,22 @@ export class VideoService {
     const settings = this.getSettings();
     const server = await this.serverStatus();
     const live = server.reachable ? await this.liveCounts() : null;
+    const personal = (this.db.prepare("SELECT * FROM video_rooms WHERE kind = 'permanent' AND closed_at IS NULL").get() as RoomRow | undefined) ?? null;
+    // Les horaires des réservations sont d'abord rapprochés de l'agenda (un rendez-vous a pu être déplacé).
+    this.bookingLink('');
+    // Les salles passées sont écartées en SQL, avant la limite : elles ne sont jamais purgées.
+    const cutoff = new Date(this.now().getTime() - GRACE_MS).toISOString();
     const rows = this.db.prepare(
-      "SELECT * FROM video_rooms WHERE closed_at IS NULL ORDER BY COALESCE(starts_at, created_at) LIMIT 500",
-    ).all() as unknown as RoomRow[];
-    const personal = rows.find((r) => r.kind === 'permanent') ?? null;
+      `SELECT r.* FROM video_rooms r LEFT JOIN bookings b ON b.id = r.booking_id
+       WHERE r.closed_at IS NULL AND r.kind != 'permanent'
+         AND COALESCE(b.status, 'confirmed') = 'confirmed'
+         AND COALESCE(b.end_utc, r.ends_at) > ?
+       ORDER BY COALESCE(b.start_utc, r.starts_at, r.created_at) LIMIT 500`,
+    ).all(cutoff) as unknown as RoomRow[];
     const rooms = rows
-      .filter((r) => r.kind !== 'permanent')
       .filter((r) => {
         const s = this.schedule(r);
-        return !s.cancelled && !(s.end && this.now().getTime() > Date.parse(s.end) + GRACE_MS);
+        return !s.cancelled && !this.isPast(s.end);
       })
       .map((r) => this.toRoom(r, live))
       .sort((a, b) => (a.startsAt ?? a.createdAt).localeCompare(b.startsAt ?? b.createdAt))
@@ -403,6 +424,8 @@ export class VideoService {
 
   /** Lien de la salle d'une réservation, s'il y en a une ouverte. */
   urlForBooking(bookingId: string): string | null {
+    // Visio désactivée ou désinstallée après coup : pas de bouton qui mène à une salle indisponible.
+    if (!this.available) return null;
     const row = this.db.prepare('SELECT slug FROM video_rooms WHERE booking_id = ? AND closed_at IS NULL').get(bookingId) as { slug: string } | undefined;
     return row ? this.roomUrl(row.slug) : null;
   }
@@ -446,26 +469,44 @@ export class VideoService {
     } else {
       const n = cleanGuestName(b.name);
       if (!n) throw new VideoError(400, 'invalid', 'Indiquez votre nom (50 caractères au plus)', { name: 'Indiquez votre nom (50 caractères au plus)' });
+      // Un invité ne peut pas se présenter sous le nom de l'hôte (les messages n'affichent que le nom).
+      const fold = (v: string) => v.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
+      const host = fold(this.hostName());
+      if (host && fold(n) === host) {
+        throw new VideoError(400, 'invalid', 'Ce nom est celui de votre hôte : indiquez le vôtre.', { name: 'Ce nom est celui de votre hôte : indiquez le vôtre.' });
+      }
       name = n;
     }
     const settings = this.getSettings();
     const backend = this.backend!;
     const room = this.livekitName(row);
+    // L'hôte garde la même identité : s'il rejoint depuis un autre appareil, l'ancienne connexion est remplacée.
+    const identity = isHost ? 'host' : `invite-${randomBytes(6).toString('hex')}`;
     try {
-      await backend.createRoom(room, settings.maxParticipants, EMPTY_TIMEOUT_SEC);
+      // Côté serveur de visio, la salle a le plafond dur : c'est Alfred qui applique le réglage (il peut
+      // changer en cours de réunion, et une salle existante n'est pas modifiée par CreateRoom).
+      await backend.createRoom(room, MAX_PARTICIPANTS, EMPTY_TIMEOUT_SEC);
       if (!isHost) {
-        // Une place reste toujours libre pour l'hôte.
-        const guests = (await backend.listParticipants(room)).filter((p) => p.identity !== 'host');
-        if (guests.length >= settings.maxParticipants - 1) {
+        // Une place reste toujours libre pour l'hôte : on compte les invités connectés et ceux qui
+        // viennent de recevoir un jeton sans être encore connectés (deux entrées simultanées, jetons accumulés).
+        const connected = new Set((await backend.listParticipants(room)).map((p) => p.identity).filter((id) => id !== 'host'));
+        const nowMs = this.now().getTime();
+        const waiting = this.pending.get(room) ?? new Map<string, number>();
+        for (const [id, until] of waiting) if (until <= nowMs || connected.has(id)) waiting.delete(id);
+        if (connected.size + waiting.size >= settings.maxParticipants - 1) {
           throw new VideoError(409, 'full', `Cette visio est complète (${settings.maxParticipants} participants au plus).`);
+        }
+        waiting.set(identity, nowMs + PENDING_MS);
+        this.pending.set(room, waiting);
+        // Mémoire bornée : les salles sans entrée récente sont oubliées.
+        if (this.pending.size > 200) {
+          for (const [name, map] of this.pending) if ([...map.values()].every((until) => until <= nowMs)) this.pending.delete(name);
         }
       }
     } catch (err) {
       if (err instanceof VideoError) throw err;
       throw new VideoError(503, 'server_unavailable', 'Le serveur de visio ne répond pas. Réessayez dans un instant.');
     }
-    // L'hôte garde la même identité : s'il rejoint depuis un autre appareil, l'ancienne connexion est remplacée.
-    const identity = isHost ? 'host' : `invite-${randomBytes(6).toString('hex')}`;
     const token = signAccessToken(this.server.apiKey!, this.server.apiSecret!, {
       identity,
       name,

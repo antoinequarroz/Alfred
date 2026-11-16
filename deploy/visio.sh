@@ -50,6 +50,9 @@ echo "Fichier .env.livekit écrit (adresse publique $ip)."
 [[ "${1:-}" == "--env-only" ]] && exit 0
 
 docker compose -f deploy/docker-compose.yml up -d --build
+# LiveKit ne lit sa configuration qu'au démarrage, et compose ne recrée pas le conteneur quand seul
+# livekit.yaml ou .env.livekit a changé : on le recrée (les appels en cours sont coupés).
+docker compose -f deploy/docker-compose.yml up -d --force-recreate livekit
 echo -n "Démarrage de la visio"
 for _ in $(seq 1 30); do
   if docker exec alfred wget -qO- http://alfred-livekit:7880/ >/dev/null 2>&1; then
