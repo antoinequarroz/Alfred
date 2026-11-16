@@ -42,9 +42,11 @@ docker logs alfred --tail 20                # « synchro CalDAV toutes les 120 s
 
 Plus besoin du Terminal pour ces deux réglages. Une valeur enregistrée dans l'app passe avant celle du `.env`, et l'app indique pour chaque réglage d'où il vient (app, fichier `.env`, valeur par défaut). Rien ne redémarre.
 
-- **E-mails de la prise de rendez-vous** : rubrique **Rendez-vous**, onglet **Réglages**, carte « E-mails » (le bandeau « L'envoi d'e-mails n'est pas configuré » y mène). Saisir l'identifiant (l'adresse complète de la boîte, par exemple `info@antoinequarroz.ch`) et le mot de passe (celui de la boîte, ou un mot de passe d'application Infomaniak si la double authentification est active), puis **Enregistrer et tester** : un e-mail d'essai part à l'adresse des avis, et le résultat s'affiche en clair (identifiants refusés, hôte introuvable, délai dépassé…). Le serveur (`mail.infomaniak.com`), le port (`587`) et l'expéditeur ont de bonnes valeurs par défaut.
+**Conséquence à retenir :** dès qu'un mot de passe (iCloud ou boîte d'envoi) a été enregistré dans l'app, c'est là qu'il se change ensuite. Relancer `configurer.sh` ou modifier le `.env` ne le remplace pas : la valeur de l'app masque celle du `.env`. Le script le rappelle, et Alfred l'écrit dans ses journaux au démarrage (« … du fichier .env sont ignorés »).
+
+- **E-mails de la prise de rendez-vous** : rubrique **Rendez-vous**, onglet **Réglages**, carte « E-mails » (le bandeau « L'envoi d'e-mails n'est pas configuré » y mène). Saisir l'identifiant (l'adresse complète de la boîte, par exemple `info@antoinequarroz.ch`) et le mot de passe (celui de la boîte, ou un mot de passe d'application Infomaniak si la double authentification est active), puis **Enregistrer et tester** : un e-mail d'essai part à l'adresse des avis, et le résultat s'affiche en clair (identifiants refusés, hôte introuvable, délai dépassé…). Le serveur (`mail.infomaniak.com`), le port (`587`) et l'expéditeur ont de bonnes valeurs par défaut. Si tu changes le serveur ou le port, le mot de passe est à ressaisir en même temps : celui qui est enregistré n'est jamais envoyé à un autre serveur. Si l'essai échoue, l'en-tête de la rubrique Rendez-vous le rappelle tant qu'un essai n'a pas réussi.
 - **Mot de passe d'application iCloud** : **Réglages** dans la barre latérale, carte « Calendrier iCloud ». Créer un nouveau mot de passe sur [account.apple.com](https://account.apple.com) > Connexion et sécurité > Mots de passe pour les apps, le coller, puis **Tester et enregistrer**. Alfred essaie la connexion avant d'enregistrer : si l'essai échoue, rien ne change et la synchro continue avec l'ancien. On y voit aussi l'état de la synchro, le nombre de calendriers et d'événements, et un bouton « Synchroniser ».
-- **Ce qui reste hors de l'app** : changer de compte iCloud (un autre identifiant Apple), le mot de passe d'Alfred, l'adresse publique. « Revenir au fichier .env » retire les réglages de l'app.
+- **Ce qui reste hors de l'app** : changer de compte iCloud (un autre identifiant Apple), le mot de passe d'Alfred, l'adresse publique. « Revenir au fichier .env » retire les réglages de l'app ; pour les e-mails, quand le `.env` ne contient pas d'identifiants d'envoi (cas d'une installation réglée dans l'app), le bouton s'appelle « Supprimer la configuration d'envoi » : plus aucun e-mail ne part ensuite.
 
 Les mots de passe saisis dans l'app sont chiffrés dans la base et ne sont plus jamais affichés. La clé de chiffrement est le fichier `secret.key` du volume de données (ou la variable facultative `ALFRED_SECRET_KEY`, voir `.env.example`) ; les limites de cette protection sont décrites dans [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -107,12 +109,25 @@ La commande du tableau copie tout le dossier `/data` : la base et ses fichiers `
 0 3 * * 1  docker cp alfred:/data /opt/sauvegardes/alfred-data-$(date +\%F)
 ```
 
-Pour restaurer : arrêter Alfred, recopier ce dossier dans le volume (`docker cp ./alfred-data-AAAA-MM-JJ/. alfred:/data/`), redémarrer.
+Pour restaurer, depuis `/opt/alfred` :
+
+```bash
+docker compose -f deploy/docker-compose.yml stop
+docker cp ./alfred-data-AAAA-MM-JJ/. alfred:/data/
+# docker cp crée les fichiers au nom de root, alors qu'Alfred tourne sous l'utilisateur « node » :
+# sans cette étape, la base ne peut plus être modifiée et le fichier de clé (mode 600) ne peut plus être lu.
+docker run --rm --volumes-from alfred -u 0 --entrypoint sh alfred:latest -c 'chown -R node:node /data && chmod 700 /data && { [ ! -f /data/secret.key ] || chmod 600 /data/secret.key; }'
+docker compose -f deploy/docker-compose.yml start
+```
+
+Puis ouvrir Réglages : aucun message « à ressaisir » ne doit apparaître, et la synchro doit repartir. Cette procédure est à répéter une fois à blanc sur le VPS avant d'en avoir besoin (elle n'a pas pu être jouée dans l'environnement de développement, qui n'a pas Docker).
 
 ## Dépannage
 
 - **« Synchro iCloud en échec »** dans la barre latérale : le diagnostic est affiché dessous, avec un lien vers Réglages. Le plus souvent, « Identifiants refusés » : le mot de passe d'application a été révoqué ou mal recopié ; en créer un nouveau chez Apple et le coller dans Réglages > Calendrier iCloud.
-- **« Mot de passe à ressaisir »** dans Réglages : la base a été restaurée sans son fichier `secret.key` (ou `ALFRED_SECRET_KEY` a changé). Ressaisir le mot de passe concerné suffit.
+- **« Mot de passe à ressaisir »** dans Réglages : la base a été restaurée sans son fichier `secret.key` (ou `ALFRED_SECRET_KEY` a changé). Ressaisir le mot de passe concerné suffit. Variante « le serveur a changé » : le serveur d'envoi ou son port n'est plus celui pour lequel le mot de passe avait été saisi ; le ressaisir suffit aussi.
+- **« Alfred n'a pas le droit de lire le fichier de clé »**, ou « Impossible de chiffrer le mot de passe » : les fichiers du volume appartiennent à root, typiquement après une restauration par `docker cp` sans l'étape `chown`. Jouer la ligne `docker run … chown …` de la section Sauvegarde, puis `docker restart alfred`.
+- **Le nouveau mot de passe saisi dans `configurer.sh` n'a aucun effet** : un mot de passe enregistré dans l'app passe avant le `.env`. Le changer dans l'app (Réglages pour iCloud, Rendez-vous > Réglages pour les e-mails).
 - **Un serveur refusé comme « adresse interne ou privée »** : c'est voulu, Alfred ne se connecte pas au réseau interne du VPS pour un serveur saisi dans l'app. Un serveur interne légitime se déclare dans le `.env`.
 - **Connexion refusée en boucle** : vérifier que `ALFRED_PASSWORD_HASH` commence par `scrypt:` et tient sur une seule ligne dans le `.env`.
 - **Trop d'essais** : le blocage se lève après 15 minutes, ou tout de suite avec `docker restart alfred`.

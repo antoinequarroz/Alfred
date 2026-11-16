@@ -359,9 +359,9 @@ Erreurs : `400 mail_not_configured`, `404 not_found`, `409 already_cancelled`.
 
 ### E-mails
 
-#### `POST /api/booking/mail/test`
+L'e-mail d'essai part par `POST /api/connections/smtp/test` (voir plus bas), seule route d'essai : l'ancienne `POST /api/booking/mail/test` a été retirée, parce qu'elle envoyait le même message sans limite de débit.
 
-Envoie un message d'essai à l'adresse d'avis (`mail.notifyTo`). Réponse : `{ "ok": true, "to": "info@antoinequarroz.ch" }`. Erreurs : `400 mail_not_configured`, `502 mail_failed` (`error` porte un diagnostic en français écrit par Alfred, jamais la réponse brute du serveur SMTP). L'interface utilise désormais `POST /api/connections/smtp/test`, qui renvoie le même diagnostic avec un code.
+`GET /api/booking/settings` ajoute à `warnings`, quand l'envoi est configuré mais que le dernier essai a échoué, une phrase qui commence par « Le dernier essai d’envoi d’e-mails a échoué » et se termine par le diagnostic.
 
 ## Connexions (e-mails et calendrier)
 
@@ -370,10 +370,11 @@ Session requise, comme toute l'API privée. Ces routes règlent depuis l'app ce 
 Règles communes :
 
 - **Priorité, réglage par réglage** : valeur enregistrée dans l'app, sinon variable du `.env`, sinon valeur par défaut (`mail.infomaniak.com`, port `587`, `https://caldav.icloud.com`). Chaque réglage renvoyé porte sa `source` : `app`, `env`, `default` ou `none`.
-- **Aucun mot de passe ne ressort**, même en partie : l'état dit seulement `{ "configured": true, "source": "app", "unreadable": false }`. Ils n'apparaissent ni dans les erreurs (les messages de validation ne répètent jamais la saisie), ni dans les journaux. `unreadable: true` : le mot de passe est en base mais ne se déchiffre plus (clé absente ou différente) ; il compte comme non configuré et doit être ressaisi.
+- **Aucun mot de passe ne ressort**, même en partie : l'état dit seulement `{ "configured": true, "source": "app", "unreadable": false }`. Ils n'apparaissent ni dans les erreurs (les messages de validation ne répètent jamais la saisie), ni dans les journaux. `unreadable: true` : le mot de passe est en base mais ne se déchiffre plus (clé absente ou différente) ; il compte comme non configuré et doit être ressaisi. `otherServer: true` : un mot de passe existe, mais pour un autre serveur que celui réglé maintenant ; il n'est pas utilisé et doit être ressaisi.
+- **Un mot de passe ne part que vers le serveur pour lequel il a été saisi.** Changer l'hôte ou le port SMTP sans fournir `password` dans la même requête est refusé ; le mot de passe du `.env` ne sert jamais avec un hôte ou un port saisi dans l'app ; un essai CalDAV avec un autre identifiant ou une autre adresse exige `password`.
 - **Corps** : JSON, 8 Ko au plus (`413` au-delà) ; un `PUT` sans `Content-Type: application/json` reçoit `415`. Toute écriture venue d'un autre site reçoit `403 forbidden`. Réponses en `Cache-Control: no-store`.
 - **Hôtes** : un serveur saisi dans l'app doit être un nom de domaine complet ou une adresse IP publique. Les adresses de bouclage, lien-local, privées ou réservées, et les noms qui y résolvent, sont refusés (`400 invalid`, champ `host` ou `url`), sauf si le serveur tourne avec `ALFRED_ALLOW_PRIVATE_HOSTS=1` (développement). Le contrôle est refait à chaque connexion.
-- **Débit** : 10 essais de connexion par 10 minutes, toutes routes d'essai confondues (`429 rate_limited`, en-tête `Retry-After`) ; 60 enregistrements par 10 minutes.
+- **Débit** : 10 essais de connexion par 10 minutes, toutes routes d'essai confondues (il n'existe pas d'autre route d'essai d'envoi) (`429 rate_limited`, en-tête `Retry-After`) ; 60 enregistrements par 10 minutes.
 
 ### `GET /api/connections`
 
@@ -384,17 +385,18 @@ Règles communes :
     "host": { "value": "mail.infomaniak.com", "source": "default" },
     "port": { "value": "587", "source": "default" },
     "user": { "value": "info@antoinequarroz.ch", "source": "app" },
-    "password": { "configured": true, "source": "app", "unreadable": false },
+    "password": { "configured": true, "source": "app", "unreadable": false, "otherServer": false },
     "from": { "value": "Antoine Quarroz <info@antoinequarroz.ch>", "source": "env" },
     "notifyTo": { "value": "info@antoinequarroz.ch", "source": "default" },
     "hasAppValues": true,
+    "envConfigured": false,
     "lastTest": { "ok": true, "code": "ok", "message": "E-mail d’essai envoyé à info@antoinequarroz.ch.", "at": "2026-11-16T15:00:00.000Z" }
   },
   "caldav": {
     "configured": true,
     "url": { "value": "https://caldav.icloud.com", "source": "env" },
     "username": { "value": "antoine@example.org", "source": "env" },
-    "password": { "configured": true, "source": "env", "unreadable": false },
+    "password": { "configured": true, "source": "env", "unreadable": false, "otherServer": false },
     "hasAppValues": false,
     "accountLocked": true,
     "canRevertToEnv": false,
@@ -408,8 +410,9 @@ Règles communes :
 }
 ```
 
-- `smtp.configured` : un identifiant et un mot de passe sont en place. `lastTest` : dernier essai depuis le démarrage (en mémoire).
-- `caldav.accountLocked` : un compte est en place (configuré, mot de passe à ressaisir, ou calendriers en base) ; seul son mot de passe peut changer. `canRevertToEnv` : le `.env` porte des identifiants pour ce même compte.
+- `smtp.configured` : un identifiant et un mot de passe utilisables sont en place. `smtp.lastTest` : dernier essai d'envoi, gardé en base (il survit au redémarrage) et oublié à chaque modification des réglages. `smtp.envConfigured` : le `.env` porte un identifiant et un mot de passe d'envoi ; sinon, retirer les réglages de l'app coupe l'envoi (l'interface libelle alors le bouton « Supprimer la configuration d'envoi »).
+- `caldav.accountLocked` : un compte est en place (identifiant connu, et configuré, mot de passe à ressaisir, ou calendriers en base) ; seul son mot de passe peut changer. `canRevertToEnv` : le `.env` porte des identifiants pour ce même compte. `caldav.lastTest` : dernier essai de la configuration en place depuis le démarrage ; l'essai d'identifiants candidats, refusés ou seulement testés, n'y est jamais gardé (il n'est renvoyé que dans la réponse de la requête).
+- `caldav.calendars > 0` sans `accountLocked` : des calendriers sont en base mais aucun identifiant n'est connu ; seul le compte qui retrouve au moins un de ces calendriers peut être relié (`409 account_change` sinon).
 - `secretKey.source` : `env` (variable `ALFRED_SECRET_KEY`), `file` (fichier `secret.key` du dossier de données), `none` (pas encore créée, ou inutilisable : voir `problem`).
 - `notices` : phrases prêtes à afficher en tête (mot de passe à ressaisir, clé invalide).
 
@@ -421,7 +424,7 @@ Corps (`SmtpSettingsInput`), tous les champs facultatifs ; un champ absent ne bo
 { "host": "mail.infomaniak.com", "port": 587, "user": "info@antoinequarroz.ch", "password": "…", "from": "Antoine Quarroz <info@antoinequarroz.ch>", "notifyTo": "", "test": true }
 ```
 
-- `password` vide ou absent : le mot de passe actuel est gardé.
+- `password` vide ou absent : le mot de passe actuel est gardé, **sauf si l'hôte ou le port change** : la requête est alors refusée (`400 invalid`, `fields.password` : « Ressaisis le mot de passe : le serveur ou le port change »). Le mot de passe enregistré est lié à son serveur.
 - Un champ vide, ou égal à la valeur du `.env` ou par défaut, retire le réglage de l'app (sa source redevient `env` ou `default`).
 - Validation : `host` (nom de domaine ou IP publique, 253 caractères), `port` (entier de 1 à 65535), `user` (254), `password` (1024), `from` (« Nom <adresse> » ou adresse seule, adresse valide, nom de 100 caractères au plus), `notifyTo` (adresse valide). Aucun retour à la ligne ni caractère de contrôle, nulle part. Les espaces en début et fin sont retirés, mot de passe compris. Une erreur ne modifie rien, même pas les autres champs de la requête.
 - `test: true` : un e-mail d'essai part juste après l'enregistrement (« Enregistrer et tester »). Enregistrer un mot de passe erroné est possible : la réponse le signale.
@@ -434,7 +437,7 @@ Envoie l'e-mail d'essai à l'adresse des avis avec la configuration enregistrée
 
 ### `DELETE /api/connections/smtp` et `DELETE /api/connections/smtp/:field`
 
-Retire de l'app tous les réglages SMTP, ou un seul (`host`, `port`, `user`, `password`, `from`, `notifyTo`) : le `.env` ou la valeur par défaut reprend la main. Réponse : `{ "state": { … }, "test": null }`.
+Retire de l'app tous les réglages SMTP, ou un seul (`host`, `port`, `user`, `password`, `from`, `notifyTo`) : le `.env` ou la valeur par défaut reprend la main. Réponse : `{ "state": { … }, "test": null }`. Si le serveur change de ce fait (hôte ou port retiré alors que le mot de passe est dans l'app, mot de passe retiré alors que l'hôte est dans l'app), le mot de passe restant n'est pas utilisé : `password.otherServer` passe à vrai et `configured` à faux.
 
 ### `PUT /api/connections/caldav`
 
@@ -444,13 +447,13 @@ Déroulement : validation, **essai de connexion** (découverte du principal et l
 
 - `200` (`CaldavSaveResult`) : `{ "state": { … }, "test": { "ok": true, "code": "ok", "message": "Connexion réussie : 2 calendriers trouvés.", "at": "…" }, "warning": null }`. `warning` : remarque non bloquante quand le serveur est iCloud et que le mot de passe n'a pas la forme d'un mot de passe d'application Apple (16 lettres minuscules, avec ou sans tirets).
 - `400 invalid` : saisie invalide (`fields.username`, `fields.password`, `fields.url`).
-- `409 account_change` : un compte est déjà en place et l'identifiant ou le serveur diffère. En v1, seul le mot de passe du même identifiant peut changer (les calendriers et événements du compte sont en base, des réservations y sont liées) ; la première configuration, quand rien n'est en place, accepte n'importe quel compte.
+- `409 account_change` : un compte est déjà en place et l'identifiant ou le serveur diffère ; ou bien des calendriers sont en base sans identifiant connu et le compte essayé n'en retrouve aucun. En v1, seul le mot de passe du même identifiant peut changer (les calendriers et événements du compte sont en base, des réservations y sont liées) ; la première configuration, quand rien n'est en place, accepte n'importe quel compte.
 - `422 connection_failed` : l'essai a échoué ; `error` porte le diagnostic, `reason` son code (`auth`, `host_not_found`, `host_refused`, `connection_refused`, `connection_failed`, `timeout`, `tls`, `forbidden`, `not_caldav`, `temporary`, `unknown`).
 - `429 busy` : un autre essai est en cours.
 
 ### `POST /api/connections/caldav/test`
 
-Essai sans rien enregistrer, avec les valeurs fournies complétées par la configuration du moment ; corps vide : essai de la configuration actuelle. Mêmes validations et mêmes refus que l'enregistrement. Réponse `200` : `{ "state": { … }, "test": { … }, "warning": null }` (un essai raté est un `200` avec `test.ok: false`).
+Essai sans rien enregistrer, avec les valeurs fournies complétées par la configuration du moment ; corps vide : essai de la configuration actuelle. Le mot de passe enregistré n'est repris que si l'identifiant et l'adresse sont ceux en place ; sinon `password` est obligatoire (`400 invalid`). Seul l'essai de la configuration en place est gardé dans `caldav.lastTest`. Mêmes validations et mêmes refus que l'enregistrement. Réponse `200` : `{ "state": { … }, "test": { … }, "warning": null }` (un essai raté est un `200` avec `test.ok: false`).
 
 ### `DELETE /api/connections/caldav`
 
@@ -479,7 +482,6 @@ Retire les identifiants de l'app pour revenir à ceux du `.env`. Refusé si le `
 | `unsupported` | 415 | Corps pas en JSON |
 | `rate_limited` | 429 | Limite de débit atteinte (`Retry-After`) |
 | `calendar_unavailable` | 502 / 503 | Calendrier injoignable ou aucun calendrier modifiable ; rien n'a été fait |
-| `mail_failed` | 502 | L'e-mail d'essai n'est pas parti |
 | `busy` | 503 | Trop de demandes simultanées |
 
 ## Comportement du moteur
