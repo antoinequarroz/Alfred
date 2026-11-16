@@ -13,7 +13,29 @@ fi
 
 echo "== Configuration d'Alfred =="
 read -rp "Identifiant Apple (e-mail iCloud) : " apple_id
-read -rsp "Mot de passe d'application iCloud (xxxx-xxxx-xxxx-xxxx) : " app_pw; echo
+echo "Le mot de passe d'application est généré par Apple (account.apple.com >"
+echo "Connexion et sécurité > Mots de passe pour les apps) : 16 lettres, abcd-efgh-ijkl-mnop."
+echo "Ce n'est ni ton mot de passe Apple habituel, ni celui d'Alfred."
+while :; do
+  read -rsp "Mot de passe d'application iCloud (colle-le ici) : " app_pw; echo
+  app_pw=${app_pw//[[:space:]]/}
+  if [[ ! "$app_pw" =~ ^[a-z]{4}-?[a-z]{4}-?[a-z]{4}-?[a-z]{4}$ ]]; then
+    echo "Ce n'est pas un mot de passe d'application (16 lettres minuscules attendues, reçu ${#app_pw} caractères). On recommence."
+    continue
+  fi
+  # Test de connexion à iCloud ; les identifiants passent par l'entrée standard, pas par la ligne de commande.
+  code=$(printf 'user = "%s:%s"\n' "$apple_id" "$app_pw" | curl -K - -s -o /dev/null -w '%{http_code}' \
+    -X PROPFIND -H 'Depth: 0' -H 'Content-Type: application/xml' \
+    --data '<propfind xmlns="DAV:"><prop><current-user-principal/></prop></propfind>' \
+    --max-time 20 https://caldav.icloud.com/ || true)
+  case "$code" in
+    207|200) echo "Connexion à iCloud : OK"; break ;;
+    401) echo "iCloud refuse cet identifiant ou ce mot de passe (401)."
+         read -rp "Identifiant Apple (Entrée pour garder $apple_id) : " again
+         [[ -n "$again" ]] && apple_id=$again ;;
+    *) echo "Impossible de tester la connexion à iCloud (réponse « $code »), je continue quand même."; break ;;
+  esac
+done
 while :; do
   read -rsp "Mot de passe pour te connecter à Alfred (10 caractères min.) : " pw1; echo
   read -rsp "Encore une fois : " pw2; echo
@@ -48,8 +70,13 @@ echo -n "Démarrage"
 for _ in $(seq 1 30); do
   if curl -fsS http://127.0.0.1:3200/healthz >/dev/null 2>&1; then
     echo " : OK"
+    sleep 8   # laisse le temps à la première synchro de démarrer
     docker logs alfred --tail 10
     echo
+    if docker logs alfred 2>&1 | grep -q 'synchro CalDAV en échec'; then
+      echo "Alfred tourne, mais la synchro iCloud échoue (voir ci-dessus)."
+      exit 1
+    fi
     echo "Alfred tourne. Ouvre https://alfred.antoinequarroz.ch"
     exit 0
   fi
