@@ -20,6 +20,8 @@ self.addEventListener('fetch', (event) => {
   if (request.method !== 'GET' || url.origin !== location.origin || url.pathname.startsWith('/api/')) return;
   if (url.pathname === '/rdv' || url.pathname.startsWith('/rdv/') || url.pathname.startsWith('/v/')) return;
 
+  // Moteur du flou d'arrière-plan (plusieurs Mo) : le cache du navigateur suffit.
+  if (url.pathname.startsWith('/assets/flou-')) return;
   if (url.pathname.startsWith('/assets/')) {
     // Fichiers versionnés : cache d'abord.
     event.respondWith(

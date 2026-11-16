@@ -102,14 +102,16 @@ export function createApp(deps: AppDeps): Hono {
   app.use('*', secureHeaders({
     contentSecurityPolicy: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'"],
+      // 'wasm-unsafe-eval' : le flou d'arrière-plan de la visio compile un module WebAssembly servi par Alfred.
+      scriptSrc: ["'self'", "'wasm-unsafe-eval'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", 'data:'],
       fontSrc: ["'self'", 'data:'],
       connectSrc: ["'self'", ...(videoOrigin ? [videoOrigin] : [])],
       mediaSrc: ["'self'", 'blob:'],
       manifestSrc: ["'self'"],
-      workerSrc: ["'self'"],
+      // blob: : le flou d'arrière-plan cadence ses images depuis un petit worker créé à la volée.
+      workerSrc: ["'self'", 'blob:'],
       frameAncestors: ["'none'"],
     },
   }));
