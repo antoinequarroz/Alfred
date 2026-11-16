@@ -52,12 +52,13 @@ function Source({ source }: { source: SettingSource }) {
 
 function secretLabel(s: ConnectionSecret): string {
   if (s.unreadable) return 'À ressaisir';
+  if (s.otherServer) return 'À ressaisir : le serveur a changé';
   if (!s.configured) return 'Non configuré';
   return s.source === 'app' ? 'Configuré dans l’app' : 'Configuré dans le fichier .env';
 }
 
 function SecretState({ secret }: { secret: ConnectionSecret }) {
-  const kind = secret.unreadable ? 'bad' : secret.configured ? 'ok' : 'off';
+  const kind = secret.unreadable || secret.otherServer ? 'bad' : secret.configured ? 'ok' : 'off';
   return (
     <span className={`secret-state ${kind}`}>
       {kind === 'ok' ? <LockIcon /> : <AlertIcon />}
@@ -98,7 +99,7 @@ function when(iso: string | null): string {
 
 // --- e-mails (SMTP) --------------------------------------------------------------
 
-interface SmtpDraft {
+export interface SmtpDraft {
   host: string;
   port: string;
   user: string;
@@ -113,19 +114,33 @@ const smtpDraft = (s: SmtpConnectionState): SmtpDraft => ({
   notifyTo: s.notifyTo.source === 'default' ? '' : s.notifyTo.value,
 });
 
+/** Vrai quand la saisie en cours diffère de ce qui est enregistré. */
+export function smtpDraftDirty(s: SmtpConnectionState, draft: SmtpDraft | null): boolean {
+  if (!draft) return false;
+  const base = smtpDraft(s);
+  return (Object.keys(base) as (keyof SmtpDraft)[]).some((k) => draft[k].trim() !== base[k]);
+}
+
 /**
  * Envoi des e-mails : état, formulaire SMTP, essai. Le mot de passe n'est jamais relu du
- * serveur : le champ est vide à chaque ouverture, et vide = « garder l'actuel ».
+ * serveur : le champ est vide à chaque ouverture, et vide = « garder l'actuel », sauf si le
+ * serveur ou le port change : il faut alors le ressaisir (il ne part jamais ailleurs).
  */
-export function SmtpCard({ state, onState, notify, children, id, autoFocus }: {
+export function SmtpCard({ state, onState, notify, children, id, autoFocus, onFocused, draft: outerDraft, setDraft: setOuterDraft }: {
   state: ConnectionsState; onState: (s: ConnectionsState) => void; notify: (msg: string) => void;
   /** Lignes d'information supplémentaires (envois sur 24 h, dernière erreur). */
   children?: React.ReactNode; id?: string;
-  /** Change de valeur pour amener le focus sur le premier champ à compléter. */
+  /** Change de valeur (non nulle) pour amener une fois le focus sur le premier champ à compléter. */
   autoFocus?: number;
+  /** Le focus demandé a été posé : la demande est consommée. */
+  onFocused?: () => void;
+  /** Saisie en cours gardée par le parent (elle survit ainsi au changement d'onglet) ; sinon elle reste locale. */
+  draft?: SmtpDraft | null; setDraft?: (d: SmtpDraft | null) => void;
 }) {
   const s = state.smtp;
-  const [draft, setDraft] = useState<SmtpDraft | null>(null);
+  const [localDraft, setLocalDraft] = useState<SmtpDraft | null>(null);
+  const draft = setOuterDraft ? (outerDraft ?? null) : localDraft;
+  const setDraft = setOuterDraft ?? setLocalDraft;
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<'save' | 'test' | 'clear' | null>(null);
   const [result, setResult] = useState<Pick<ConnectionTest, 'ok' | 'message'> | null>(null);
@@ -137,15 +152,24 @@ export function SmtpCard({ state, onState, notify, children, id, autoFocus }: {
   const set = (patch: Partial<SmtpDraft>) => setDraft({ ...d, ...patch });
   const changed = (Object.keys(base) as (keyof SmtpDraft)[]).filter((k) => d[k].trim() !== base[k]);
   const dirty = changed.length > 0;
+  /** Le serveur ou le port change : le mot de passe en place ne suit pas, il faut le ressaisir. */
+  const moved = changed.includes('host') || changed.includes('port');
+  const passwordNeeded = moved && s.password.configured && d.password.trim() === '';
 
   useEffect(() => {
     if (!autoFocus) return;
     const target = s.user.value ? passwordRef.current : userRef.current;
     target?.focus({ preventScroll: true });
     target?.closest('.bk-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    onFocused?.();
   }, [autoFocus]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const submit = async (test: boolean) => {
+    if (passwordNeeded) {
+      setErrors({ password: 'Ressaisis le mot de passe : le serveur ou le port change.' });
+      passwordRef.current?.focus();
+      return;
+    }
     setBusy(test ? 'test' : 'save');
     setErrors({});
     setResult(null);
@@ -175,7 +199,7 @@ export function SmtpCard({ state, onState, notify, children, id, autoFocus }: {
       setDraft(null);
       setErrors({});
       setConfirmClear(false);
-      notify('Réglages d’envoi retirés de l’app');
+      notify(s.envConfigured ? 'Réglages d’envoi retirés de l’app' : 'Configuration d’envoi supprimée');
     } catch (err) {
       setResult({ ok: false, message: message(err) });
     } finally {
@@ -184,11 +208,13 @@ export function SmtpCard({ state, onState, notify, children, id, autoFocus }: {
   };
 
   const shown = result ?? (dirty ? null : s.lastTest);
-  const statusKind = s.password.unreadable ? 'bad' : s.configured ? (s.lastTest && !s.lastTest.ok ? 'bad' : 'ok') : 'off';
-  const statusTitle = s.password.unreadable ? 'Mot de passe à ressaisir' : s.configured ? (s.lastTest && !s.lastTest.ok ? 'Envoi configuré, mais le dernier essai a échoué' : 'Envoi configuré') : 'Envoi non configuré';
+  const statusKind = s.password.unreadable || s.password.otherServer ? 'bad' : s.configured ? (s.lastTest && !s.lastTest.ok ? 'bad' : 'ok') : 'off';
+  const statusTitle = s.password.unreadable || s.password.otherServer ? 'Mot de passe à ressaisir' : s.configured ? (s.lastTest && !s.lastTest.ok ? 'Envoi configuré, mais le dernier essai a échoué' : 'Envoi configuré') : 'Envoi non configuré';
   const statusText = s.password.unreadable
     ? 'Le mot de passe enregistré ne peut plus être déchiffré. Ressaisis-le ci-dessous : en attendant, aucun e-mail ne part.'
-    : s.configured
+    : s.password.otherServer
+      ? 'Le mot de passe en place a été saisi pour un autre serveur que celui réglé maintenant : il n’y est pas envoyé. Ressaisis-le ci-dessous : en attendant, aucun e-mail ne part.'
+      : s.configured
       ? `Les e-mails partent par ${s.host.value}, au nom de ${s.from.value}.`
       : 'Les réservations fonctionnent, mais aucun e-mail ne part. Renseigne l’identifiant et le mot de passe de ta boîte ci-dessous.';
 
@@ -212,11 +238,13 @@ export function SmtpCard({ state, onState, notify, children, id, autoFocus }: {
           </Fld>
           <Fld
             label="Mot de passe" badge={<SecretState secret={s.password} />} error={errors.password}
-            hint="Celui de la boîte. Si la double authentification est active chez Infomaniak, crée un mot de passe d’application et colle-le ici."
+            hint={passwordNeeded
+              ? <span className="cx-warn-text">Le serveur ou le port change : ressaisis le mot de passe. Celui qui est enregistré n’est jamais envoyé à un autre serveur.</span>
+              : 'Celui de la boîte. Si la double authentification est active chez Infomaniak, crée un mot de passe d’application et colle-le ici.'}
           >
             {(fid) => (
               <input ref={passwordRef} id={fid} type="password" name="smtp-mot-de-passe" autoComplete="new-password" autoCapitalize="none" autoCorrect="off" spellCheck={false}
-                maxLength={1024} placeholder={s.password.configured ? 'Inchangé : laisse vide pour le garder' : ''} value={d.password} onChange={(e) => set({ password: e.target.value })} />
+                maxLength={1024} placeholder={s.password.configured && !moved ? 'Inchangé : laisse vide pour le garder' : ''} value={d.password} onChange={(e) => set({ password: e.target.value })} />
             )}
           </Fld>
           <Fld label="Serveur d’envoi (SMTP)" badge={<Source source={s.host.source} />} error={errors.host} hint="Infomaniak : mail.infomaniak.com.">
@@ -251,9 +279,13 @@ export function SmtpCard({ state, onState, notify, children, id, autoFocus }: {
 
         {confirmClear ? (
           <div className="bk-savebar static">
-            <span>Retirer les réglages enregistrés dans l’app ? Ceux du fichier .env, s’il y en a, reprennent la main.</span>
+            <span>
+              {s.envConfigured
+                ? 'Retirer les réglages enregistrés dans l’app ? Ceux du fichier .env du serveur reprennent la main.'
+                : 'Supprimer la configuration d’envoi ? Plus aucun e-mail ne partira, et le mot de passe devra être ressaisi.'}
+            </span>
             <button type="button" className="btn ghost" onClick={() => setConfirmClear(false)}>Garder</button>
-            <button type="button" className="btn danger" disabled={busy !== null} onClick={() => void clear()}>Retirer</button>
+            <button type="button" className="btn danger" disabled={busy !== null} onClick={() => void clear()}>{s.envConfigured ? 'Retirer' : 'Supprimer'}</button>
           </div>
         ) : dirty ? (
           <div className="bk-savebar static">
@@ -265,7 +297,11 @@ export function SmtpCard({ state, onState, notify, children, id, autoFocus }: {
         ) : (
           <div className="bk-savebar static">
             <span />
-            {s.hasAppValues && <button type="button" className="btn ghost" disabled={busy !== null} onClick={() => setConfirmClear(true)}>Revenir au fichier .env</button>}
+            {s.hasAppValues && (
+              <button type="button" className="btn ghost" disabled={busy !== null} onClick={() => setConfirmClear(true)}>
+                {s.envConfigured ? 'Revenir au fichier .env' : 'Supprimer la configuration d’envoi'}
+              </button>
+            )}
             <button type="submit" className="btn" disabled={busy !== null || !s.configured}>{busy === 'test' ? 'Envoi…' : 'Envoyer un e-mail d’essai'}</button>
           </div>
         )}
@@ -291,6 +327,9 @@ function isIcloud(url: string): boolean {
 function syncSummary(c: CaldavConnectionState): { kind: 'ok' | 'off' | 'bad'; title: string; text: string } {
   const counts = `${c.calendars} calendrier${c.calendars > 1 ? 's' : ''}, ${c.events} événement${c.events > 1 ? 's' : ''} en copie locale`;
   if (c.password.unreadable) return { kind: 'bad', title: 'Mot de passe à ressaisir', text: 'Le mot de passe d’application enregistré ne peut plus être déchiffré. Ressaisis-le ci-dessous : en attendant, la synchro est arrêtée.' };
+  if (!c.configured && c.calendars > 0) {
+    return { kind: 'bad', title: 'iCloud n’est plus relié', text: `${counts}, mais les identifiants du compte manquent : la synchro est arrêtée. Relie le même compte ci-dessous.` };
+  }
   if (!c.configured) return { kind: 'off', title: 'iCloud n’est pas relié', text: 'Alfred fonctionne avec un calendrier local. Relie ton compte pour retrouver tes calendriers Apple.' };
   if (c.sync.running) return { kind: 'ok', title: 'Synchronisation en cours…', text: counts };
   if (c.sync.lastError) return { kind: 'bad', title: 'Synchro en échec', text: `${c.sync.lastError}${c.sync.lastSuccessAt ? ` Dernière synchro réussie ${when(c.sync.lastSuccessAt)}.` : ''}` };
@@ -476,6 +515,9 @@ export function CaldavCard({ state, onState, notify, onSynced }: {
         </div>
         {!locked && !otherServer && (
           <button type="button" className="cx-link" onClick={() => setOtherServer(true)}>Utiliser un autre serveur CalDAV qu’iCloud</button>
+        )}
+        {!locked && c.calendars > 0 && (
+          <p className="bk-hint">Des calendriers sont déjà enregistrés ici, avec des réservations qui y sont liées : seul le compte auquel ils appartiennent peut être relié. Alfred le vérifie pendant l’essai de connexion.</p>
         )}
         {locked && (
           <p className="bk-hint">Changer de compte (un autre identifiant Apple) n’est pas encore possible depuis l’app : les calendriers du compte actuel et les réservations qui y sont liées sont enregistrés ici.</p>

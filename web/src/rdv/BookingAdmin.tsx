@@ -5,7 +5,7 @@ import type {
 import { ApiError, bookingApi } from '../api';
 import { AlertIcon, CheckIcon, Chevron, CloseIcon, CopyIcon, ExternalIcon, MenuIcon, PlusIcon } from '../icons';
 import { hoursProblems, WEEKDAYS } from './hours';
-import { SmtpCard, useConnections } from '../settings/ConnectionCards';
+import { SmtpCard, smtpDraftDirty, useConnections, type SmtpDraft } from '../settings/ConnectionCards';
 import { Card, Fld } from './ui';
 import { dateTimeShortIn, dayKeyIn, dayLabel, durationLabel, timeIn } from './tz';
 import './rdv.css';
@@ -616,11 +616,19 @@ function CancelDialog({ b, timezone, mailConfigured, onDone, onClose }: { b: Boo
 
 // --- écran ---------------------------------------------------------------------
 
+/** Lien direct vers le formulaire d'envoi des e-mails ; l'adresse revient ensuite à celle de l'onglet. */
+const MAIL_HASH = '#rendez-vous/reglages/e-mails';
+
 export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void; onCalendarChanged: () => void }) {
-  const [tab, setTab] = useState<Tab>(() => (location.hash === '#rendez-vous/reglages' ? 'settings' : 'bookings'));
+  const [tab, setTab] = useState<Tab>(() => (location.hash.startsWith('#rendez-vous/reglages') ? 'settings' : 'bookings'));
   const connections = useConnections();
-  /** Incrémenté pour amener le focus sur le formulaire d'envoi des e-mails. */
-  const [mailFocus, setMailFocus] = useState(() => (location.hash === '#rendez-vous/reglages' ? 1 : 0));
+  /**
+   * Demande, consommée une fois, d'amener le focus sur le formulaire d'envoi des e-mails :
+   * posée par le bandeau « Configurer l'envoi » ou par un lien #rendez-vous/reglages/e-mails,
+   * jamais par la simple ouverture de l'onglet ni par un rechargement.
+   */
+  const [mailFocus, setMailFocus] = useState(() => (location.hash === MAIL_HASH ? 1 : 0));
+  const [smtpDraft, setSmtpDraft] = useState<SmtpDraft | null>(null);
   const [state, setState] = useState<BookingAdminState | null>(null);
   const [types, setTypes] = useState<BookingType[]>([]);
   const [hours, setHours] = useState<BookingHoursRange[]>([]);
@@ -745,7 +753,9 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
     setTab('settings');
     setMailFocus((n) => n + 1);
   };
-  const mailWarning = (w: string) => /^L’envoi d’e-mails n’est pas configuré/.test(w);
+  const clearMailFocus = useCallback(() => setMailFocus(0), []);
+  const mailWarning = (w: string) => /^(L’envoi d’e-mails n’est pas configuré|Le dernier essai d’envoi d’e-mails a échoué)/.test(w);
+  const smtpDirty = connections.state !== null && smtpDraftDirty(connections.state.smtp, smtpDraft);
 
   const hoursDirty = hoursDraft !== null && !sameHours(hoursDraft, hours);
   const settingsDirty = settingsDraft !== null && state !== null && (['publicName', 'welcomeText', 'calendarId', 'slotStepMin'] as const).some((k) => settingsDraft[k] !== state.settings[k]);
@@ -786,8 +796,8 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
                         <AlertIcon />
                         {mailWarning(w) ? (
                           <span>
-                            L’envoi d’e-mails n’est pas configuré : les réservations fonctionnent, mais aucun e-mail ne part.
-                            <button type="button" className="cx-link" onClick={openMailSettings}>Configurer l’envoi</button>
+                            {w.startsWith('L’envoi') ? 'L’envoi d’e-mails n’est pas configuré : les réservations fonctionnent, mais aucun e-mail ne part.' : w}
+                            <button type="button" className="cx-link" onClick={openMailSettings}>{w.startsWith('L’envoi') ? 'Configurer l’envoi' : 'Corriger l’envoi'}</button>
                           </span>
                         ) : <span>{w}</span>}
                       </li>
@@ -801,7 +811,7 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
                   <button key={key} role="tab" aria-selected={tab === key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>
                     {label}
                     {key === 'bookings' && upcoming.length > 0 && <span className={`bk-count${attention > 0 ? ' alert' : ''}`}>{upcoming.length}</span>}
-                    {((key === 'hours' && hoursDirty) || (key === 'settings' && settingsDirty)) && (
+                    {((key === 'hours' && hoursDirty) || (key === 'settings' && (settingsDirty || smtpDirty))) && (
                       <span className="bk-unsaved" title="Modifications non enregistrées"><span className="sr-only">(modifications non enregistrées)</span></span>
                     )}
                   </button>
@@ -842,7 +852,8 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
                   <SettingsCard state={state} calendars={calendars} draft={settingsDraft} setDraft={setSettingsDraft} onSaved={setState} notify={notify} />
                   {connections.state ? (
                     <SmtpCard
-                      id="bk-mail" state={connections.state} notify={notify} autoFocus={mailFocus}
+                      id="bk-mail" state={connections.state} notify={notify} autoFocus={mailFocus} onFocused={clearMailFocus}
+                      draft={smtpDraft} setDraft={setSmtpDraft}
                       onState={(next) => { connections.set(next); void reload(); }}
                     >
                       {state.mail.configured && (
