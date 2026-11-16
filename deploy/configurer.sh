@@ -5,6 +5,9 @@
 # sont tapés en masqué et écrits seulement dans /opt/alfred/.env (chmod 600).
 # Le script peut être relancé : il propose de garder les secrets déjà enregistrés
 # (sans les afficher) et permet d'ajouter l'envoi d'e-mails de la prise de rendez-vous.
+# Attention : ce script n'écrit que le fichier .env. Un réglage enregistré dans l'app
+# (Réglages, ou Rendez-vous > Réglages) passe AVANT le .env : s'il existe, c'est dans
+# l'app qu'il se change, et ce que ce script écrit pour lui reste sans effet.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -25,6 +28,10 @@ env_get() {
 }
 
 echo "== Configuration d'Alfred =="
+echo "À savoir : ce script règle le fichier .env du serveur. Si tu as déjà enregistré le mot de"
+echo "passe iCloud ou l'envoi des e-mails dans l'app, c'est l'app qui a la priorité : change-les"
+echo "là-bas (Réglages, ou Rendez-vous > Réglages), ce qui est saisi ici ne les remplacera pas."
+echo
 
 apple_id=$(env_get CALDAV_USERNAME)
 app_pw=$(env_get CALDAV_PASSWORD)
@@ -91,6 +98,7 @@ echo "E-mails de la prise de rendez-vous (facultatif) : la boîte qui envoie les
 echo "par exemple info@antoinequarroz.ch chez Infomaniak. Sans elle, les réservations"
 echo "fonctionnent mais aucun e-mail ne part."
 if [[ -n "$smtp_user" && -n "$smtp_pw" ]]; then
+  echo "(« - » retire l'envoi du .env seulement : un envoi réglé dans l'app continue, il se retire dans l'app.)"
   read -rp "Identifiant SMTP (Entrée pour garder celui enregistré, « - » pour désactiver l'envoi) : " answer
   read -rsp "Mot de passe SMTP (Entrée pour garder celui enregistré) : " answer_pw; echo
   if [[ "$answer" == "-" ]]; then
@@ -143,7 +151,8 @@ echo "Fichier .env écrit (lisible par toi seul)."
 if [[ -n "$smtp_user" ]]; then
   echo "E-mails : envoi activé. Après le démarrage, vérifie-le dans Alfred : Rendez-vous > Réglages > « Envoyer un e-mail d'essai »."
 else
-  echo "E-mails : envoi non configuré (relance ce script pour l'ajouter)."
+  echo "E-mails : envoi non configuré dans le .env. Il se règle dans l'app (Rendez-vous > Réglages) ;"
+  echo "s'il y est déjà réglé, il continue de fonctionner."
 fi
 
 docker compose -f deploy/docker-compose.yml up -d --build
@@ -156,6 +165,8 @@ for _ in $(seq 1 30); do
     echo
     if docker logs alfred 2>&1 | grep -q 'synchro CalDAV en échec'; then
       echo "Alfred tourne, mais la synchro iCloud échoue (voir ci-dessus)."
+      echo "Si le mot de passe iCloud a déjà été enregistré dans l'app, c'est lui qui est utilisé, pas"
+      echo "celui du .env : ouvre Alfred > Réglages > Calendrier iCloud et saisis-y le nouveau."
       exit 1
     fi
     echo "Alfred tourne. Ouvre https://alfred.antoinequarroz.ch"

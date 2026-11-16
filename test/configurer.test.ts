@@ -63,6 +63,22 @@ describe.skipIf(process.platform === 'win32')('deploy/configurer.sh', () => {
     expect(output).not.toContain(FAUX_ICLOUD);
     expect(output).not.toContain(FAUX_SMTP);
     expect(output).toContain('Alfred tourne');
+    // Le script prévient que les réglages de l'app passent avant le .env.
+    expect(output).toContain("c'est l'app qui a la priorité");
+  });
+
+  it('ne prétend pas que l’envoi est désactivé ou absent quand il peut être réglé dans l’app', () => {
+    const existing = [
+      `ALFRED_PASSWORD_HASH=${HASH}`, "CALDAV_USERNAME='antoine@example.org'", `CALDAV_PASSWORD='${FAUX_ICLOUD}'`,
+      "SMTP_USER='info@example.org'", `SMTP_PASSWORD='${FAUX_SMTP}'`, '',
+    ].join('\n');
+    // Garder iCloud et le mot de passe, puis « - » : l'envoi est retiré du .env.
+    const { env, output } = run('\n\n-\n\n', existing);
+    expect(env).not.toContain('SMTP_USER');
+    expect(output).toContain('retire l\'envoi du .env seulement');
+    expect(output).toContain("envoi non configuré dans le .env");
+    expect(output).toContain("s'il y est déjà réglé, il continue de fonctionner");
+    expect(output).not.toContain('relance ce script pour l');
   });
 
   it('à la première installation, construit l’image avant de calculer l’empreinte du mot de passe', () => {
