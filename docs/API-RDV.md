@@ -29,10 +29,15 @@ Sans session. Réponses jamais mises en cache (`Cache-Control: no-store`). Corps
 
 | Limite | Valeur par défaut |
 |---|---|
-| Lectures (infos, créneaux, consultation par jeton) | 120 par minute et par IP |
-| Réservations (réussies ou non) | 20 par heure et par IP |
-| Réservations abouties, toutes IP confondues | 60 par heure |
-| Annulations par jeton | 20 par heure et par IP |
+| Lectures (infos, consultation par jeton) | 120 par minute et par IP |
+| Demandes de créneaux | 30 par minute et par IP, 600 par minute toutes IP confondues |
+| Essais de réservation (réussis ou non) | 30 par heure et par IP |
+| Réservations abouties | 5 par heure et par IP, 60 par heure toutes IP confondues |
+| Réservations créées pour une même adresse e-mail (annulées comprises) | 3 par 24 heures |
+| Annulations par jeton | 10 par heure et par IP |
+| E-mails sortants, tous destinataires confondus | 200 par 24 heures (au-delà, `emailSent: false`) |
+
+Une adresse IPv6 est comptée par préfixe /56. Les plafonds de réservations abouties et par adresse e-mail sont contrôlés dans la section critique : des demandes simultanées ne les dépassent pas. Le plafond par adresse e-mail répond exactement comme la limite de débit (`429 rate_limited`) : la réponse ne dit rien des rendez-vous d'une adresse.
 
 ### `GET /api/public/booking`
 
@@ -65,7 +70,7 @@ Infos de la page (`PublicBookingInfo`). Toujours `200`.
 
 ### `GET /api/public/booking/types/:slug/slots?from=AAAA-MM-JJ&to=AAAA-MM-JJ`
 
-Créneaux libres d'un type entre deux jours inclus (`PublicSlots`). 62 jours au plus par appel.
+Créneaux libres d'un type entre deux jours inclus (`PublicSlots`). 42 jours au plus par appel (un mois affiché) : la page demande un mois à la fois.
 
 ```json
 {
@@ -104,7 +109,7 @@ Réserve un créneau. Corps (`BookingRequest`) :
 |---|---|
 | `typeSlug` | Obligatoire. Type actif. |
 | `start` | Obligatoire. Instant ISO, **exactement** une valeur renvoyée par la route des créneaux. |
-| `name` | Obligatoire. 2 à 80 caractères, une seule ligne, sans `<`, `>`, `@`, lien (`://`, `www.`). |
+| `name` | Obligatoire. 2 à 60 caractères : lettres (toutes écritures), espaces, tirets, apostrophes, point d'abréviation suivi d'une espace ou d'un tiret (« Dr. Müller », « J.-P. »). Ni chiffre, ni `/`, ni `:`, ni `@`, ni domaine (« exemple.ch »), ni caractère invisible : le nom ouvre l'e-mail envoyé à une adresse non vérifiée. |
 | `email` | Obligatoire. Adresse valide, 254 caractères au plus. |
 | `phone` | Facultatif (obligatoire si `phoneRequired`). Chiffres, espaces, `+ ( ) . / -`, 6 à 29 caractères. |
 | `message` | Facultatif. 2000 caractères au plus. |
@@ -129,7 +134,7 @@ Réponse `201` (`BookingConfirmation`) :
 }
 ```
 
-- `emailSent: false` : le rendez-vous **est pris**, mais l'e-mail de confirmation n'a pas pu partir. Afficher le récapitulatif et inviter à noter le rendez-vous ; proposer `cancelUrl` comme lien d'annulation.
+- `emailSent: false` : le rendez-vous **est pris**, mais l'e-mail de confirmation n'a pas pu partir, ou n'est pas encore parti : la réponse n'attend pas le serveur d'envoi plus de 8 secondes (l'envoi se poursuit ensuite en arrière-plan). Afficher le récapitulatif et inviter à noter le rendez-vous ; proposer `cancelUrl` comme lien d'annulation.
 - La réponse peut prendre quelques secondes (synchro iCloud avant confirmation, puis envoi des e-mails) : désactiver le bouton et montrer une attente.
 
 Erreurs :
@@ -141,10 +146,9 @@ Erreurs :
 | 403 | `closed` | Prise de RDV fermée | Recharger les infos |
 | 404 | `unknown_type` | Type inconnu ou désactivé | Recharger les infos |
 | 409 | `slot_unavailable` | Créneau plus libre (pris entre-temps, ou pas un créneau proposé) | Recharger les créneaux et faire choisir de nouveau |
-| 409 | `too_many_bookings` | Déjà 5 rendez-vous à venir pour cette adresse e-mail | Afficher le message |
 | 413 | — | Corps trop gros | — |
 | 415 | `unsupported` | Corps pas en JSON | — |
-| 429 | `rate_limited` | Trop de demandes | Réessayer après `Retry-After` |
+| 429 | `rate_limited` | Trop de demandes (par IP, au total, ou trop de réservations récentes pour cette adresse e-mail) | Réessayer plus tard (`Retry-After` quand il est connu) |
 | 502 / 503 | `calendar_unavailable` | Le calendrier (iCloud) ne répond pas | « Réessayez plus tard » ; rien n'a été réservé |
 | 503 | `busy` | Trop de réservations simultanées | Réessayer dans un instant |
 
@@ -157,7 +161,9 @@ Récapitulatif pour la page `/rdv/annulation/<jeton>` (`PublicBooking`, même fo
 
 ### `POST /api/public/booking/cancel/:token`
 
-Annule (sans corps). Réponse `200` : le `PublicBooking` avec `status: "cancelled"` et `cancellable: false`. L'événement est retiré du calendrier, le client et Antoine reçoivent un e-mail.
+Annule (sans corps). Réponse `200` : le `PublicBooking` avec `status: "cancelled"`, `cancellable: false` et `emailSent`. L'événement est retiré du calendrier et Antoine reçoit un avis.
+
+- `emailSent: true` : un e-mail confirme l'annulation au client. `false` : aucun e-mail ne lui est parti (SMTP absent ou en panne, plafond atteint, ou annulation dans le quart d'heure qui suit la réservation, où l'on n'écrit pas une seconde fois à une adresse non vérifiée) : ne pas annoncer d'e-mail.
 
 Erreurs : `404 not_found` (comme ci-dessus, y compris pour un second clic), `409 too_late` (déjà commencé ou passé), `429 rate_limited`, `502 calendar_unavailable` (rien n'a été annulé, réessayer).
 
@@ -180,12 +186,13 @@ Session requise (cookie de connexion, comme le reste de l'API). Sans session : `
     "publicName": "Antoine Quarroz",
     "welcomeText": "",
     "calendarId": null,
-    "slotStepMin": 30
+    "slotStepMin": 30,
+    "allDayBlocks": true
   },
   "effectiveCalendarId": "caldav:Q2x…",
   "timezone": "Europe/Zurich",
   "publicPageUrl": "https://alfred.antoinequarroz.ch/rdv",
-  "mail": { "configured": false, "from": "Antoine Quarroz <info@antoinequarroz.ch>", "notifyTo": "info@antoinequarroz.ch" },
+  "mail": { "configured": false, "from": "Antoine Quarroz <info@antoinequarroz.ch>", "notifyTo": "info@antoinequarroz.ch", "sentLast24h": 0, "dailyLimit": 200 },
   "warnings": [
     "L’envoi d’e-mails n’est pas configuré (SMTP_USER et SMTP_PASSWORD) : les réservations fonctionnent, mais aucun e-mail ne part.",
     "Aucun type de rendez-vous actif.",
@@ -197,6 +204,8 @@ Session requise (cookie de connexion, comme le reste de l'API). Sans session : `
 - `settings.calendarId` : calendrier où créer les rendez-vous ; `null` = le premier calendrier modifiable. `effectiveCalendarId` est celui réellement utilisé (`null` si aucun calendrier n'est modifiable).
 - `warnings` : phrases prêtes à afficher (SMTP non configuré, aucun calendrier modifiable, calendrier choisi inutilisable, aucun type actif, aucun horaire, synchro iCloud en échec, prise de RDV fermée).
 - `mail.configured: false` : afficher l'avertissement ; tout fonctionne sauf l'envoi.
+- `mail.sentLast24h` / `mail.dailyLimit` : e-mails partis sur 24 heures et plafond. Plafond atteint : plus rien ne part, un avertissement le dit (compteur en mémoire, remis à zéro au redémarrage).
+- `settings.allDayBlocks` : vrai (défaut), une journée entière bloque toute la journée même marquée « disponible » (Apple Calendar marque ainsi celles qu'il crée) ; faux, seules les journées entières « occupé » bloquent.
 
 #### `PUT /api/booking/settings`
 
@@ -209,6 +218,7 @@ Modification partielle : n'envoyer que les champs à changer. Réponse : le `Boo
 | `welcomeText` | 2000 caractères au plus |
 | `calendarId` | identifiant d'un calendrier modifiable, ou `null` |
 | `slotStepMin` | `15`, `30` ou `60` |
+| `allDayBlocks` | booléen |
 
 Erreur : `400 invalid` avec `fields`. Rien n'est modifié si un champ est invalide.
 
@@ -321,6 +331,7 @@ Réponse : `Booking[]`.
     "eventState": "ok",
     "eventStart": null,
     "eventEnd": null,
+    "notifiedStart": null,
     "mailError": null
   }
 ]
@@ -328,8 +339,8 @@ Réponse : `Booking[]`.
 
 - `eventState` (réservations confirmées seulement, sinon `null`) :
   - `ok` : l'événement est dans le calendrier, à l'heure réservée.
-  - `missing` : **« événement supprimé »**. Antoine l'a supprimé (par exemple dans Apple Calendar) ou déplacé dans un autre calendrier. La réservation reste confirmée et **le créneau reste pris** : proposer « Annuler la réservation » pour prévenir le client et libérer le créneau.
-  - `moved` : l'événement a été déplacé ; `eventStart` et `eventEnd` donnent son horaire actuel. Le client n'est pas prévenu automatiquement.
+  - `missing` : **« événement supprimé »**. Antoine l'a supprimé (par exemple dans Apple Calendar). La réservation reste confirmée et **le créneau reste pris** : proposer « Annuler la réservation » pour prévenir le client et libérer le créneau. Un événement seulement changé de calendrier n'est pas « supprimé » : il est retrouvé par son UID (`eventId` et `calendarId` sont mis à jour) et l'annulation le retire.
+  - `moved` : l'événement a été déplacé dans le temps. **La réservation suit** : `start` et `end` (repris dans `eventStart` et `eventEnd`) donnent le nouvel horaire, l'ancien créneau est libéré, le nouveau est protégé, et la page d'annulation du client montre le nouvel horaire. `notifiedStart` est le début que le client a reçu dans son dernier e-mail : il n'est pas prévenu automatiquement, « Renvoyer l'e-mail » lui annonce le nouvel horaire et ramène l'état à `ok`.
 - `mailError` : dernier échec d'envoi d'e-mail pour cette réservation (texte à afficher), `null` si tout est parti. Sans SMTP : « E-mails non configurés : aucun message envoyé ».
 - `cancelledBy` : `client` ou `admin`.
 
@@ -341,7 +352,7 @@ Erreurs : `404 not_found`, `409 already_cancelled`, `502 calendar_unavailable`.
 
 #### `POST /api/booking/bookings/:id/resend`
 
-Renvoie la confirmation au client. Le jeton d'annulation n'étant jamais conservé, **un nouveau lien est créé et l'ancien cesse de fonctionner**. Réponse : le `Booking` (regarder `mailError`).
+Renvoie la confirmation au client, avec l'horaire actuel. Le jeton d'annulation n'étant jamais conservé, un nouveau lien est créé ; **il ne remplace l'ancien qu'une fois l'e-mail réellement parti** : si l'envoi échoue, le lien que le client possède déjà continue de fonctionner. Réponse : le `Booking` (regarder `mailError`).
 
 Erreurs : `400 mail_not_configured`, `404 not_found`, `409 already_cancelled`.
 
@@ -356,7 +367,7 @@ Envoie un message d'essai à l'adresse d'avis (`mail.notifyTo`). Réponse : `{ "
 | `code` | Statut | Sens |
 |---|---|---|
 | `invalid` | 400 | Données invalides ; détail par champ dans `fields` |
-| `invalid_range` | 400 | `from` / `to` absents, mal formés, inversés, ou plus de 62 jours |
+| `invalid_range` | 400 | `from` / `to` absents, mal formés, inversés, ou plus de 42 jours |
 | `rejected` | 400 | Champ piège rempli |
 | `mail_not_configured` | 400 | SMTP non configuré |
 | `closed` | 403 | Prise de rendez-vous fermée |
@@ -364,7 +375,6 @@ Envoie un message d'essai à l'adresse d'avis (`mail.notifyTo`). Réponse : `{ "
 | `not_found` | 404 | Ressource inconnue ; pour un jeton : inconnu ou déjà annulé |
 | `unknown_type` | 404 | Type inconnu ou inactif (côté public) |
 | `slot_unavailable` | 409 | Créneau pas ou plus libre |
-| `too_many_bookings` | 409 | Trop de rendez-vous à venir pour cette adresse e-mail |
 | `too_late` | 409 | Rendez-vous commencé ou passé : plus d'annulation en ligne |
 | `already_cancelled` | 409 | Réservation déjà annulée (admin) |
 | `slug_taken` | 409 | Identifiant de type déjà utilisé |
@@ -395,4 +405,4 @@ Ces consignes sont appliquées par l'interface livrée ; elles restent la réfé
 - **Créneau perdu.** Sur `409 slot_unavailable`, recharger les créneaux et garder les champs saisis.
 - **CSP.** La politique stricte existante s'applique aux pages publiques : pas de script ni de police externes.
 - **Texte saisi.** `welcomeText`, `description`, `message`, `name` : toujours du texte, jamais du HTML.
-- **Admin.** Afficher `warnings`, `mailError`, et un repère visible pour `eventState` `missing` (« événement supprimé ») et `moved` (« déplacé au … »).
+- **Admin.** Afficher `warnings`, `mailError`, et un repère visible pour `eventState` `missing` (« événement supprimé ») et `moved` (« déplacé : le client a reçu l'horaire du … »).

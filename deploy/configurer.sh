@@ -8,10 +8,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-if ! docker image inspect alfred:latest >/dev/null 2>&1; then
-  echo "Construction de l'image…"
-  docker compose -f deploy/docker-compose.yml build
-fi
+# L'image est toujours reconstruite : relancé après un « git pull », le script doit démarrer
+# la nouvelle version (et calculer l'empreinte du mot de passe avec elle), pas l'ancienne image.
+# Quand rien n'a changé, le cache de Docker rend cette étape presque immédiate.
+echo "Construction de l'image (rapide si rien n'a changé)…"
+docker compose -f deploy/docker-compose.yml build
 
 # Lit une valeur du .env existant, sans jamais l'afficher (apostrophes ou guillemets retirés).
 env_get() {
@@ -144,7 +145,7 @@ else
   echo "E-mails : envoi non configuré (relance ce script pour l'ajouter)."
 fi
 
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml up -d --build
 echo -n "Démarrage"
 for _ in $(seq 1 30); do
   if curl -fsS http://127.0.0.1:3200/healthz >/dev/null 2>&1; then

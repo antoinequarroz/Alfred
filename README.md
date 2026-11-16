@@ -34,6 +34,8 @@ Raccourcis : `n` nouvel événement, `t` aujourd'hui, `j` jour, `s` semaine, `m`
 - **Réservation** : l'événement est créé dans le calendrier (donc dans iCloud), le client reçoit un e-mail de confirmation avec un fichier pour son agenda et un lien d'annulation.
 - **Rubrique « Rendez-vous »** dans l'app : ouvrir ou fermer la prise de rendez-vous, copier le lien public, gérer les types, les horaires hebdomadaires, les calendriers qui bloquent, voir et annuler les réservations, vérifier l'envoi d'e-mails.
 - **Fermée par défaut** : rien n'est réservable tant que l'interrupteur n'est pas activé.
+- **Agenda vivant** : si tu déplaces un rendez-vous dans Apple Calendar, la réservation suit (l'ancien créneau se libère) et l'app te rappelle de prévenir le client ; les journées entières (congés) bloquent toute la journée.
+- **À sauvegarder** : les réservations, types et horaires ne vivent que dans la base d'Alfred, pas dans iCloud (voir [Déploiement](docs/DEPLOIEMENT.md)).
 
 ![Rubrique « Rendez-vous » de l'app](docs/images/rdv-admin.png)
 

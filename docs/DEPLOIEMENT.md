@@ -38,7 +38,7 @@ docker logs alfred --tail 20                # « synchro CalDAV toutes les 120 s
 
 ### E-mails de la prise de rendez-vous
 
-Pour que les confirmations partent depuis `info@antoinequarroz.ch`, le plus simple est de relancer `bash /opt/alfred/deploy/configurer.sh` : il garde les secrets existants et demande l'identifiant SMTP (l'adresse de la boîte) et son mot de passe, en masqué. Les autres réglages ont de bonnes valeurs par défaut. À la main, dans le `.env` :
+Pour que les confirmations partent depuis `info@antoinequarroz.ch`, le plus simple est de relancer `bash /opt/alfred/deploy/configurer.sh` : il reconstruit l'image (après un `git pull`, c'est bien la nouvelle version qui démarre), garde les secrets existants et demande l'identifiant SMTP (l'adresse de la boîte) et son mot de passe, en masqué. Les autres réglages ont de bonnes valeurs par défaut. À la main, dans le `.env` :
 
 ```bash
 SMTP_HOST=mail.infomaniak.com
@@ -50,7 +50,7 @@ MAIL_NOTIFY_TO=               # qui reçoit les avis (défaut : l'adresse de MAI
 ALFRED_PUBLIC_URL=https://alfred.antoinequarroz.ch
 ```
 
-Puis `docker compose -f deploy/docker-compose.yml up -d`. Sans `SMTP_USER` et `SMTP_PASSWORD`, la prise de rendez-vous fonctionne mais n'envoie aucun e-mail (un avertissement s'affiche dans l'admin).
+Puis `docker compose -f deploy/docker-compose.yml up -d --build`. Sans `SMTP_USER` et `SMTP_PASSWORD`, la prise de rendez-vous fonctionne mais n'envoie aucun e-mail (un avertissement s'affiche dans l'admin).
 
 ### Ouvrir la prise de rendez-vous
 
@@ -84,10 +84,18 @@ Ouvrir https://alfred.antoinequarroz.ch et se connecter. Les calendriers iCloud 
 |---|---|
 | Mettre à jour | `cd /opt/alfred && git pull && docker compose -f deploy/docker-compose.yml up -d --build` |
 | Voir les journaux | `docker logs alfred --tail 100` |
-| Sauvegarder la base | `docker cp alfred:/data/alfred.db ./alfred-$(date +%F).db` |
+| Sauvegarder la base | `docker cp alfred:/data ./alfred-data-$(date +%F)` |
 | Arrêter | `docker compose -f deploy/docker-compose.yml down` |
 
-La base ne contient qu'une copie des calendriers (la référence reste iCloud) et les sessions. En cas de perte, elle se reconstruit toute seule à la synchro suivante.
+**La base est à sauvegarder.** Les événements ne sont qu'une copie (la référence reste iCloud) et reviennent tout seuls à la synchro suivante, mais depuis la prise de rendez-vous la base porte aussi ce qui n'existe nulle part ailleurs : les réglages, les types, les horaires et surtout les réservations (coordonnées des clients, empreintes des liens d'annulation). Si le volume est perdu, la prise de rendez-vous se referme, les types et les horaires sont à refaire, la rubrique Rendez-vous ne liste plus aucune réservation et les liens d'annulation déjà envoyés répondent « ce lien n'est plus valable ».
+
+La commande du tableau copie tout le dossier `/data` (la base et ses fichiers `-wal` et `-shm`, à garder ensemble). Pour une sauvegarde hebdomadaire automatique, par exemple le lundi à 3 h, ajouter avec `crontab -e` :
+
+```bash
+0 3 * * 1  docker cp alfred:/data /opt/sauvegardes/alfred-data-$(date +\%F)
+```
+
+Pour restaurer : arrêter Alfred, recopier ce dossier dans le volume (`docker cp ./alfred-data-AAAA-MM-JJ/. alfred:/data/`), redémarrer.
 
 ## Dépannage
 
