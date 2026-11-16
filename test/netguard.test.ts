@@ -10,12 +10,15 @@ describe('adresses internes', () => {
     for (const ip of [
       '127.0.0.1', '127.8.9.10', '10.0.0.5', '172.16.0.1', '172.31.255.254', '192.168.1.10', '169.254.169.254', '100.64.0.1', '0.0.0.0',
       '192.0.2.1', '198.18.0.1', '224.0.0.1', '255.255.255.255', '::1', '::', 'fe80::1', 'fc00::1', 'fd12:3456::1', 'ff02::1',
-      '::ffff:127.0.0.1', '::ffff:7f00:1', '::ffff:10.0.0.1', '64:ff9b::a00:1', '[::1]', 'fe80::1%eth0', '2001:db8::1', 'pas-une-adresse', '',
+      '::ffff:127.0.0.1', '::ffff:7f00:1', '::ffff:10.0.0.1', '64:ff9b::a00:1', '[::1]',
+      // La même adresse sous d'autres écritures : IPv4 « compatible », IPv4 traduite (SIIT), NAT64 non abrégé, mappée en long.
+      '::127.0.0.1', '::7f00:1', '::10.0.0.1', '::ffff:0:7f00:1', '::ffff:0:127.0.0.1', '64:ff9b:0:0:0:0:7f00:1', '64:ff9b:0::a00:1', '64:FF9B::127.0.0.1',
+      '0:0:0:0:0:ffff:7f00:1', '0:0:0:0:0:0:0:1', '0000:0000:0000:0000:0000:ffff:c0a8:0001', '::8.8.8.8', 'fe80::1%eth0', '2001:db8::1', 'pas-une-adresse', '',
     ]) expect(isInternalAddress(ip), ip).toBe(true);
   });
 
   it('laisse passer les adresses publiques', () => {
-    for (const ip of ['83.166.143.44', '17.253.144.10', '8.8.8.8', '172.32.0.1', '172.15.0.1', '192.169.0.1', '2a00:1450:400a:800::200e', '2620:149:af0::10', '::ffff:8.8.8.8']) {
+    for (const ip of ['83.166.143.44', '17.253.144.10', '8.8.8.8', '172.32.0.1', '172.15.0.1', '192.169.0.1', '2a00:1450:400a:800::200e', '2620:149:af0::10', '::ffff:8.8.8.8', '0:0:0:0:0:ffff:808:808', '64:ff9b::8.8.8.8', '64:ff9b:0:0:0:0:808:808']) {
       expect(isInternalAddress(ip), ip).toBe(false);
     }
   });
@@ -29,7 +32,7 @@ describe('forme d’un hôte saisi', () => {
   });
 
   it('refuse les adresses et les noms internes', () => {
-    for (const host of ['127.0.0.1', '10.1.2.3', '192.168.0.10', '169.254.169.254', '[::1]', '::1', 'fd00::5', 'serveur.local', 'db.internal', 'app.localhost', 'nas.lan']) {
+    for (const host of ['127.0.0.1', '10.1.2.3', '192.168.0.10', '169.254.169.254', '[::1]', '::1', 'fd00::5', '::127.0.0.1', '[::7f00:1]', '::ffff:0:7f00:1', '64:ff9b:0:0:0:0:7f00:1', 'serveur.local', 'db.internal', 'app.localhost', 'nas.lan']) {
       expect(checkHostSyntax(host, false), host).toBe('internal');
     }
   });
@@ -91,20 +94,33 @@ describe('fetch vérifié (CalDAV saisi dans l’app)', () => {
 
   it('vérifie aussi chaque redirection : une réponse 302 vers le réseau interne n’est pas suivie', async () => {
     const calls: string[] = [];
-    vi.stubGlobal('fetch', async (input: unknown) => {
-      calls.push(String(input));
-      return new Response(null, { status: 302, headers: { location: 'https://interne.exemple.ch/secret' } });
-    });
-    try {
-      const resolver = async (host: string) => (host === 'interne.exemple.ch' ? ['172.18.0.7'] : ['83.166.143.44']);
-      await expect(guardedFetch(false, resolver)('https://public.exemple.ch/dav/')).rejects.toMatchObject({ reason: 'internal' });
-      expect(calls).toEqual(['https://public.exemple.ch/dav/']);
-      // Redirection vers http : refusée aussi.
-      vi.stubGlobal('fetch', async () => new Response(null, { status: 301, headers: { location: 'http://public.exemple.ch/dav/' } }));
-      await expect(guardedFetch(false, resolver)('https://public.exemple.ch/dav/')).rejects.toBeInstanceOf(HostRefusedError);
-    } finally {
-      vi.unstubAllGlobals();
-    }
+    const resolver = async (host: string) => (host === 'interne.exemple.ch' ? ['172.18.0.7'] : ['83.166.143.44']);
+    const redirecting = (location: string) => async (url: URL, address: string) => {
+      calls.push(`${url.href} -> ${address}`);
+      return new Response(null, { status: 302, headers: { location } });
+    };
+    await expect(guardedFetch(false, resolver, redirecting('https://interne.exemple.ch/secret'))('https://public.exemple.ch/dav/')).rejects.toMatchObject({ reason: 'internal' });
+    expect(calls).toEqual(['https://public.exemple.ch/dav/ -> 83.166.143.44']);
+    // Redirection vers http : refusée aussi.
+    await expect(guardedFetch(false, resolver, redirecting('http://public.exemple.ch/dav/'))('https://public.exemple.ch/dav/')).rejects.toBeInstanceOf(HostRefusedError);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('se connecte à l’adresse vérifiée, pas à une seconde résolution du nom (DNS changeant)', async () => {
+    let hits = 0;
+    const hosts: (string | undefined)[] = [];
+    server = createServer((req, res) => { hits++; hosts.push(req.headers.host); res.end('ici'); });
+    await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    // Le nom n'existe dans aucun DNS : seule l'adresse rendue par la vérification permet d'arriver.
+    const res = await guardedFetch(true, async () => ['127.0.0.1'])(`http://calendrier.exemple.invalid:${port}/dav/`, { method: 'PROPFIND', body: '<x/>', headers: { depth: '0' } });
+    expect(await res.text()).toBe('ici');
+    expect(hosts).toEqual([`calendrier.exemple.invalid:${port}`]);
+    // À l'inverse : le nom désigne cette machine pour le système, mais la vérification a rendu une
+    // adresse publique. La requête ne doit pas arriver ici (elle part vers l'adresse vérifiée, injoignable).
+    const strict = guardedFetch(true, async () => ['192.0.2.55']);
+    await expect(strict(`http://localhost:${port}/`, { signal: AbortSignal.timeout(400) })).rejects.toBeDefined();
+    expect(hits).toBe(1);
   });
 
   it('ne fait pas suivre les identifiants vers un autre hôte lors d’une redirection', async () => {
