@@ -42,6 +42,10 @@ function isReadOnly(cal: DAVCalendar): boolean {
   return !names.some((n) => /^(write|writeContent|all|bind)$/i.test(n));
 }
 
+function resourceName(uid: string): string {
+  return `${uid.replace(/[^A-Za-z0-9._-]/g, '_')}.ics`;
+}
+
 export function calendarIdForUrl(url: string): string {
   return `caldav:${eventIdForHref(url)}`;
 }
@@ -239,9 +243,14 @@ export class CaldavSync {
     }
   }
 
+  /** Adresse de la ressource qu'Alfred crée pour un UID donné : elle se déduit de l'UID. */
+  hrefFor(calendarUrl: string, uid: string): string {
+    return absolute(resourceName(uid), calendarUrl);
+  }
+
   async create(calendarUrl: string, uid: string, ics: string): Promise<{ href: string; etag: string }> {
     const client = await this.getClient();
-    const filename = `${uid.replace(/[^A-Za-z0-9._-]/g, '_')}.ics`;
+    const filename = resourceName(uid);
     const res = await client.createCalendarObject({ calendar: { url: calendarUrl }, filename, iCalString: ics });
     if (!res.ok) throw new RemoteError(`Le serveur a refusé la création (${res.status})`);
     const href = absolute(filename, calendarUrl);

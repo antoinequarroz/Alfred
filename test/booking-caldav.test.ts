@@ -71,6 +71,25 @@ describe.skipIf(!url)('prise de rendez-vous avec CalDAV (Radicale)', () => {
     expect((await fetch(href, { headers: { authorization: auth } })).status).toBe(404);
     expect(booking.listBookings('upcoming')).toEqual([]);
 
+    // 5. Le serveur enregistre l'événement mais la réponse se perd : le client lit un refus,
+    // et l'événement est retiré du serveur (il se retrouve par son UID) au lieu de rester sans réservation.
+    const create = caldav.create.bind(caldav);
+    caldav.create = async (calendarUrl, uid, ics) => {
+      await create(calendarUrl, uid, ics);
+      throw new Error('socket hang up');
+    };
+    await expect(booking.book(request('2026-11-16T12:30:00.000Z', 'elodie@example.org'))).rejects.toMatchObject({ status: 502, code: 'calendar_unavailable' });
+    caldav.create = create;
+    const listing = async () => {
+      const res = await fetch(cal.url!, { method: 'PROPFIND', headers: { authorization: auth, depth: '1' } });
+      return [...(await res.text()).matchAll(/<href>([^<]+\.ics)<\/href>/g)].map((m) => m[1]);
+    };
+    for (let i = 0; i < 40 && (await listing()).length > 1; i++) await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(await listing()).toHaveLength(1); // seul « Pris sur iPhone » reste
+    await caldav.sync();
+    expect(booking.listBookings('upcoming')).toEqual([]);
+    expect(booking.publicSlots('consultation', '2026-11-16', '2026-11-16').days[0].slots).toContain('2026-11-16T12:30:00.000Z');
+
     await fetch(cal.url!, { method: 'DELETE', headers: { authorization: auth } });
   }, 30_000);
 });

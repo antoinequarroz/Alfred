@@ -9,7 +9,10 @@ export interface BookingRow {
   buffer_before_min: number;
   buffer_after_min: number;
   event_id: string | null;
+  /** UID iCalendar de l'événement : il survit à un changement de calendrier. */
+  event_uid: string | null;
   calendar_id: string | null;
+  /** Horaire actuel : il suit l'événement quand il est déplacé dans l'agenda. */
   start_utc: string;
   end_utc: string;
   name: string;
@@ -22,6 +25,8 @@ export interface BookingRow {
   cancelled_at: string | null;
   cancelled_by: 'client' | 'admin' | null;
   mail_error: string | null;
+  /** Début annoncé au client s'il diffère de start_utc (événement déplacé depuis), sinon null. */
+  notified_start: string | null;
 }
 
 interface TypeRow {
@@ -76,6 +81,7 @@ export class BookingStore {
       welcomeText: map.get('welcome_text') ?? '',
       calendarId: map.get('calendar_id') || null,
       slotStepMin: step === 15 || step === 60 ? step : (30 as BookingStep),
+      allDayBlocks: map.get('all_day_blocks') !== '0',
     };
   }
 
@@ -87,6 +93,7 @@ export class BookingStore {
       set.run('welcome_text', s.welcomeText);
       set.run('calendar_id', s.calendarId ?? '');
       set.run('slot_step_min', String(s.slotStepMin));
+      set.run('all_day_blocks', s.allDayBlocks ? '1' : '0');
     });
   }
 
@@ -157,13 +164,14 @@ export class BookingStore {
   insertBooking(b: BookingRow): void {
     this.db
       .prepare(
-        `INSERT INTO bookings (id, type_id, type_name, location, buffer_before_min, buffer_after_min, event_id, calendar_id,
-           start_utc, end_utc, name, email, phone, message, status, token_hash, created_at, cancelled_at, cancelled_by, mail_error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO bookings (id, type_id, type_name, location, buffer_before_min, buffer_after_min, event_id, event_uid, calendar_id,
+           start_utc, end_utc, name, email, phone, message, status, token_hash, created_at, cancelled_at, cancelled_by, mail_error,
+           notified_start)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(b.id, b.type_id, b.type_name, b.location, b.buffer_before_min, b.buffer_after_min, b.event_id, b.calendar_id,
+      .run(b.id, b.type_id, b.type_name, b.location, b.buffer_before_min, b.buffer_after_min, b.event_id, b.event_uid, b.calendar_id,
         b.start_utc, b.end_utc, b.name, b.email, b.phone, b.message, b.status, b.token_hash, b.created_at, b.cancelled_at,
-        b.cancelled_by, b.mail_error);
+        b.cancelled_by, b.mail_error, b.notified_start);
   }
 
   getBooking(id: string): BookingRow | undefined {
@@ -181,11 +189,19 @@ export class BookingStore {
       .all(toIso, fromIso) as unknown as BookingRow[];
   }
 
-  /** Nombre de rendez-vous confirmés à venir pour une adresse e-mail. */
-  countUpcomingForEmail(email: string, nowIso: string): number {
+  /** Réservations confirmées qui se terminent après un instant donné (ISO UTC). */
+  confirmedEndingAfter(iso: string): BookingRow[] {
+    return this.db.prepare("SELECT * FROM bookings WHERE status = 'confirmed' AND end_utc > ? ORDER BY start_utc").all(iso) as unknown as BookingRow[];
+  }
+
+  /**
+   * Nombre de réservations créées pour une adresse e-mail depuis un instant donné,
+   * annulées comprises : annuler ne redonne pas le droit d'en créer.
+   */
+  countCreatedForEmailSince(email: string, sinceIso: string): number {
     const row = this.db
-      .prepare("SELECT COUNT(*) AS n FROM bookings WHERE status = 'confirmed' AND end_utc > ? AND email = ? COLLATE NOCASE")
-      .get(nowIso, email) as { n: number };
+      .prepare('SELECT COUNT(*) AS n FROM bookings WHERE created_at > ? AND email = ? COLLATE NOCASE')
+      .get(sinceIso, email) as { n: number };
     return row.n;
   }
 
@@ -209,6 +225,20 @@ export class BookingStore {
 
   setMailError(id: string, error: string | null): void {
     this.db.prepare('UPDATE bookings SET mail_error = ? WHERE id = ?').run(error, id);
+  }
+
+  /** Rattache la réservation à l'événement retrouvé (nouvel identifiant après un changement de calendrier). */
+  setEvent(id: string, eventId: string, calendarId: string, uid: string): void {
+    this.db.prepare('UPDATE bookings SET event_id = ?, calendar_id = ?, event_uid = ? WHERE id = ?').run(eventId, calendarId, uid, id);
+  }
+
+  /** L'événement a été déplacé : la réservation suit, et garde l'horaire que le client connaît. */
+  reschedule(id: string, startIso: string, endIso: string, notifiedStart: string | null): void {
+    this.db.prepare('UPDATE bookings SET start_utc = ?, end_utc = ?, notified_start = ? WHERE id = ?').run(startIso, endIso, notifiedStart, id);
+  }
+
+  setNotifiedStart(id: string, notifiedStart: string | null): void {
+    this.db.prepare('UPDATE bookings SET notified_start = ? WHERE id = ?').run(notifiedStart, id);
   }
 
   setTokenHash(id: string, hash: string): void {

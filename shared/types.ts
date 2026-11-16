@@ -89,6 +89,12 @@ export interface BookingSettings {
   calendarId: string | null;
   /** Pas des créneaux proposés, en minutes. */
   slotStepMin: BookingStep;
+  /**
+   * Vrai (défaut) : une « journée entière » bloque toute la journée même si elle est marquée
+   * « disponible » (Apple Calendar marque ainsi les journées entières qu'il crée, congés compris).
+   * Faux : seules les journées entières marquées « occupé » bloquent.
+   */
+  allDayBlocks: boolean;
 }
 
 export interface BookingType {
@@ -126,13 +132,23 @@ export interface BookingAdminState {
   timezone: string;
   /** Adresse publique de la page de réservation. */
   publicPageUrl: string;
-  mail: { configured: boolean; from: string; notifyTo: string };
+  mail: {
+    configured: boolean;
+    from: string;
+    notifyTo: string;
+    /** E-mails partis sur les dernières 24 heures, et plafond au-delà duquel plus rien ne part. */
+    sentLast24h: number;
+    dailyLimit: number;
+  };
   /** Points à corriger, en français, à afficher dans l'admin. */
   warnings: string[];
 }
 
 export type BookingStatus = 'confirmed' | 'cancelled';
-/** État de l'événement lié : présent, déplacé dans le calendrier, ou supprimé (par exemple dans Apple Calendar). */
+/**
+ * État de l'événement lié : présent, déplacé dans le calendrier (le client n'a pas encore
+ * reçu le nouvel horaire), ou supprimé (par exemple dans Apple Calendar).
+ */
 export type BookingEventState = 'ok' | 'moved' | 'missing';
 
 /** Une réservation, vue de l'admin. */
@@ -142,7 +158,7 @@ export interface Booking {
   typeName: string;
   /** Lieu ou mode, tel qu'annoncé au client. */
   location: string;
-  /** Instants ISO UTC. */
+  /** Instants ISO UTC. Horaire actuel : il suit l'événement quand Antoine le déplace dans son agenda. */
   start: string;
   end: string;
   name: string;
@@ -157,9 +173,11 @@ export interface Booking {
   calendarId: string | null;
   /** null pour une réservation annulée. */
   eventState: BookingEventState | null;
-  /** Si l'événement a été déplacé : son horaire actuel dans le calendrier. */
+  /** Si l'événement a été déplacé : son horaire actuel dans le calendrier (égal à start et end). */
   eventStart: string | null;
   eventEnd: string | null;
+  /** Si l'événement a été déplacé : le début annoncé au client dans son dernier e-mail. */
+  notifiedStart: string | null;
   /** Dernier échec d'envoi d'e-mail, null si tout est parti. */
   mailError: string | null;
 }
@@ -227,6 +245,8 @@ export interface PublicBooking {
   status: BookingStatus;
   /** Faux si le rendez-vous est déjà commencé ou passé. */
   cancellable: boolean;
+  /** Réponse à une annulation seulement : vrai si un e-mail de confirmation d'annulation est parti. */
+  emailSent?: boolean;
 }
 
 export interface BookingConfirmation {

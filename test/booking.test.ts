@@ -9,7 +9,7 @@ import type {
 import { createApp } from '../server/app.js';
 import type { Mailer, MailMessage } from '../server/booking/mail.js';
 import type { BookingLimits } from '../server/booking/routes.js';
-import { BookingService, hashToken, locationLabel, slugify } from '../server/booking/service.js';
+import { BookingService, hashToken, locationLabel, slugify, type BookingOptions } from '../server/booking/service.js';
 import { RateLimiter, rateKey } from '../server/booking/ratelimit.js';
 import type { CaldavSync } from '../server/caldav.js';
 import { openDb } from '../server/db.js';
@@ -29,6 +29,10 @@ interface SetupOptions {
   mail?: 'ok' | 'fail' | 'none';
   caldav?: CaldavSync | null;
   syncTimeoutMs?: number;
+  /** Options du moteur. Par défaut, les plafonds par adresse sont larges : chaque test fixe celui qu'il vérifie. */
+  service?: Partial<BookingOptions>;
+  /** Envoi d'e-mails remplacé (serveur lent, panne passagère…). */
+  send?: (message: MailMessage) => Promise<void>;
 }
 
 async function setup(opts: SetupOptions = {}) {
@@ -43,17 +47,19 @@ async function setup(opts: SetupOptions = {}) {
     from: 'Antoine Quarroz <info@antoinequarroz.ch>',
     notifyTo: 'info@antoinequarroz.ch',
     async send(message) {
-      if (mode !== 'ok') throw new Error('connexion SMTP refusée');
+      if (opts.send) await opts.send(message);
+      else if (mode !== 'ok') throw new Error('connexion SMTP refusée');
       sent.push(message);
     },
   };
   const booking = new BookingService({
     store, calendar: service, caldav: opts.caldav ?? null, timezone: 'Europe/Zurich', mailer,
     publicUrl: 'https://alfred.example.ch', defaultPublicName: 'Antoine Quarroz', now: () => clock.now,
-    syncTimeoutMs: opts.syncTimeoutMs,
+    syncTimeoutMs: opts.syncTimeoutMs, maxPerEmailPerDay: 100, quietCancelMinutes: 0, ...opts.service,
   });
   const app = createApp({
-    store, service, caldav: null, passwordHash, secureCookies: false, sessionDays: 30, booking, bookingLimits: opts.limits,
+    store, service, caldav: null, passwordHash, secureCookies: false, sessionDays: 30, booking,
+    bookingLimits: { bookOk: [1000, 3_600_000], ...opts.limits },
   });
   const json = (path: string, method = 'GET', body?: unknown, extra: { cookie?: string; ip?: string; headers?: Record<string, string> } = {}) =>
     app.request(path, {
@@ -193,11 +199,11 @@ describe('prise de rendez-vous : réglages', () => {
   it('lit et modifie les réglages', async () => {
     const ctx = await setup();
     const state = (await (await ctx.admin('/api/booking/settings')).json()) as BookingAdminState;
-    expect(state.settings).toEqual({ enabled: false, publicName: 'Antoine Quarroz', welcomeText: '', calendarId: null, slotStepMin: 30 });
+    expect(state.settings).toEqual({ enabled: false, publicName: 'Antoine Quarroz', welcomeText: '', calendarId: null, slotStepMin: 30, allDayBlocks: true });
     expect(state.effectiveCalendarId).toBe(ctx.calendar.id);
     expect(state.timezone).toBe('Europe/Zurich');
     expect(state.publicPageUrl).toBe('https://alfred.example.ch/rdv');
-    expect(state.mail).toEqual({ configured: true, from: 'Antoine Quarroz <info@antoinequarroz.ch>', notifyTo: 'info@antoinequarroz.ch' });
+    expect(state.mail).toEqual({ configured: true, from: 'Antoine Quarroz <info@antoinequarroz.ch>', notifyTo: 'info@antoinequarroz.ch', sentLast24h: 0, dailyLimit: 200 });
     expect(state.warnings.join(' ')).toContain('Aucun type de rendez-vous actif');
     expect(state.warnings.join(' ')).toContain('fermée');
 
@@ -208,6 +214,7 @@ describe('prise de rendez-vous : réglages', () => {
     const next = (await res.json()) as BookingAdminState;
     expect(next.settings).toEqual({
       enabled: true, publicName: 'Cabinet Quarroz', welcomeText: 'Bienvenue.\nChoisissez un créneau.', calendarId: ctx.calendar.id, slotStepMin: 15,
+      allDayBlocks: true,
     });
     // Modification partielle : le reste est conservé.
     const partial = (await (await ctx.admin('/api/booking/settings', 'PUT', { slotStepMin: 60 })).json()) as BookingAdminState;
@@ -255,6 +262,13 @@ describe('prise de rendez-vous : réglages', () => {
     ]) {
       expect((await ctx.admin('/api/booking/hours', 'PUT', bad)).status).toBe(400);
     }
+    // Le message nomme le jour et parle d'heures, pas de « minutes depuis minuit ».
+    const inverted = (await (await ctx.admin('/api/booking/hours', 'PUT', [{ weekday: 1, startMin: 840, endMin: 720 }])).json()) as { fields: { hours: string } };
+    expect(inverted.fields.hours).toBe('Lundi : la fin d’une plage doit être après son début');
+    const overlap = (await (await ctx.admin('/api/booking/hours', 'PUT', [
+      { weekday: 3, startMin: 540, endMin: 720 }, { weekday: 3, startMin: 700, endMin: 800 },
+    ])).json()) as { fields: { hours: string } };
+    expect(overlap.fields.hours).toBe('Mercredi : deux plages se chevauchent');
     expect((await (await ctx.admin('/api/booking/hours')).json() as unknown[])).toHaveLength(2);
     // Vider les horaires est permis, et ils ne reviennent pas tout seuls.
     expect(await (await ctx.admin('/api/booking/hours', 'PUT', [])).json()).toEqual([]);
@@ -268,10 +282,17 @@ describe('prise de rendez-vous : réglages', () => {
       db.exec('DELETE FROM booking_hours');
       // Base telle que la v1 l'a créée : pas encore de drapeau sur les calendriers.
       db.exec('ALTER TABLE calendars DROP COLUMN blocks_booking');
+      // Base de la première version de la prise de rendez-vous : colonnes ajoutées depuis.
+      db.exec('ALTER TABLE events DROP COLUMN busy');
+      db.exec('ALTER TABLE bookings DROP COLUMN event_uid');
+      db.exec('ALTER TABLE bookings DROP COLUMN notified_start');
       db.close();
       db = openDb(dir);
       const store = new Store(db);
       expect(store.listCalendars()[0].blocks_booking).toBe(1);
+      const columns = (table: string) => (db.prepare(`PRAGMA table_info(${table})`).all() as unknown as { name: string }[]).map((c) => c.name);
+      expect(columns('events')).toContain('busy');
+      expect(columns('bookings')).toEqual(expect.arrayContaining(['event_uid', 'notified_start']));
       expect(db.prepare('SELECT COUNT(*) AS n FROM booking_hours').get()).toEqual({ n: 0 });
       db.close();
       db = openDb(dir);
@@ -403,14 +424,19 @@ describe('prise de rendez-vous : créneaux', () => {
     save('libre', ['DTSTART:20261116T080000Z', 'DTEND:20261116T110000Z', 'SUMMARY:Bureau', 'TRANSP:TRANSPARENT']);
     save('annule', ['DTSTART:20261116T123000Z', 'DTEND:20261116T140000Z', 'SUMMARY:Réunion', 'STATUS:CANCELLED']);
     save('pris', ['DTSTART:20261116T150000Z', 'DTEND:20261116T160000Z', 'SUMMARY:Rendez-vous']);
-    // Mardi : journée entière opaque. Mercredi : journée entière « disponible » (anniversaire).
+    // Mardi : journée entière opaque. Mercredi : journée entière « disponible », comme Apple Calendar
+    // marque celles qu'il crée (congés compris).
     save('conge', ['DTSTART;VALUE=DATE:20261117', 'DTEND;VALUE=DATE:20261118', 'SUMMARY:Congé']);
     save('anniv', ['DTSTART;VALUE=DATE:20261118', 'DTEND;VALUE=DATE:20261119', 'SUMMARY:Anniversaire', 'TRANSP:TRANSPARENT']);
     // Jeudi : série hebdomadaire 09:00-10:00 dont l'occurrence du 19 est « disponible » par exception.
     save('serie', ['DTSTART:20261112T080000Z', 'DTEND:20261112T090000Z', 'SUMMARY:Cours', 'RRULE:FREQ=WEEKLY']);
 
-    const res = await ctx.json('/api/public/booking/types/consultation/slots?from=2026-11-16&to=2026-11-19');
-    const days = ((await res.json()) as PublicSlots).days;
+    const get = async () => ((await (await ctx.json('/api/public/booking/types/consultation/slots?from=2026-11-16&to=2026-11-19')).json()) as PublicSlots).days;
+    // Par défaut, une journée entière bloque toute la journée, même marquée « disponible ».
+    expect((await get()).map((d) => d.date)).toEqual(['2026-11-16', '2026-11-19']);
+    // Réglage décoché : seules les journées entières « occupé » bloquent (comportement iCalendar strict).
+    expect((await ctx.admin('/api/booking/settings', 'PUT', { allDayBlocks: false })).status).toBe(200);
+    const days = await get();
     expect(days.map((d) => d.date)).toEqual(['2026-11-16', '2026-11-18', '2026-11-19']);
     expect(days[0].slots).toHaveLength(12);
     expect(days[0].slots).not.toContain('2026-11-16T15:00:00.000Z');
@@ -419,6 +445,62 @@ describe('prise de rendez-vous : créneaux', () => {
     expect(days[1].slots).toHaveLength(14);
     expect(days[2].slots).toHaveLength(12);
     expect(days[2].slots[0]).toBe('2026-11-19T09:00:00.000Z');
+  });
+
+  it('ne relit ni ne redéveloppe l’agenda à chaque demande : l’occupation est gardée tant que rien ne change', async () => {
+    const ctx = await setup();
+    await open(ctx);
+    const save = (uid: string, lines: string[]) => ctx.store.saveEvent({ calendarId: ctx.calendar.id, href: null, etag: null, ics: rawEvent(uid, lines) });
+    save('serie', ['DTSTART:20200106T080000Z', 'DTEND:20200106T090000Z', 'SUMMARY:Cours', 'RRULE:FREQ=WEEKLY']);
+    save('simple', ['DTSTART:20261117T080000Z', 'DTEND:20261117T090000Z', 'SUMMARY:Rendez-vous']);
+    let reads = 0;
+    const original = ctx.store.busyOccurrences.bind(ctx.store);
+    ctx.store.busyOccurrences = (from, to) => {
+      reads++;
+      return original(from, to);
+    };
+    const get = async (from: string, to: string, ip: string) =>
+      ((await (await ctx.json(`/api/public/booking/types/consultation/slots?from=${from}&to=${to}`, 'GET', undefined, { ip })).json()) as PublicSlots).days;
+    const first = await get('2026-11-16', '2026-11-30', '203.0.113.1');
+    expect(first[0].slots[0]).toBe('2026-11-16T09:00:00.000Z'); // lundi 09:00-10:00 pris par la série
+    expect(first[1].slots[0]).toBe('2026-11-17T09:00:00.000Z'); // mardi 09:00-10:00 pris par l'événement simple
+    // Vingt autres demandes, sur d'autres périodes : aucune nouvelle lecture de l'agenda.
+    for (let i = 0; i < 20; i++) await get(`2026-12-${String(1 + i).padStart(2, '0')}`, '2026-12-31', `203.0.113.${2 + i}`);
+    expect(reads).toBe(1);
+    // L'agenda change (ici une synchro qui ramène un événement) : l'occupation est recalculée une fois.
+    save('nouveau', ['DTSTART:20261116T090000Z', 'DTEND:20261116T100000Z', 'SUMMARY:Dentiste']);
+    expect((await get('2026-11-16', '2026-11-16', '203.0.113.40'))[0].slots[0]).toBe('2026-11-16T10:00:00.000Z');
+    await get('2026-11-17', '2026-11-20', '203.0.113.41');
+    expect(reads).toBe(2);
+    // Une réservation invalide aussi le cache : le créneau pris disparaît aussitôt.
+    expect((await bookRequest(ctx, { start: '2026-11-16T10:00:00.000Z' })).status).toBe(201);
+    expect((await get('2026-11-16', '2026-11-16', '203.0.113.42'))[0].slots[0]).toBe('2026-11-16T10:30:00.000Z');
+  });
+
+  it('lit l’occupation des événements simples sans leur iCalendar, y compris pour les lignes d’avant la mise à jour', async () => {
+    const ctx = await setup();
+    await open(ctx);
+    const save = (uid: string, lines: string[]) => ctx.store.saveEvent({ calendarId: ctx.calendar.id, href: null, etag: null, ics: rawEvent(uid, lines) });
+    const id = save('pris', ['DTSTART:20261116T080000Z', 'DTEND:20261116T090000Z', 'SUMMARY:Rendez-vous']);
+    save('libre', ['DTSTART:20261116T090000Z', 'DTEND:20261116T100000Z', 'SUMMARY:Bureau', 'TRANSP:TRANSPARENT']);
+    save('conge', ['DTSTART;VALUE=DATE:20261117', 'DTEND;VALUE=DATE:20261119', 'SUMMARY:Congé']);
+    const busy = () => ctx.store.db.prepare('SELECT busy FROM events WHERE id = ?').get(id) as { busy: string | null };
+    expect(JSON.parse(busy().busy!)).toEqual([['2026-11-16T08:00:00.000Z', '2026-11-16T09:00:00.000Z', 0, 0, 0]]);
+    const expected = ['2026-11-16T09:00:00.000Z', '2026-11-19T08:00:00.000Z'];
+    const firstSlots = async () => {
+      const days = ((await (await ctx.json('/api/public/booking/types/consultation/slots?from=2026-11-16&to=2026-11-19')).json()) as PublicSlots).days;
+      return days.map((d) => d.slots[0]);
+    };
+    expect(await firstSlots()).toEqual(expected);
+    // Lignes enregistrées avant l'ajout de la colonne : même résultat, et la colonne est complétée à la lecture.
+    ctx.store.db.exec('UPDATE events SET busy = NULL');
+    ctx.store.setCalendarBlocksBooking(ctx.calendar.id, true); // invalide le cache d'occupation
+    expect(await firstSlots()).toEqual(expected);
+    expect(busy().busy).not.toBeNull();
+    // Une fois la colonne remplie, l'iCalendar n'est plus lu : le rendre illisible ne change rien.
+    ctx.store.db.exec("UPDATE events SET ics = 'illisible' WHERE recurring = 0");
+    ctx.store.setCalendarBlocksBooking(ctx.calendar.id, true);
+    expect(await firstSlots()).toEqual(expected);
   });
 
   it('ignore les calendriers non bloquants et compte ceux qui sont masqués', async () => {
@@ -437,7 +519,7 @@ describe('prise de rendez-vous : créneaux', () => {
     const ctx = await setup();
     const type = await open(ctx, { minNoticeHours: 24, horizonDays: 3, bufferBeforeMin: 30, bufferAfterMin: 30 });
     await ctx.service.create({ calendarId: ctx.calendar.id, title: 'Occupé', start: '2026-11-17T09:00:00.000Z', end: '2026-11-17T10:00:00.000Z', allDay: false });
-    const res = await ctx.json('/api/public/booking/types/consultation/slots?from=2026-11-01&to=2026-12-15');
+    const res = await ctx.json('/api/public/booking/types/consultation/slots?from=2026-11-01&to=2026-12-10');
     const days = ((await res.json()) as PublicSlots).days;
     // Maintenant : dimanche 12:00. Préavis 24 h → lundi dès 13:30. Horizon 3 jours → jusqu'à mercredi 18.
     expect(days.map((d) => d.date)).toEqual(['2026-11-16', '2026-11-17', '2026-11-18']);
@@ -552,7 +634,16 @@ describe('prise de rendez-vous : réservation', () => {
     const cases: [Record<string, unknown>, string][] = [
       [{ name: '' }, 'name'],
       [{ name: 'A' }, 'name'],
-      [{ name: 'x'.repeat(81) }, 'name'],
+      [{ name: 'x'.repeat(61) }, 'name'],
+      // Le nom ouvre l'e-mail envoyé à une adresse non vérifiée : ni lien, ni domaine nu, ni chiffre, ni caractère invisible.
+      [{ name: 'Compte bloqué, validez sur evil-banque.ch/login' }, 'name'],
+      [{ name: 'Validez sur evil-banque.ch' }, 'name'],
+      [{ name: 'Jean evil.ch' }, 'name'],
+      [{ name: 'Appelez le 0900 123 456' }, 'name'],
+      [{ name: 'Jean/Dupont' }, 'name'],
+      [{ name: 'Jean:Dupont' }, 'name'],
+      [{ name: 'Jean\u200bDupont' }, 'name'],
+      [{ name: 'Jean \u202eDupont' }, 'name'],
       [{ name: 'Bob\r\nBcc: victime@example.net' }, 'name'],
       [{ name: 'Gagnez sur https://spam.example' }, 'name'],
       [{ name: 42 }, 'name'],
@@ -665,15 +756,84 @@ describe('prise de rendez-vous : réservation', () => {
     expect((await bookRequest(ctx, { email: 'autre@example.org' })).status).toBe(409);
   });
 
-  it('limite le nombre de rendez-vous à venir pour une même adresse', async () => {
+  it('accepte les vrais noms : accents, tirets, apostrophes, particules, abréviations', async () => {
     const ctx = await setup();
     await open(ctx);
     const slots = await slotsOf(ctx);
-    for (let i = 0; i < 5; i++) expect((await bookRequest(ctx, { start: slots[i] })).status).toBe(201);
-    const res = await bookRequest(ctx, { start: slots[5], email: 'ELODIE@example.org' });
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as { code: string }).code).toBe('too_many_bookings');
-    expect((await bookRequest(ctx, { start: slots[5], email: 'autre@example.org' })).status).toBe(201);
+    const names = ['Jean-Pierre O’Brien', "Anne-Sophie d'Aubigné", 'Dr. Élodie Müller', 'J.-P. de La Tour', 'Nguyễn Thị Minh', 'Łukasz Żółć'];
+    for (const [i, name] of names.entries()) {
+      const res = await bookRequest(ctx, { start: slots[i], name, email: `n${i}@example.org` });
+      expect([name, res.status]).toEqual([name, 201]);
+    }
+  });
+
+  it('plafonne les réservations créées en 24 h pour une même adresse, annulations comprises, sans rien révéler', async () => {
+    const ctx = await setup({ service: { maxPerEmailPerDay: 3 } });
+    await open(ctx);
+    const slots = await slotsOf(ctx);
+    // Réserver puis annuler aussitôt ne redonne pas le droit de recommencer.
+    for (let i = 0; i < 3; i++) {
+      const res = await bookRequest(ctx, { start: slots[i] });
+      expect(res.status).toBe(201);
+      const cancel = await ctx.json(`/api/public/booking/cancel/${tokenOf((await res.json()) as BookingConfirmation)}`, 'POST');
+      expect(cancel.status).toBe(200);
+    }
+    const mails = ctx.sent.length;
+    const res = await bookRequest(ctx, { start: slots[3], email: 'ELODIE@example.org' });
+    // Même réponse que la limite de débit : on n'apprend rien sur les rendez-vous de cette adresse.
+    expect(res.status).toBe(429);
+    expect(await res.json()).toEqual({ error: 'Trop de demandes. Réessayez un peu plus tard.', code: 'rate_limited' });
+    expect(ctx.sent).toHaveLength(mails);
+    expect(await slotsOf(ctx)).toContain(slots[3]);
+    expect((await bookRequest(ctx, { start: slots[3], email: 'autre@example.org' })).status).toBe(201);
+    // Vingt-quatre heures plus tard, l'adresse peut de nouveau réserver.
+    ctx.clock.now = new Date('2026-11-16T11:00:01Z');
+    expect((await bookRequest(ctx, { start: '2026-11-17T12:30:00.000Z' })).status).toBe(201);
+  });
+
+  it('tient le plafond par adresse face à des demandes simultanées, même pendant l’attente d’iCloud', async () => {
+    const slow = {
+      sync: () => new Promise<void>((resolve) => setTimeout(resolve, 20)),
+      getStatus: () => ({ configured: true, running: true, lastSuccessAt: null, lastError: null, lastErrorAt: null }),
+    } as unknown as CaldavSync;
+    const ctx = await setup({ caldav: slow, service: { maxPerEmailPerDay: 3 } });
+    await open(ctx);
+    const slots = (await slotsOf(ctx)).slice(0, 10);
+    const results = await Promise.all(slots.map((start) => bookRequest(ctx, { start })));
+    expect(results.map((r) => r.status).sort()).toEqual([201, 201, 201, 429, 429, 429, 429, 429, 429, 429]);
+    expect(ctx.booking.listBookings('upcoming')).toHaveLength(3);
+    expect(ctx.sent.filter((m) => typeof m.to !== 'string')).toHaveLength(3);
+  });
+
+  it('relit le type sous le verrou : supprimé, désactivé ou modifié pendant l’attente de la synchro', async () => {
+    let during: () => Promise<unknown> = async () => undefined;
+    const caldav = {
+      sync: async () => { await during(); },
+      getStatus: () => ({ configured: true, running: false, lastSuccessAt: null, lastError: null, lastErrorAt: null }),
+    } as unknown as CaldavSync;
+    const ctx = await setup({ caldav });
+    const type = await open(ctx);
+
+    // Durée portée à 60 min pendant l'attente : la réservation prend la durée à jour.
+    during = () => ctx.admin(`/api/booking/types/${type.id}`, 'PUT', { durationMin: 60, location: 'Avenue de la Gare 3, Sion' });
+    const changed = await bookRequest(ctx);
+    expect(changed.status).toBe(201);
+    expect(((await changed.json()) as BookingConfirmation).booking).toMatchObject({ end: '2026-11-16T09:00:00.000Z', locationLabel: 'Avenue de la Gare 3, Sion' });
+
+    // Type désactivé pendant l'attente : refus net, rien n'est créé.
+    during = () => ctx.admin(`/api/booking/types/${type.id}`, 'PUT', { active: false });
+    const off = await bookRequest(ctx, { start: '2026-11-16T12:30:00.000Z', email: 'b@example.org' });
+    expect(off.status).toBe(404);
+    expect(((await off.json()) as { code: string }).code).toBe('unknown_type');
+
+    // Type supprimé pendant l'attente : même refus (et non une erreur interne), aucun événement orphelin.
+    await ctx.admin(`/api/booking/types/${type.id}`, 'PUT', { active: true });
+    during = () => ctx.admin(`/api/booking/types/${type.id}`, 'DELETE');
+    const gone = await bookRequest(ctx, { start: '2026-11-16T12:30:00.000Z', email: 'c@example.org' });
+    expect(gone.status).toBe(404);
+    expect(((await gone.json()) as { code: string }).code).toBe('unknown_type');
+    expect(ctx.booking.listBookings('upcoming')).toHaveLength(1);
+    expect(ctx.store.occurrences(new Date('2026-11-16T00:00:00Z'), new Date('2026-11-17T00:00:00Z'))).toHaveLength(1);
   });
 
   it('conserve la réservation quand l’e-mail échoue, et le signale dans l’admin', async () => {
@@ -729,6 +889,82 @@ describe('prise de rendez-vous : réservation', () => {
     expect((await ctx.json(`/api/public/booking/cancel/${link.split('/').pop()}`)).status).toBe(200);
   });
 
+  it('garde l’ancien lien d’annulation quand le renvoi de la confirmation échoue', async () => {
+    let down = false;
+    const ctx = await setup({ send: async () => { if (down) throw new Error('connect ECONNREFUSED'); } });
+    await open(ctx);
+    const confirmation = (await (await bookRequest(ctx)).json()) as BookingConfirmation;
+    const [b] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
+    down = true;
+    const resend = await ctx.admin(`/api/booking/bookings/${b.id}/resend`, 'POST');
+    expect(resend.status).toBe(200);
+    expect(((await resend.json()) as Booking).mailError).toContain('envoi en échec (connect ECONNREFUSED)');
+    // Le nouveau lien n'est jamais parti : celui que le client a reçu doit continuer de fonctionner.
+    expect((await ctx.json(`/api/public/booking/cancel/${tokenOf(confirmation)}`)).status).toBe(200);
+    // Une fois la messagerie rétablie, le renvoi remplace le lien.
+    down = false;
+    expect((await ctx.admin(`/api/booking/bookings/${b.id}/resend`, 'POST')).status).toBe(200);
+    expect((await ctx.json(`/api/public/booking/cancel/${tokenOf(confirmation)}`)).status).toBe(404);
+  });
+
+  it('répond sans attendre un serveur d’e-mails lent : réservation confirmée, envoi poursuivi en arrière-plan', async () => {
+    const release: (() => void)[] = [];
+    const ctx = await setup({ service: { mailWaitMs: 40 }, send: () => new Promise<void>((resolve) => release.push(resolve)) });
+    await open(ctx);
+    const started = Date.now();
+    const res = await bookRequest(ctx);
+    expect(res.status).toBe(201);
+    expect(Date.now() - started).toBeLessThan(1500);
+    const confirmation = (await res.json()) as BookingConfirmation;
+    // Le client voit son récapitulatif et son lien, avec l'avertissement « e-mail non envoyé ».
+    expect(confirmation.emailSent).toBe(false);
+    expect(confirmation.cancelUrl).toContain('/rdv/annulation/');
+    let [b] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
+    expect(b.mailError).toContain('en cours');
+    // Le serveur finit par répondre : les deux messages partent et l'état est mis à jour.
+    release.forEach((fn) => fn());
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(ctx.sent).toHaveLength(2);
+    [b] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
+    expect(b.mailError).toBeNull();
+  });
+
+  it('compte comme un échec un envoi qui n’aboutit jamais, et le note sur la réservation', async () => {
+    const ctx = await setup({ service: { mailWaitMs: 20, mailTimeoutMs: 60 }, send: () => new Promise<void>(() => undefined) });
+    await open(ctx);
+    expect((await bookRequest(ctx)).status).toBe(201);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const [b] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
+    expect(b.mailError).toContain('délai dépassé');
+    // L'annulation ne reste pas bloquée non plus.
+    const started = Date.now();
+    expect((await ctx.admin(`/api/booking/bookings/${b.id}/cancel`, 'POST', {})).status).toBe(200);
+    expect(Date.now() - started).toBeLessThan(1500);
+  });
+
+  it('plafonne les e-mails sortants sur 24 h et le signale dans l’admin', async () => {
+    const ctx = await setup({ service: { mailDailyLimit: 3 } });
+    await open(ctx);
+    const slots = await slotsOf(ctx);
+    expect((await bookRequest(ctx, { start: slots[0], email: 'a@example.org' })).status).toBe(201);
+    // Deuxième réservation : un seul message passe encore, la confirmation au client.
+    const second = await bookRequest(ctx, { start: slots[1], email: 'b@example.org' });
+    expect(second.status).toBe(201);
+    expect(ctx.sent).toHaveLength(3);
+    const third = (await (await bookRequest(ctx, { start: slots[2], email: 'c@example.org' })).json()) as BookingConfirmation;
+    expect(third.emailSent).toBe(false);
+    expect(ctx.sent).toHaveLength(3);
+    const state = (await (await ctx.admin('/api/booking/settings')).json()) as BookingAdminState;
+    expect(state.mail).toMatchObject({ sentLast24h: 3, dailyLimit: 3 });
+    expect(state.warnings.join(' ')).toContain('plafond de 3 e-mails');
+    const list = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
+    expect(list[2].mailError).toContain('plafond de 3 e-mails par 24 heures atteint');
+    // Le lendemain, les envois reprennent.
+    ctx.clock.now = new Date('2026-11-16T11:00:01Z');
+    expect((await ctx.admin(`/api/booking/bookings/${list[2].id}/resend`, 'POST')).status).toBe(200);
+    expect(ctx.sent).toHaveLength(4);
+  });
+
   it('n’attend pas une synchro iCloud trop lente pour confirmer', async () => {
     let syncs = 0;
     const slow = {
@@ -778,7 +1014,7 @@ describe('prise de rendez-vous : annulation', () => {
 
     const res = await ctx.json(`/api/public/booking/cancel/${token}`, 'POST');
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ...confirmation.booking, status: 'cancelled', cancellable: false });
+    expect(await res.json()).toEqual({ ...confirmation.booking, status: 'cancelled', cancellable: false, emailSent: true });
 
     expect(ctx.store.occurrences(new Date('2026-11-16T00:00:00Z'), new Date('2026-11-17T00:00:00Z'))).toEqual([]);
     expect(await (await ctx.admin('/api/booking/bookings')).json()).toEqual([]);
@@ -870,7 +1106,11 @@ describe('prise de rendez-vous : annulation', () => {
     }, 'all', null);
     list = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
     expect(list[0]).toMatchObject({ status: 'confirmed', eventState: 'missing', eventStart: null });
-    expect(list[1]).toMatchObject({ status: 'confirmed', eventState: 'moved', eventStart: '2026-11-16T13:00:00.000Z', eventEnd: '2026-11-16T13:30:00.000Z' });
+    // La réservation suit l'événement ; l'horaire que le client connaît est conservé pour l'admin.
+    expect(list[1]).toMatchObject({
+      status: 'confirmed', eventState: 'moved', start: '2026-11-16T13:00:00.000Z', end: '2026-11-16T13:30:00.000Z',
+      eventStart: '2026-11-16T13:00:00.000Z', eventEnd: '2026-11-16T13:30:00.000Z', notifiedStart: '2026-11-16T09:00:00.000Z',
+    });
     // Aucun e-mail automatique en v1.1 : seules les deux réservations en ont envoyé.
     expect(ctx.sent).toHaveLength(4);
 
@@ -878,6 +1118,119 @@ describe('prise de rendez-vous : annulation', () => {
     const res = await ctx.json(`/api/public/booking/cancel/${tokenOf(first)}`, 'POST');
     expect(res.status).toBe(200);
     expect(((await res.json()) as { status: string }).status).toBe('cancelled');
+  });
+
+  it('retrouve l’événement changé de calendrier : pas « supprimé », et l’annulation le retire bien', async () => {
+    const ctx = await setup();
+    await open(ctx);
+    ctx.store.upsertCalendar({ id: 'local:pro', source: 'local', url: null, name: 'Cabinet', color: '#30a46c', read_only: 0, sort: 1 });
+    const confirmation = (await (await bookRequest(ctx)).json()) as BookingConfirmation;
+    const [before] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
+    // Antoine déplace l'événement dans un autre calendrier : l'identifiant local change, pas l'UID.
+    const newId = await ctx.service.update(before.eventId!, {
+      calendarId: 'local:pro', title: 'Consultation : Élodie Müller', start: MONDAY_9, end: '2026-11-16T08:30:00.000Z', allDay: false,
+    }, 'all', null);
+    expect(newId).not.toBe(before.eventId);
+    const [after] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
+    expect(after).toMatchObject({ eventState: 'ok', eventId: newId, calendarId: 'local:pro' });
+    // Le client annule : l'événement est retiré du nouveau calendrier et le créneau est libéré.
+    const res = await ctx.json(`/api/public/booking/cancel/${tokenOf(confirmation)}`, 'POST');
+    expect(res.status).toBe(200);
+    expect(ctx.store.occurrences(new Date('2026-11-16T00:00:00Z'), new Date('2026-11-17T00:00:00Z'))).toEqual([]);
+    expect(await slotsOf(ctx)).toContain(MONDAY_9);
+  });
+
+  it('complète l’UID d’une réservation d’avant la mise à jour dès que son événement est retrouvé', async () => {
+    const ctx = await setup();
+    await open(ctx);
+    await bookRequest(ctx);
+    // Réservation créée avant l'ajout de la colonne : l'UID est complété dès que l'événement est retrouvé.
+    ctx.store.db.exec('UPDATE bookings SET event_uid = NULL');
+    const [b] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
+    expect(b.eventState).toBe('ok');
+    const row = ctx.store.db.prepare('SELECT event_uid FROM bookings').get() as { event_uid: string | null };
+    expect(row.event_uid).toBe(ctx.store.getEvent(b.eventId!)!.uid);
+  });
+
+  it('suit l’événement déplacé dans le temps : ancien créneau libéré, nouveau protégé avec ses tampons, client à prévenir', async () => {
+    const ctx = await setup();
+    await open(ctx, { bufferAfterMin: 30 });
+    const confirmation = (await (await bookRequest(ctx)).json()) as BookingConfirmation;
+    const token = tokenOf(confirmation);
+    const [b] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
+    // Antoine déplace le rendez-vous au mardi 14:00, dans un calendrier qui ne bloque pas les créneaux.
+    await ctx.service.update(b.eventId!, {
+      calendarId: ctx.calendar.id, title: 'Consultation : Élodie Müller', start: '2026-11-17T13:00:00.000Z', end: '2026-11-17T13:30:00.000Z', allDay: false,
+    }, 'all', null);
+    ctx.store.setCalendarBlocksBooking(ctx.calendar.id, false);
+
+    // Lundi 09:00 est de nouveau proposé. Mardi : 13:30 (son propre tampon empiéterait sur 14:00),
+    // 14:00 (le rendez-vous) et 14:30 (tampon du rendez-vous) ne le sont pas ; 15:00 l'est.
+    expect(await slotsOf(ctx)).toContain(MONDAY_9);
+    const tuesday = await slotsOf(ctx, '2026-11-17', '2026-11-17');
+    expect(tuesday).toContain('2026-11-17T10:00:00.000Z');
+    expect(tuesday).not.toContain('2026-11-17T12:30:00.000Z');
+    expect(tuesday).not.toContain('2026-11-17T13:00:00.000Z');
+    expect(tuesday).not.toContain('2026-11-17T13:30:00.000Z');
+    expect(tuesday).toContain('2026-11-17T14:00:00.000Z');
+
+    // La page d'annulation du client montre le nouvel horaire.
+    const view = (await (await ctx.json(`/api/public/booking/cancel/${token}`)).json()) as { start: string; end: string; cancellable: boolean };
+    expect(view).toMatchObject({ start: '2026-11-17T13:00:00.000Z', end: '2026-11-17T13:30:00.000Z', cancellable: true });
+    // L'ancien horaire est passé, le nouveau non : l'annulation en ligne reste possible.
+    ctx.clock.now = new Date('2026-11-16T12:00:00Z');
+    expect(((await (await ctx.json(`/api/public/booking/cancel/${token}`)).json()) as { cancellable: boolean }).cancellable).toBe(true);
+    let [moved] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
+    expect(moved).toMatchObject({ eventState: 'moved', start: '2026-11-17T13:00:00.000Z', notifiedStart: MONDAY_9 });
+
+    // « Renvoyer l'e-mail » annonce le nouvel horaire : la réservation n'est plus « à prévenir ».
+    ctx.sent.length = 0;
+    expect((await ctx.admin(`/api/booking/bookings/${b.id}/resend`, 'POST')).status).toBe(200);
+    expect(ctx.sent[0].subject).toContain('mardi 17 novembre 2026, de 14:00 à 14:30');
+    [moved] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
+    expect(moved).toMatchObject({ eventState: 'ok', notifiedStart: null });
+
+    // Remis à l'horaire d'origine après un nouveau déplacement : plus rien à signaler.
+    await ctx.service.update(b.eventId!, {
+      calendarId: ctx.calendar.id, title: 'Consultation : Élodie Müller', start: '2026-11-18T13:00:00.000Z', end: '2026-11-18T13:30:00.000Z', allDay: false,
+    }, 'all', null);
+    expect(((await (await ctx.admin('/api/booking/bookings')).json()) as Booking[])[0]).toMatchObject({ eventState: 'moved', notifiedStart: '2026-11-17T13:00:00.000Z' });
+    await ctx.service.update(b.eventId!, {
+      calendarId: ctx.calendar.id, title: 'Consultation : Élodie Müller', start: '2026-11-17T13:00:00.000Z', end: '2026-11-17T13:30:00.000Z', allDay: false,
+    }, 'all', null);
+    expect(((await (await ctx.admin('/api/booking/bookings')).json()) as Booking[])[0]).toMatchObject({ eventState: 'ok', notifiedStart: null });
+  });
+
+  it('n’envoie pas d’e-mail au client qui annule aussitôt après avoir réservé, et le dit dans la réponse', async () => {
+    const ctx = await setup({ service: { quietCancelMinutes: 15 } });
+    await open(ctx);
+    const slots = await slotsOf(ctx);
+    // Aller-retour immédiat : seul Antoine est prévenu, l'adresse saisie ne reçoit pas un second message.
+    const first = (await (await bookRequest(ctx, { start: slots[0] })).json()) as BookingConfirmation;
+    ctx.sent.length = 0;
+    const quick = await ctx.json(`/api/public/booking/cancel/${tokenOf(first)}`, 'POST');
+    expect(((await quick.json()) as { status: string; emailSent: boolean })).toMatchObject({ status: 'cancelled', emailSent: false });
+    expect(ctx.sent.map((m) => m.to)).toEqual(['info@antoinequarroz.ch']);
+    // Plus tard, l'annulation est confirmée par e-mail comme d'habitude.
+    const second = (await (await bookRequest(ctx, { start: slots[1] })).json()) as BookingConfirmation;
+    ctx.clock.now = new Date('2026-11-15T11:16:00Z');
+    ctx.sent.length = 0;
+    const later = await ctx.json(`/api/public/booking/cancel/${tokenOf(second)}`, 'POST');
+    expect(((await later.json()) as { emailSent: boolean }).emailSent).toBe(true);
+    expect(ctx.sent).toHaveLength(2);
+  });
+
+  it('annonce « aucun e-mail » à l’annulation quand rien n’a pu partir', async () => {
+    const ctx = await setup({ mail: 'none' });
+    await open(ctx);
+    const confirmation = (await (await bookRequest(ctx)).json()) as BookingConfirmation;
+    const res = await ctx.json(`/api/public/booking/cancel/${tokenOf(confirmation)}`, 'POST');
+    expect(((await res.json()) as { status: string; emailSent: boolean })).toMatchObject({ status: 'cancelled', emailSent: false });
+    const failing = await setup({ mail: 'fail' });
+    await open(failing);
+    const other = (await (await bookRequest(failing)).json()) as BookingConfirmation;
+    const res2 = await failing.json(`/api/public/booking/cancel/${tokenOf(other)}`, 'POST');
+    expect(((await res2.json()) as { emailSent: boolean }).emailSent).toBe(false);
   });
 
   it('laisse Antoine annuler depuis l’admin, avec ou sans e-mail au client', async () => {
@@ -932,7 +1285,7 @@ describe('prise de rendez-vous : limitation de débit', () => {
     expect(blocked.status).toBe(429);
     expect(await blocked.json()).toEqual({ error: 'Trop de demandes. Réessayez un peu plus tard.', code: 'rate_limited' });
     expect(Number(blocked.headers.get('retry-after'))).toBeGreaterThan(0);
-    // Les essais ratés comptent aussi, et une autre adresse n'est pas touchée.
+    // Une autre adresse n'est pas touchée.
     expect((await bookRequest(ctx, { start: slots[3], email: 'c3@example.org' }, '203.0.113.7, 198.51.100.4')).status).toBe(201);
     expect(ctx.booking.listBookings('upcoming')).toHaveLength(4);
   });
@@ -943,7 +1296,6 @@ describe('prise de rendez-vous : limitation de débit', () => {
     const ip = { ip: '203.0.113.9' };
     for (let i = 0; i < 4; i++) expect((await ctx.json('/api/public/booking', 'GET', undefined, ip)).status).toBe(200);
     expect((await ctx.json('/api/public/booking', 'GET', undefined, ip)).status).toBe(429);
-    expect((await ctx.json('/api/public/booking/types/consultation/slots?from=2026-11-16&to=2026-11-16', 'GET', undefined, ip)).status).toBe(429);
     expect((await ctx.json(`/api/public/booking/cancel/${'A'.repeat(43)}`, 'GET', undefined, ip)).status).toBe(429);
     expect((await ctx.json('/api/public/booking', 'GET', undefined, { ip: '203.0.113.10' })).status).toBe(200);
     for (let i = 0; i < 2; i++) expect((await ctx.json(`/api/public/booking/cancel/${'A'.repeat(43)}`, 'POST', undefined, ip)).status).toBe(404);
@@ -962,7 +1314,39 @@ describe('prise de rendez-vous : limitation de débit', () => {
     expect((await bookRequest(ctx, { start: slots[2], email: 'g2@example.org' }, '203.0.113.30')).status).toBe(429);
   });
 
-  it('borne la mémoire du limiteur et regroupe les adresses IPv6 par /64', () => {
+  it('limite les demandes de créneaux par adresse, puis toutes adresses confondues', async () => {
+    const ctx = await setup({ limits: { slots: [3, 60_000], slotsGlobal: [5, 60_000] } });
+    await open(ctx);
+    const get = (ip: string) => ctx.json('/api/public/booking/types/consultation/slots?from=2026-11-16&to=2026-11-16', 'GET', undefined, { ip });
+    for (let i = 0; i < 3; i++) expect((await get('203.0.113.9')).status).toBe(200);
+    const blocked = await get('203.0.113.9');
+    expect(blocked.status).toBe(429);
+    expect(Number(blocked.headers.get('retry-after'))).toBeGreaterThan(0);
+    // Les autres lectures et les autres adresses ne sont pas touchées…
+    expect((await ctx.json('/api/public/booking', 'GET', undefined, { ip: '203.0.113.9' })).status).toBe(200);
+    expect((await get('203.0.113.10')).status).toBe(200);
+    expect((await get('203.0.113.11')).status).toBe(200);
+    // … jusqu'au plafond global : le calcul des créneaux ne peut pas accaparer le processus.
+    expect((await get('203.0.113.12')).status).toBe(429);
+    expect((await ctx.admin('/api/booking/settings')).status).toBe(200);
+  });
+
+  it('compte à part les essais et les réservations abouties d’une même adresse IP', async () => {
+    const ctx = await setup({ limits: { bookOk: [2, 60_000] } });
+    await open(ctx);
+    const slots = await slotsOf(ctx);
+    const ip = '203.0.113.50';
+    // Les essais ratés (faute de frappe, créneau pris) ne consomment pas le plafond des réservations abouties.
+    for (let i = 0; i < 4; i++) expect((await bookRequest(ctx, { email: 'faux' }, ip)).status).toBe(400);
+    // Demandes simultanées : deux passent, pas une de plus.
+    const results = await Promise.all([0, 1, 2, 3].map((i) => bookRequest(ctx, { start: slots[i], email: `s${i}@example.org` }, ip)));
+    expect(results.map((r) => r.status).sort()).toEqual([201, 201, 429, 429]);
+    expect((await bookRequest(ctx, { start: slots[4], email: 's4@example.org' }, ip)).status).toBe(429);
+    expect((await bookRequest(ctx, { start: slots[4], email: 's4@example.org' }, '203.0.113.51')).status).toBe(201);
+    expect(ctx.booking.listBookings('upcoming')).toHaveLength(3);
+  });
+
+  it('borne la mémoire du limiteur et regroupe les adresses IPv6 par /56', () => {
     const limiter = new RateLimiter(2, 1000, 100);
     for (let i = 0; i < 1000; i++) expect(limiter.take(`ip-${i}`, 0).ok).toBe(true);
     expect(limiter.size).toBeLessThanOrEqual(100);
@@ -975,7 +1359,12 @@ describe('prise de rendez-vous : limitation de débit', () => {
     expect(rateKey('203.0.113.7')).toBe('203.0.113.7');
     expect(rateKey('::ffff:203.0.113.7')).toBe('203.0.113.7');
     expect(rateKey('2001:db8:1:2:aaaa:bbbb:cccc:dddd')).toBe(rateKey('2001:0db8:0001:0002::1'));
-    expect(rateKey('2001:db8:1:2::1')).not.toBe(rateKey('2001:db8:1:3::1'));
-    expect(rateKey('::1')).toBe('0:0:0:0::/64');
+    // Tout un /56 (256 sous-réseaux /64 d'un même abonné ou hébergement) compte pour un seul client.
+    expect(rateKey('2001:db8:1:2::1')).toBe(rateKey('2001:db8:1:ff::1'));
+    expect(rateKey('2001:db8:1:1200::1')).toBe(rateKey('2001:db8:1:12ff:ffff::9'));
+    expect(rateKey('2001:db8:1:1200::1')).not.toBe(rateKey('2001:db8:1:1300::1'));
+    expect(rateKey('2001:db8:1:2::1')).not.toBe(rateKey('2001:db8:2:2::1'));
+    expect(rateKey('2001:db8:1:12ab::1')).toBe('2001:db8:1:1200::/56');
+    expect(rateKey('::1')).toBe('0:0:0:0::/56');
   });
 });

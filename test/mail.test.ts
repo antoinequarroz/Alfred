@@ -1,4 +1,5 @@
 // Envoi des e-mails de la prise de rendez-vous, contre un faux serveur SMTP local.
+import { createServer, type AddressInfo, type Socket } from 'node:net';
 import ICAL from 'ical.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -151,6 +152,36 @@ describe('e-mails de la prise de rendez-vous', () => {
     smtp = await startFakeSmtp({ rejectRecipient: 'example.org' });
     await expect(mailerFor(smtp).send(clientConfirmation(booking, ctx, cancelUrl))).rejects.toThrow();
     expect(smtp.mails).toHaveLength(0);
+  });
+
+  it('abandonne un envoi qui dépasse la durée totale, même si le serveur répond au compte-gouttes', async () => {
+    // Le serveur salue, puis égrène une réponse sans fin : les délais d'inactivité ne se déclenchent jamais.
+    const timers = new Set<NodeJS.Timeout>();
+    const sockets = new Set<Socket>();
+    const server = createServer((socket) => {
+      sockets.add(socket);
+      socket.on('error', () => undefined);
+      socket.write('220 lent ESMTP\r\n');
+      socket.once('data', () => {
+        const timer = setInterval(() => socket.write('250-ENCORE\r\n'), 20);
+        timers.add(timer);
+        socket.on('close', () => clearInterval(timer));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const mailer = createSmtpMailer({
+        host: '127.0.0.1', port: (server.address() as AddressInfo).port, secure: false, requireTls: false, user: '', password: '',
+        from: { name: 'Antoine Quarroz', address: 'info@antoinequarroz.ch' }, notifyTo: 'info@antoinequarroz.ch', totalTimeoutMs: 150,
+      });
+      const started = Date.now();
+      await expect(mailer.send(clientConfirmation(booking, ctx, cancelUrl))).rejects.toThrow(/ne répond pas à temps/);
+      expect(Date.now() - started).toBeLessThan(2000);
+    } finally {
+      for (const timer of timers) clearInterval(timer);
+      for (const socket of sockets) socket.destroy();
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
   it('sans SMTP configuré, l’envoi est refusé proprement', async () => {

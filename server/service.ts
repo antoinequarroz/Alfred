@@ -22,14 +22,30 @@ export class CalendarService {
     return cal;
   }
 
-  async create(input: EventInput): Promise<string> {
+  /** uid : UID iCalendar imposé (pour pouvoir retrouver ou retirer l'événement si la création tourne mal). */
+  async create(input: EventInput, uid?: string): Promise<string> {
     const cal = this.writableCalendar(input.calendarId);
-    const { uid, ics } = buildNewEvent(input, this.tzid);
+    const built = buildNewEvent(input, this.tzid, uid);
+    const ics = built.ics;
+    uid = built.uid;
     if (cal.source === 'caldav') {
       const { href, etag } = await this.caldav!.create(cal.url!, uid, ics);
       return this.store.saveEvent({ calendarId: cal.id, href, etag, ics });
     }
     return this.store.saveEvent({ calendarId: cal.id, href: null, etag: null, ics });
+  }
+
+  /**
+   * Retire, au mieux, un événement dont la création n'a pas été confirmée (réponse perdue,
+   * délai dépassé) : la ressource CalDAV se déduit de l'UID, une ressource absente est tolérée.
+   */
+  async discardCreated(calendarId: string, uid: string): Promise<void> {
+    const cal = this.store.getCalendar(calendarId);
+    if (!cal) return;
+    if (cal.source === 'caldav' && this.caldav && cal.url) {
+      await this.caldav.remove(this.caldav.hrefFor(cal.url, uid), null);
+    }
+    for (const id of this.store.eventIdsByUid(cal.id, uid)) this.store.deleteEvent(id);
   }
 
   async update(eventId: string, input: EventInput, scope: EditScope, occurrenceId: string | null): Promise<string> {

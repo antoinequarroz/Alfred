@@ -42,6 +42,8 @@ export interface SmtpOptions {
   secure: boolean;
   /** STARTTLS obligatoire quand secure est faux. */
   requireTls: boolean;
+  /** Durée totale maximale d'un envoi, en ms (45 s par défaut). */
+  totalTimeoutMs?: number;
   user: string;
   password: string;
   from: MailAddress;
@@ -85,7 +87,7 @@ export function createSmtpMailer(opts: SmtpOptions): Mailer {
         disableFileAccess: true,
         disableUrlAccess: true,
       });
-      await transport.sendMail({
+      const sending = transport.sendMail({
         from,
         to: safeAddress(message.to),
         replyTo: message.replyTo ? safeAddress(message.replyTo) : undefined,
@@ -94,6 +96,23 @@ export function createSmtpMailer(opts: SmtpOptions): Mailer {
         html: message.html,
         attachments: message.attachments?.map((a) => ({ filename: headerSafe(a.filename), content: a.content, contentType: a.contentType })),
       });
+      // Les délais de nodemailer sont des délais d'inactivité : un serveur qui répond au
+      // compte-gouttes pourrait retenir l'envoi indéfiniment. On borne donc la durée totale.
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          sending,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('le serveur d’envoi ne répond pas à temps')), opts.totalTimeoutMs ?? 45_000);
+          }),
+        ]);
+      } catch (err) {
+        // Envoi abandonné : son éventuel échec tardif ne doit pas rester sans gestionnaire.
+        sending.catch(() => undefined);
+        throw err;
+      } finally {
+        clearTimeout(timer);
+      }
     },
   };
 }

@@ -44,8 +44,31 @@ export function toCalendarInfo(row: CalendarRow): CalendarInfo {
   };
 }
 
+/** Occupation compacte stockée en base : [début, fin, journée entière, disponible, annulé]. */
+type BusyTuple = [string, string, 0 | 1, 0 | 1, 0 | 1];
+
+function packBusy(list: BusyOccurrence[]): string {
+  return JSON.stringify(list.map((o): BusyTuple => [o.start, o.end, o.allDay ? 1 : 0, o.transparent ? 1 : 0, o.cancelled ? 1 : 0]));
+}
+
+function unpackBusy(json: string): BusyOccurrence[] {
+  return (JSON.parse(json) as BusyTuple[]).map(([start, end, allDay, transparent, cancelled]) => ({
+    start, end, allDay: allDay === 1, transparent: transparent === 1, cancelled: cancelled === 1,
+  }));
+}
+
 export class Store {
+  /**
+   * Compteur des écritures qui changent l'occupation de l'agenda (événements, calendriers).
+   * Sert à invalider ce qui en est déduit, comme le cache des créneaux.
+   */
+  private changes = 0;
+
   constructor(readonly db: Db) {}
+
+  get version(): number {
+    return this.changes;
+  }
 
   // --- calendriers -------------------------------------------------------
 
@@ -78,10 +101,12 @@ export class Store {
 
   setCalendarBlocksBooking(id: string, blocks: boolean): void {
     this.db.prepare('UPDATE calendars SET blocks_booking = ? WHERE id = ?').run(blocks ? 1 : 0, id);
+    this.changes++;
   }
 
   deleteCalendar(id: string): void {
     this.db.prepare('DELETE FROM calendars WHERE id = ?').run(id);
+    this.changes++;
   }
 
   ensureLocalCalendar(): void {
@@ -110,19 +135,22 @@ export class Store {
     const id = ev.id ?? (ev.href ? eventIdForHref(ev.href) : randomUUID());
     this.db
       .prepare(
-        `INSERT INTO events (id, calendar_id, href, etag, uid, ics, summary, start_ms, end_ms, recurring, recur_end_ms, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO events (id, calendar_id, href, etag, uid, ics, summary, start_ms, end_ms, recurring, recur_end_ms, busy, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET calendar_id = excluded.calendar_id, href = excluded.href, etag = excluded.etag,
            uid = excluded.uid, ics = excluded.ics, summary = excluded.summary, start_ms = excluded.start_ms,
            end_ms = excluded.end_ms, recurring = excluded.recurring, recur_end_ms = excluded.recur_end_ms,
-           updated_at = excluded.updated_at`,
+           busy = excluded.busy, updated_at = excluded.updated_at`,
       )
-      .run(id, ev.calendarId, ev.href, ev.etag, s.uid, ev.ics, s.summary, s.startMs, s.endMs, s.recurring ? 1 : 0, s.recurEndMs, Date.now());
+      .run(id, ev.calendarId, ev.href, ev.etag, s.uid, ev.ics, s.summary, s.startMs, s.endMs, s.recurring ? 1 : 0, s.recurEndMs,
+        s.busy ? packBusy(s.busy) : null, Date.now());
+    this.changes++;
     return id;
   }
 
   deleteEvent(id: string): void {
     this.db.prepare('DELETE FROM events WHERE id = ?').run(id);
+    this.changes++;
   }
 
   /** Occurrences visibles sur une période. */
@@ -162,17 +190,29 @@ export class Store {
     const margin = 86_400_000;
     const rows = this.db
       .prepare(
-        `SELECT e.id, e.ics FROM events e JOIN calendars c ON c.id = e.calendar_id
+        `SELECT e.id, e.recurring, e.busy, CASE WHEN e.busy IS NULL THEN e.ics END AS ics
+         FROM events e JOIN calendars c ON c.id = e.calendar_id
          WHERE c.blocks_booking = 1
            AND e.start_ms < ?
            AND ((e.recurring = 0 AND e.end_ms > ?)
              OR (e.recurring = 1 AND (e.recur_end_ms IS NULL OR e.recur_end_ms > ?)))`,
       )
-      .all(to.getTime() + margin, from.getTime() - margin, from.getTime() - margin) as unknown as { id: string; ics: string }[];
+      .all(to.getTime() + margin, from.getTime() - margin, from.getTime() - margin) as unknown as
+        { id: string; recurring: number; busy: string | null; ics: string | null }[];
     const out: BusyOccurrence[] = [];
     for (const row of rows) {
       try {
-        for (const o of expandBusy(row.ics, from, to)) out.push(o);
+        if (row.busy !== null) {
+          // Événement simple : son occupation est déjà en base, sans relire l'iCalendar.
+          for (const o of unpackBusy(row.busy)) out.push(o);
+        } else if (row.recurring === 1) {
+          for (const o of expandBusy(row.ics!, from, to)) out.push(o);
+        } else {
+          // Ligne antérieure à la colonne « busy » : calculée une fois, puis mémorisée.
+          const busy = summarize(row.ics!).busy ?? [];
+          this.db.prepare('UPDATE events SET busy = ? WHERE id = ?').run(packBusy(busy), row.id);
+          for (const o of busy) out.push(o);
+        }
       } catch (err) {
         console.warn(`[alfred] événement ${row.id} ignoré : ${(err as Error).message}`);
       }
@@ -180,10 +220,21 @@ export class Store {
     return out;
   }
 
-  /** Début et fin (ms) de l'événement tel qu'il est en base, ou undefined s'il n'existe plus. */
-  eventTimes(id: string): { startMs: number; endMs: number } | undefined {
-    const row = this.db.prepare('SELECT start_ms, end_ms FROM events WHERE id = ?').get(id) as { start_ms: number; end_ms: number } | undefined;
-    return row ? { startMs: row.start_ms, endMs: row.end_ms } : undefined;
+  /**
+   * Événement lié à une réservation : par identifiant local, sinon par UID iCalendar
+   * (l'identifiant change quand l'événement change de calendrier, pas l'UID).
+   */
+  findEvent(id: string | null, uid: string | null): { id: string; calendarId: string; uid: string; startMs: number; endMs: number } | undefined {
+    type Row = { id: string; calendar_id: string; uid: string; start_ms: number; end_ms: number };
+    const columns = 'id, calendar_id, uid, start_ms, end_ms';
+    let row = id ? (this.db.prepare(`SELECT ${columns} FROM events WHERE id = ?`).get(id) as Row | undefined) : undefined;
+    if (!row && uid) row = this.db.prepare(`SELECT ${columns} FROM events WHERE uid = ? ORDER BY updated_at DESC LIMIT 1`).get(uid) as Row | undefined;
+    return row && { id: row.id, calendarId: row.calendar_id, uid: row.uid, startMs: row.start_ms, endMs: row.end_ms };
+  }
+
+  /** Événements d'un calendrier qui portent cet UID. */
+  eventIdsByUid(calendarId: string, uid: string): string[] {
+    return (this.db.prepare('SELECT id FROM events WHERE calendar_id = ? AND uid = ?').all(calendarId, uid) as { id: string }[]).map((r) => r.id);
   }
 
   // --- sessions ----------------------------------------------------------

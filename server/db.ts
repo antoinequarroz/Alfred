@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_calendar ON events(calendar_id);
 CREATE INDEX IF NOT EXISTS events_range ON events(start_ms, end_ms);
 CREATE UNIQUE INDEX IF NOT EXISTS events_href ON events(href) WHERE href IS NOT NULL;
+CREATE INDEX IF NOT EXISTS events_uid ON events(uid);
 
 CREATE TABLE IF NOT EXISTS sessions (
   id         TEXT PRIMARY KEY,
@@ -101,11 +102,19 @@ const DEFAULT_HOURS: [number, number][] = [[9 * 60, 12 * 60], [13 * 60 + 30, 17 
 
 /** Migrations idempotentes : colonnes ajoutées après coup et valeurs initiales. */
 function migrate(db: DatabaseSync): void {
-  const columns = db.prepare('PRAGMA table_info(calendars)').all() as unknown as { name: string }[];
-  if (!columns.some((c) => c.name === 'blocks_booking')) {
-    // Par défaut, tout calendrier occupe l'agenda pour la prise de rendez-vous.
-    db.exec('ALTER TABLE calendars ADD COLUMN blocks_booking INTEGER NOT NULL DEFAULT 1');
-  }
+  const addColumn = (table: string, column: string, definition: string) => {
+    const columns = db.prepare(`PRAGMA table_info(${table})`).all() as unknown as { name: string }[];
+    if (!columns.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  };
+  // Par défaut, tout calendrier occupe l'agenda pour la prise de rendez-vous.
+  addColumn('calendars', 'blocks_booking', 'INTEGER NOT NULL DEFAULT 1');
+  // Occupation d'un événement non récurrent, calculée à l'enregistrement (JSON compact).
+  // NULL : série à développer, ou ligne antérieure à la colonne (complétée à la première lecture).
+  addColumn('events', 'busy', 'TEXT');
+  // UID iCalendar de l'événement créé : il survit à un changement de calendrier, pas l'identifiant local.
+  addColumn('bookings', 'event_uid', 'TEXT');
+  // Horaire annoncé au client quand il diffère de l'horaire actuel (événement déplacé dans l'agenda).
+  addColumn('bookings', 'notified_start', 'TEXT');
   // Les horaires ne sont posés qu'une fois : si Antoine les vide ensuite, ils restent vides.
   const seeded = db.prepare("SELECT 1 FROM booking_settings WHERE key = 'hours_seeded'").get();
   if (!seeded) {

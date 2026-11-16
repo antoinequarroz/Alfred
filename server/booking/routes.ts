@@ -6,10 +6,16 @@ import { BookingError, type BookingService } from './service.js';
 
 /** Limites de débit de la partie publique : [nombre de requêtes, fenêtre en ms]. */
 export interface BookingLimits {
-  /** Lectures (infos, créneaux, consultation par jeton), par adresse IP. */
+  /** Lectures légères (infos, consultation par jeton), par adresse IP. */
   read: [number, number];
-  /** Réservations, par adresse IP. */
+  /** Demandes de créneaux, par adresse IP. */
+  slots: [number, number];
+  /** Demandes de créneaux, toutes adresses confondues : un afflux ne doit pas accaparer le processus. */
+  slotsGlobal: [number, number];
+  /** Essais de réservation (aboutis ou non), par adresse IP. */
   book: [number, number];
+  /** Réservations abouties, par adresse IP. */
+  bookOk: [number, number];
   /** Réservations abouties, toutes adresses confondues (garde-fou contre un afflux distribué). */
   bookGlobal: [number, number];
   /** Annulations par jeton, par adresse IP. */
@@ -18,9 +24,12 @@ export interface BookingLimits {
 
 export const DEFAULT_BOOKING_LIMITS: BookingLimits = {
   read: [120, 60_000],
-  book: [20, 3_600_000],
+  slots: [30, 60_000],
+  slotsGlobal: [600, 60_000],
+  book: [30, 3_600_000],
+  bookOk: [5, 3_600_000],
   bookGlobal: [60, 3_600_000],
-  cancel: [20, 3_600_000],
+  cancel: [10, 3_600_000],
 };
 
 /**
@@ -41,15 +50,20 @@ export function clientIp(c: Context): string {
 /** Routes publiques, sans session : /api/public/booking/*. À enregistrer avant le contrôle de session. */
 export function registerPublicBookingRoutes(app: Hono, booking: BookingService, limits: BookingLimits = DEFAULT_BOOKING_LIMITS): void {
   const read = new RateLimiter(...limits.read);
+  const slots = new RateLimiter(...limits.slots);
+  const slotsGlobal = new RateLimiter(...limits.slotsGlobal, 1);
   const book = new RateLimiter(...limits.book);
+  const bookOk = new RateLimiter(...limits.bookOk);
   const bookGlobal = new RateLimiter(...limits.bookGlobal, 1);
   const cancel = new RateLimiter(...limits.cancel);
 
+  const tooMany = (c: Context, retryAfterSec?: number): Response => {
+    if (retryAfterSec) c.header('Retry-After', String(retryAfterSec));
+    return c.json({ error: 'Trop de demandes. Réessayez un peu plus tard.', code: 'rate_limited' }, 429);
+  };
   const limited = (c: Context, limiter: RateLimiter, key = clientIp(c)): Response | null => {
     const res = limiter.take(key);
-    if (res.ok) return null;
-    c.header('Retry-After', String(res.retryAfterSec));
-    return c.json({ error: 'Trop de demandes. Réessayez un peu plus tard.', code: 'rate_limited' }, 429);
+    return res.ok ? null : tooMany(c, res.retryAfterSec);
   };
 
   app.use('/api/public/*', bodyLimit({ maxSize: 16 * 1024 }));
@@ -76,22 +90,27 @@ export function registerPublicBookingRoutes(app: Hono, booking: BookingService, 
   app.get('/api/public/booking', (c) => limited(c, read) ?? c.json(booking.publicInfo()));
 
   app.get('/api/public/booking/types/:slug/slots', (c) =>
-    limited(c, read) ?? c.json(booking.publicSlots(c.req.param('slug'), c.req.query('from'), c.req.query('to'))),
+    limited(c, slots) ?? limited(c, slotsGlobal, '*') ?? c.json(booking.publicSlots(c.req.param('slug'), c.req.query('from'), c.req.query('to'))),
   );
 
   app.post('/api/public/booking/book', async (c) => {
-    const blocked = limited(c, book);
+    const ip = clientIp(c);
+    const blocked = limited(c, book, ip);
     if (blocked) return blocked;
-    // Le plafond global ne compte que les réservations abouties : des essais ratés ne ferment pas la page aux autres.
-    if (bookGlobal.isBlocked('*')) {
-      return c.json({ error: 'Trop de demandes. Réessayez un peu plus tard.', code: 'rate_limited' }, 429);
-    }
+    // Les plafonds de réservations abouties ne comptent pas les essais ratés : une faute de
+    // frappe ou un créneau pris ne ferment la page à personne.
+    if (bookOk.isBlocked(ip) || bookGlobal.isBlocked('*')) return tooMany(c);
     if (!/^application\/json\b/i.test(c.req.header('content-type') ?? '')) {
       throw new BookingError(415, 'unsupported', 'Le corps doit être en JSON (Content-Type: application/json)');
     }
-    const confirmation = await booking.book(await c.req.json());
-    bookGlobal.take('*');
-    return c.json(confirmation, 201);
+    // Comptés dans la section critique, juste avant de créer l'événement : des demandes
+    // simultanées ne peuvent pas passer toutes ensemble sous le plafond.
+    const admit = () => {
+      if (bookOk.isBlocked(ip) || bookGlobal.isBlocked('*')) throw new BookingError(429, 'rate_limited', 'Trop de demandes. Réessayez un peu plus tard.');
+      bookOk.take(ip);
+      bookGlobal.take('*');
+    };
+    return c.json(await booking.book(await c.req.json(), admit), 201);
   });
 
   app.get('/api/public/booking/cancel/:token', (c) => limited(c, read) ?? c.json(booking.getByToken(c.req.param('token'))));

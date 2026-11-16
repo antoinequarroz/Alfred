@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { newUid, type BusyOccurrence } from '../ics.js';
 import type {
   Booking, BookingAdminState, BookingConfirmation, BookingHoursRange, BookingMode, BookingSettings, BookingType,
   PublicBooking, PublicBookingInfo, PublicBookingType, PublicSlots,
@@ -41,13 +42,24 @@ export interface BookingOptions {
   syncTimeoutMs?: number;
   /** Attente maximale d'une écriture dans le calendrier (création ou suppression de l'événement). */
   calendarTimeoutMs?: number;
-  /** Nombre maximal de rendez-vous à venir pour une même adresse e-mail. */
-  maxUpcomingPerEmail?: number;
+  /** Nombre maximal de réservations créées en 24 heures pour une même adresse e-mail (annulées comprises). */
+  maxPerEmailPerDay?: number;
+  /** Attente maximale des envois d'e-mails avant de répondre ; ils se poursuivent ensuite en arrière-plan. */
+  mailWaitMs?: number;
+  /** Durée totale maximale d'un envoi d'e-mail : au-delà, il est compté comme un échec. */
+  mailTimeoutMs?: number;
+  /** Plafond d'e-mails sortants sur 24 heures glissantes, tous destinataires confondus. */
+  mailDailyLimit?: number;
+  /** Une annulation par le client dans ce délai après la réservation n'envoie pas d'e-mail au client. */
+  quietCancelMinutes?: number;
 }
 
 const DAY_MS = 86_400_000;
-/** Étendue maximale d'une demande de créneaux, en jours. */
-export const MAX_RANGE_DAYS = 62;
+/** Étendue maximale d'une demande de créneaux, en jours (un mois affiché, semaines entières comprises). */
+export const MAX_RANGE_DAYS = 42;
+const WEEKDAY_NAMES = ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche'];
+/** Nom d'une personne : lettres (toutes écritures), espaces, apostrophes, tirets, point d'abréviation. */
+const NAME_RE = /^[\p{L}\p{M}][\p{L}\p{M} '’.-]*$/u;
 const MAX_WAITING = 20;
 const MODES: BookingMode[] = ['cabinet', 'telephone', 'visio', 'autre'];
 const MODE_LABELS: Record<BookingMode, string> = { cabinet: 'Au cabinet', telephone: 'Par téléphone', visio: 'En visio', autre: '' };
@@ -130,9 +142,19 @@ export class BookingService {
   private readonly now: () => Date;
   private readonly syncTimeoutMs: number;
   private readonly calendarTimeoutMs: number;
-  private readonly maxUpcomingPerEmail: number;
+  private readonly maxPerEmailPerDay: number;
+  private readonly mailWaitMs: number;
+  private readonly mailTimeoutMs: number;
+  private readonly mailDailyLimit: number;
+  private readonly quietCancelMs: number;
   private chain: Promise<unknown> = Promise.resolve();
   private waiting = 0;
+  /** Occupation de l'agenda sur toute la période réservable, recalculée seulement quand l'agenda change. */
+  private busyCache: { key: string; fromMs: number; toMs: number; list: BusyOccurrence[] } | null = null;
+  /** Version de l'agenda pour laquelle les réservations ont été rapprochées de leurs événements. */
+  private reconciledVersion = -1;
+  /** Instants (ms) des e-mails partis sur les dernières 24 heures. */
+  private mailTimes: number[] = [];
 
   constructor(opts: BookingOptions) {
     this.store = opts.store;
@@ -146,7 +168,11 @@ export class BookingService {
     this.now = opts.now ?? (() => new Date());
     this.syncTimeoutMs = opts.syncTimeoutMs ?? 4000;
     this.calendarTimeoutMs = opts.calendarTimeoutMs ?? 20_000;
-    this.maxUpcomingPerEmail = opts.maxUpcomingPerEmail ?? 5;
+    this.maxPerEmailPerDay = opts.maxPerEmailPerDay ?? 3;
+    this.mailWaitMs = opts.mailWaitMs ?? 8000;
+    this.mailTimeoutMs = opts.mailTimeoutMs ?? 60_000;
+    this.mailDailyLimit = opts.mailDailyLimit ?? 200;
+    this.quietCancelMs = (opts.quietCancelMinutes ?? 15) * 60_000;
   }
 
   /** Section critique : une seule réservation ou annulation à la fois. */
@@ -203,6 +229,10 @@ export class BookingService {
       if (body.slotStepMin === 15 || body.slotStepMin === 30 || body.slotStepMin === 60) next.slotStepMin = body.slotStepMin;
       else fields.slotStepMin = 'Pas des créneaux : 15, 30 ou 60 minutes';
     }
+    if ('allDayBlocks' in body) {
+      if (typeof body.allDayBlocks === 'boolean') next.allDayBlocks = body.allDayBlocks;
+      else fields.allDayBlocks = 'Valeur attendue : vrai ou faux';
+    }
     if (Object.keys(fields).length > 0) throw invalid(fields);
     this.data.saveSettings(next);
     return next;
@@ -233,12 +263,19 @@ export class BookingService {
     const sync = this.caldav?.getStatus();
     if (sync?.lastError) warnings.push('La synchro iCloud est en échec : les créneaux sont calculés sur la dernière copie connue.');
     if (!settings.enabled) warnings.push('La prise de rendez-vous est fermée : la page publique n’accepte aucune réservation.');
+    const sentLast24h = this.mailsSentLast24h();
+    if (this.mailer.configured && sentLast24h >= this.mailDailyLimit) {
+      warnings.push(`Le plafond de ${this.mailDailyLimit} e-mails par 24 heures est atteint : plus aucun e-mail ne part pour l’instant. Vérifie qu’il ne s’agit pas d’un abus du formulaire.`);
+    }
     return {
       settings,
       effectiveCalendarId,
       timezone: this.timezone,
       publicPageUrl: `${this.publicUrl}/rdv`,
-      mail: { configured: this.mailer.configured, from: this.mailer.from, notifyTo: this.mailer.notifyTo },
+      mail: {
+        configured: this.mailer.configured, from: this.mailer.from, notifyTo: this.mailer.notifyTo,
+        sentLast24h, dailyLimit: this.mailDailyLimit,
+      },
       warnings,
     };
   }
@@ -362,15 +399,18 @@ export class BookingService {
       const weekday = isObject(item) ? intIn(item.weekday, 1, 7) : null;
       const startMin = isObject(item) ? intIn(item.startMin, 0, 1439) : null;
       const endMin = isObject(item) ? intIn(item.endMin, 1, 1440) : null;
-      if (weekday === null || startMin === null || endMin === null || endMin <= startMin) {
-        throw invalid({ hours: 'Chaque plage a un jour (1 = lundi … 7 = dimanche), un début et une fin (minutes depuis minuit), la fin après le début' });
+      if (weekday !== null && startMin !== null && endMin !== null && endMin <= startMin) {
+        throw invalid({ hours: `${WEEKDAY_NAMES[weekday - 1]} : la fin d’une plage doit être après son début` });
+      }
+      if (weekday === null || startMin === null || endMin === null) {
+        throw invalid({ hours: 'Horaires illisibles : chaque plage a un jour, une heure de début et une heure de fin' });
       }
       hours.push({ weekday, startMin, endMin });
     }
     hours.sort((a, b) => a.weekday - b.weekday || a.startMin - b.startMin);
     for (let i = 1; i < hours.length; i++) {
       if (hours[i].weekday === hours[i - 1].weekday && hours[i].startMin < hours[i - 1].endMin) {
-        throw invalid({ hours: 'Deux plages du même jour se chevauchent' });
+        throw invalid({ hours: `${WEEKDAY_NAMES[hours[i].weekday - 1]} : deux plages se chevauchent` });
       }
     }
     this.data.setHours(hours);
@@ -387,6 +427,65 @@ export class BookingService {
 
   // --- créneaux ------------------------------------------------------------
 
+  /**
+   * Rapproche les réservations confirmées de leurs événements, quand l'agenda a changé :
+   * - l'événement a changé de calendrier (nouvel identifiant local) : il est retrouvé par son UID ;
+   * - l'événement a été déplacé dans le temps : la réservation prend le nouvel horaire (l'ancien
+   *   créneau est libéré, le nouveau est protégé avec ses tampons) et retient l'horaire que le
+   *   client connaît, pour le signaler dans l'admin.
+   */
+  private reconcile(): void {
+    if (this.reconciledVersion === this.store.version) return;
+    const since = new Date(this.now().getTime() - 60 * DAY_MS).toISOString();
+    for (const b of this.data.confirmedEndingAfter(since)) {
+      const ev = this.linkedEvent(b);
+      if (!ev || ev.endMs <= ev.startMs) continue;
+      if (ev.startMs === Date.parse(b.start_utc) && ev.endMs === Date.parse(b.end_utc)) continue;
+      const start = new Date(ev.startMs).toISOString();
+      const known = b.notified_start ?? b.start_utc;
+      this.data.reschedule(b.id, start, new Date(ev.endMs).toISOString(), Date.parse(known) === ev.startMs ? null : known);
+    }
+    this.reconciledVersion = this.store.version;
+  }
+
+  /** Événement lié à une réservation, retrouvé au besoin par son UID ; la réservation est alors rattachée. */
+  private linkedEvent(b: BookingRow): { id: string; startMs: number; endMs: number } | undefined {
+    const ev = this.store.findEvent(b.event_id, b.event_uid);
+    if (ev && (ev.id !== b.event_id || ev.calendarId !== b.calendar_id || b.event_uid !== ev.uid)) {
+      this.data.setEvent(b.id, ev.id, ev.calendarId, ev.uid);
+      b.event_id = ev.id;
+      b.calendar_id = ev.calendarId;
+      b.event_uid = ev.uid;
+    }
+    return ev;
+  }
+
+  /**
+   * Occupation de l'agenda entre deux instants. Toute la période réservable est développée
+   * une seule fois, puis réutilisée tant que l'agenda ne change pas : une demande de créneaux
+   * ne relit ni ne redéveloppe aucun événement.
+   */
+  private agendaBusy(fromMs: number, toMs: number): BusyOccurrence[] {
+    const today = localDateOf(this.now().getTime(), this.timezone);
+    const horizon = this.data.listTypes().reduce((max, t) => Math.max(max, t.horizonDays), 0);
+    const allDayBlocks = this.getSettings().allDayBlocks;
+    const key = `${this.store.version}|${today}|${horizon}|${allDayBlocks ? 1 : 0}`;
+    if (this.busyCache?.key !== key) {
+      const start = startOfLocalDay(today, this.timezone) - DAY_MS;
+      const end = startOfLocalDay(addDays(today, horizon + 1), this.timezone) + DAY_MS;
+      this.busyCache = { key, fromMs: start, toMs: end, list: this.readBusy(start, end, allDayBlocks) };
+    }
+    if (fromMs >= this.busyCache.fromMs && toMs <= this.busyCache.toMs) return this.busyCache.list;
+    return this.readBusy(fromMs, toMs, allDayBlocks);
+  }
+
+  private readBusy(fromMs: number, toMs: number, allDayBlocks: boolean): BusyOccurrence[] {
+    const list = this.store.busyOccurrences(new Date(fromMs), new Date(toMs));
+    // Apple Calendar marque « disponible » les journées entières qu'il crée (congés compris) :
+    // selon le réglage, une journée entière bloque quelle que soit cette marque.
+    return allDayBlocks ? list.map((o) => (o.allDay && o.transparent ? { ...o, transparent: false } : o)) : list;
+  }
+
   /** Créneaux libres d'un type entre deux jours locaux inclus. Ne lit que des horaires, jamais de détail d'événement. */
   slotDays(type: BookingType, from: string, to: string): SlotDay[] {
     const now = this.now();
@@ -396,9 +495,10 @@ export class BookingService {
     const horizon = addDays(today, type.horizonDays);
     const last = to > horizon ? horizon : to;
     if (last < first) return [];
+    this.reconcile();
     const fromMs = startOfLocalDay(first, this.timezone) - DAY_MS;
     const toMs = startOfLocalDay(addDays(last, 1), this.timezone) + DAY_MS;
-    const busy: BusyEvent[] = this.store.busyOccurrences(new Date(fromMs), new Date(toMs));
+    const busy: BusyEvent[] = [...this.agendaBusy(fromMs, toMs)];
     // Les réservations bloquent même si l'événement n'est pas (encore) dans la copie locale.
     for (const b of this.data.confirmedBetween(new Date(fromMs).toISOString(), new Date(toMs).toISOString())) {
       busy.push({ start: b.start_utc, end: b.end_utc, bufferBeforeMin: b.buffer_before_min, bufferAfterMin: b.buffer_after_min });
@@ -483,20 +583,26 @@ export class BookingService {
     await withTimeout(this.caldav.sync(), this.syncTimeoutMs);
   }
 
-  /** Réservation publique. Lève BookingError avec un code stable en cas de refus. */
-  async book(body: unknown): Promise<BookingConfirmation> {
+  /**
+   * Réservation publique. Lève BookingError avec un code stable en cas de refus.
+   * admit : dernier contrôle appelé dans la section critique, juste avant de créer l'événement
+   * (plafonds de débit comptés sans course entre demandes simultanées) ; il lève pour refuser.
+   */
+  async book(body: unknown, admit?: () => void): Promise<BookingConfirmation> {
     if (!isObject(body)) throw invalid({ _: 'Corps de requête invalide' });
     // Champ piège : un humain ne le voit pas, un robot le remplit.
     if (body.website !== undefined && body.website !== '' && body.website !== null) {
       throw new BookingError(400, 'rejected', 'Demande refusée.');
     }
     this.requireOpen();
-    const type = this.publicType(body.typeSlug);
+    const requested = this.publicType(body.typeSlug);
 
     const fields: Record<string, string> = {};
     const name = typeof body.name === 'string' ? body.name.trim().replace(/\s+/g, ' ') : '';
-    if (name.length < 2 || name.length > 80 || CONTROL_RE.test(name) || /[<>@]|:\/\/|www\./i.test(name)) {
-      fields.name = 'Indiquez votre nom (2 à 80 caractères, sans adresse ni lien)';
+    // Le nom ouvre l'e-mail envoyé à une adresse non vérifiée : il ne doit pouvoir porter ni lien
+    // ni domaine (« exemple.ch/x » devient cliquable dans les messageries), ni caractère invisible.
+    if (name.length < 2 || name.length > 60 || !NAME_RE.test(name) || /\.[^ -]/.test(name)) {
+      fields.name = 'Indiquez votre nom et votre prénom (lettres, espaces, tirets et apostrophes, 60 caractères au plus)';
     }
     const email = typeof body.email === 'string' ? body.email.trim() : '';
     if (email.length > 254 || email.indexOf('@') > 64 || !EMAIL_RE.test(email)) fields.email = 'Adresse e-mail invalide';
@@ -504,7 +610,7 @@ export class BookingService {
     if (body.phone !== undefined && body.phone !== null && body.phone !== '') {
       phone = typeof body.phone === 'string' ? body.phone.trim() : '';
       if (!PHONE_RE.test(phone)) fields.phone = 'Numéro de téléphone invalide';
-    } else if (type.mode === 'telephone') {
+    } else if (requested.mode === 'telephone') {
       fields.phone = 'Le téléphone est nécessaire pour ce rendez-vous';
     }
     let message = '';
@@ -518,24 +624,34 @@ export class BookingService {
 
     const taken = () => new BookingError(409, 'slot_unavailable', 'Ce créneau n’est plus disponible. Choisissez-en un autre.');
     // Premier contrôle sans attendre : le créneau doit être exactement un créneau proposé.
-    if (!this.isFree(type, startMs)) throw taken();
-    if (this.data.countUpcomingForEmail(email, this.now().toISOString()) >= this.maxUpcomingPerEmail) {
-      throw new BookingError(409, 'too_many_bookings', 'Vous avez déjà plusieurs rendez-vous à venir. Annulez-en un ou contactez-nous directement.');
-    }
+    if (!this.isFree(requested, startMs)) throw taken();
 
     const start = new Date(startMs).toISOString();
-    const end = new Date(startMs + type.durationMin * 60_000).toISOString();
-    const location = locationLabel(type.mode, type.location);
     const token = randomBytes(32).toString('base64url');
+    // UID choisi avant la création : si elle tourne mal, l'événement peut être retrouvé et retiré.
+    const uid = newUid();
 
     // La synchro est commune à toutes les demandes en cours : on l'attend hors du verrou.
     await this.freshSync();
     const row = await this.locked(async (): Promise<BookingRow> => {
-      // Après la synchro et sous verrou : l'agenda a pu changer, un autre client a pu passer devant.
+      // Après la synchro et l'attente du verrou, tout a pu changer : réglages, type, agenda,
+      // réservations des autres clients. Tout est donc relu ici.
       if (!this.getSettings().enabled) throw new BookingError(403, 'closed', 'La prise de rendez-vous n’est pas ouverte.');
+      const type = this.data.getType(requested.id);
+      if (!type || !type.active) throw new BookingError(404, 'unknown_type', 'Ce type de rendez-vous n’existe pas ou n’est plus proposé.');
+      if (type.mode === 'telephone' && !phone) throw invalid({ phone: 'Le téléphone est nécessaire pour ce rendez-vous' });
       if (!this.isFree(type, startMs)) throw taken();
+      // Plafond par adresse destinataire, annulations comprises : le formulaire ne doit pas servir à
+      // inonder une adresse d'e-mails. Même refus que la limite de débit : rien n'est révélé sur l'adresse.
+      const since = new Date(this.now().getTime() - DAY_MS).toISOString();
+      if (this.data.countCreatedForEmailSince(email, since) >= this.maxPerEmailPerDay) {
+        throw new BookingError(429, 'rate_limited', 'Trop de demandes. Réessayez un peu plus tard.');
+      }
+      admit?.();
       const calendarId = this.targetCalendarId();
       if (!calendarId) throw new BookingError(503, 'calendar_unavailable', 'La réservation est momentanément impossible. Réessayez plus tard.');
+      const end = new Date(startMs + type.durationMin * 60_000).toISOString();
+      const location = locationLabel(type.mode, type.location);
       const description = [
         'Rendez-vous pris en ligne.',
         `Nom : ${name}`,
@@ -544,27 +660,33 @@ export class BookingService {
         message ? `Message : ${message}` : '',
       ].filter(Boolean).join('\n');
       const unavailable = () => new BookingError(502, 'calendar_unavailable', 'La réservation est momentanément impossible. Réessayez plus tard.');
-      const creating = this.calendar.create({ calendarId, title: `${type.name} : ${name}`, start, end, allDay: false, location, description });
+      // Le serveur de calendrier a pu enregistrer l'événement sans que la réponse nous parvienne :
+      // on le retire au mieux (il se retrouve par son UID), pour ne pas laisser de rendez-vous fantôme.
+      const discard = () => this.calendar.discardCreated(calendarId, uid).catch((err) => {
+        console.error('[alfred] réservation : l’événement abandonné n’a pas pu être retiré :', err);
+      });
+      const creating = this.calendar.create({ calendarId, title: `${type.name} : ${name}`, start, end, allDay: false, location, description }, uid);
       let eventId: string | typeof TIMED_OUT;
       try {
         eventId = await withTimeout(creating, this.calendarTimeoutMs);
       } catch (err) {
         console.error('[alfred] réservation : création de l’événement en échec :', err);
+        void discard();
         throw unavailable();
       }
       if (eventId === TIMED_OUT) {
-        // Le serveur de calendrier ne répond pas : on libère le verrou. Si la création finit
-        // par aboutir, l'événement est retiré pour ne pas rester sans réservation.
+        // Le serveur de calendrier ne répond pas : on libère le verrou. Que la création finisse
+        // par aboutir ou par échouer, l'événement est retiré pour ne pas rester sans réservation.
         console.error('[alfred] réservation : le calendrier ne répond pas, demande abandonnée');
-        creating.then((late) => this.calendar.remove(late, 'all', null)).catch(() => undefined);
+        creating.then((late) => this.calendar.remove(late, 'all', null), discard).catch(() => undefined);
         throw unavailable();
       }
       const booking: BookingRow = {
         id: randomUUID(), type_id: type.id, type_name: type.name, location,
         buffer_before_min: type.bufferBeforeMin, buffer_after_min: type.bufferAfterMin,
-        event_id: eventId, calendar_id: calendarId, start_utc: start, end_utc: end,
+        event_id: eventId, event_uid: uid, calendar_id: calendarId, start_utc: start, end_utc: end,
         name, email, phone, message, status: 'confirmed', token_hash: hashToken(token),
-        created_at: this.now().toISOString(), cancelled_at: null, cancelled_by: null, mail_error: null,
+        created_at: this.now().toISOString(), cancelled_at: null, cancelled_by: null, mail_error: null, notified_start: null,
       };
       try {
         this.data.insertBooking(booking);
@@ -593,30 +715,52 @@ export class BookingService {
     };
   }
 
+  private mailsSentLast24h(): number {
+    const since = this.now().getTime() - DAY_MS;
+    this.mailTimes = this.mailTimes.filter((t) => t > since);
+    return this.mailTimes.length;
+  }
+
   /**
-   * Envoie des e-mails liés à une réservation. Un échec ne remet jamais en cause la
-   * réservation : il est journalisé et noté sur la réservation (visible dans l'admin).
+   * Envoie des e-mails liés à une réservation et attend la fin de tous les envois. Un échec ne
+   * remet jamais en cause la réservation : il est journalisé et noté sur la réservation (visible
+   * dans l'admin). Ne rejette jamais ; renvoie, pour chaque message, s'il est parti.
    */
-  private async sendMails(bookingId: string, messages: [label: string, message: MailMessage][]): Promise<boolean[]> {
+  private async dispatch(bookingId: string, messages: [label: string, message: MailMessage][]): Promise<boolean[]> {
     if (messages.length === 0) return [];
     if (!this.mailer.configured) {
       this.data.setMailError(bookingId, 'E-mails non configurés : aucun message envoyé');
       return messages.map(() => false);
     }
-    const results = await Promise.allSettled(messages.map(([, m]) => this.mailer.send(m)));
-    const errors: string[] = [];
-    results.forEach((r, i) => {
-      if (r.status === 'rejected') {
-        const reason = r.reason instanceof Error ? r.reason.message : String(r.reason);
-        console.error(`[alfred] e-mail en échec (${messages[i][0]}, réservation ${bookingId}) : ${reason}`);
-        errors.push(`${messages[i][0]} : envoi en échec (${reason})`.slice(0, 300));
-      }
-    });
+    const failures = await Promise.all(messages.map(async ([label, message]): Promise<string | null> => {
+      // Plafond global : même détourné, le formulaire ne peut pas faire partir un flot d'e-mails.
+      if (this.mailsSentLast24h() >= this.mailDailyLimit) return `${label} : non envoyé (plafond de ${this.mailDailyLimit} e-mails par 24 heures atteint)`;
+      this.mailTimes.push(this.now().getTime());
+      const sending = this.mailer.send(message).then(() => null, (err: unknown) => (err instanceof Error ? err.message : String(err)));
+      const reason = await withTimeout(sending, this.mailTimeoutMs);
+      if (reason === null) return null;
+      return `${label} : envoi en échec (${reason === TIMED_OUT ? 'délai dépassé' : reason})`.slice(0, 300);
+    }));
+    const errors = failures.filter((f): f is string => f !== null);
+    for (const error of errors) console.error(`[alfred] e-mail, réservation ${bookingId} : ${error}`);
     this.data.setMailError(bookingId, errors.length > 0 ? errors.join(' ; ') : null);
-    return results.map((r) => r.status === 'fulfilled');
+    return failures.map((f) => f === null);
+  }
+
+  /**
+   * Envoie des e-mails sans retenir la réponse HTTP plus de mailWaitMs : la réservation est déjà
+   * enregistrée, le client doit voir son récapitulatif même si le serveur d'envoi est lent ou en
+   * panne. Au-delà, l'envoi se poursuit en arrière-plan et son résultat est noté sur la réservation.
+   */
+  private async sendMails(bookingId: string, messages: [label: string, message: MailMessage][], sending = this.dispatch(bookingId, messages)): Promise<boolean[]> {
+    const done = await withTimeout(sending, this.mailWaitMs);
+    if (done !== TIMED_OUT) return done;
+    this.data.setMailError(bookingId, 'Envoi des e-mails en cours : le serveur d’envoi répond lentement');
+    return messages.map(() => false);
   }
 
   private byToken(token: string): BookingRow {
+    this.reconcile();
     const row = TOKEN_RE.test(token) ? this.data.getBookingByTokenHash(hashToken(token)) : undefined;
     // Même réponse pour un jeton inconnu et pour un rendez-vous déjà annulé.
     if (!row || row.status !== 'confirmed') {
@@ -630,15 +774,18 @@ export class BookingService {
     return this.toPublicBooking(this.byToken(token));
   }
 
-  /** Annulation par le client, depuis le lien reçu par e-mail. */
+  /** Annulation par le client, depuis le lien reçu par e-mail. emailSent : un e-mail lui confirme l'annulation. */
   async cancelByToken(token: string): Promise<PublicBooking> {
     const row = this.byToken(token);
     if (Date.parse(row.start_utc) <= this.now().getTime()) {
       throw new BookingError(409, 'too_late', 'Ce rendez-vous a déjà commencé ou est passé : il ne peut plus être annulé en ligne.');
     }
-    const cancelled = await this.cancel(row.id, 'client', true);
+    // Annulation aussitôt après la réservation : le client a le résultat sous les yeux, et un
+    // aller-retour réserver/annuler ne doit pas doubler les e-mails envoyés à une adresse non vérifiée.
+    const quiet = this.now().getTime() - Date.parse(row.created_at) < this.quietCancelMs;
+    const cancelled = await this.cancel(row.id, 'client', !quiet);
     if (!cancelled) throw new BookingError(404, 'not_found', 'Ce lien n’est plus valable : rendez-vous introuvable ou déjà annulé.');
-    return this.toPublicBooking(cancelled);
+    return { ...this.toPublicBooking(cancelled.row), emailSent: cancelled.clientSent };
   }
 
   /**
@@ -646,11 +793,12 @@ export class BookingService {
    * déjà disparu), marque la réservation, puis prévient par e-mail.
    * Renvoie null si elle était déjà annulée.
    */
-  private async cancel(id: string, by: 'client' | 'admin', notifyClient: boolean): Promise<BookingRow | null> {
+  private async cancel(id: string, by: 'client' | 'admin', notifyClient: boolean): Promise<{ row: BookingRow; clientSent: boolean } | null> {
     const row = await this.locked(async () => {
+      this.reconcile();
       const current = this.data.getBooking(id);
       if (!current || current.status !== 'confirmed') return null;
-      if (current.event_id) await this.removeEvent(current.event_id);
+      await this.removeEvent(current);
       this.data.markCancelled(id, by, this.now().toISOString());
       return this.data.getBooking(id)!;
     });
@@ -661,13 +809,17 @@ export class BookingService {
     if (notifyClient) messages.push(['Avis d’annulation au client', clientCancellation(data, ctx, by)]);
     // Antoine n'a pas besoin d'un avis pour ce qu'il vient d'annuler lui-même.
     if (by === 'client') messages.push(['Avis d’annulation', ownerCancellation(data, ctx, this.mailer.notifyTo)]);
-    await this.sendMails(row.id, messages);
-    return this.data.getBooking(id)!;
+    const sent = await this.sendMails(row.id, messages);
+    return { row: this.data.getBooking(id)!, clientSent: notifyClient && sent[0] === true };
   }
 
-  private async removeEvent(eventId: string): Promise<void> {
+  /** Retire l'événement d'une réservation, où qu'il soit : il est retrouvé par son UID s'il a changé de calendrier. */
+  private async removeEvent(booking: BookingRow): Promise<void> {
     const unavailable = () => new BookingError(502, 'calendar_unavailable', 'L’annulation est momentanément impossible. Réessayez plus tard.');
     for (let attempt = 0; attempt < 2; attempt++) {
+      const eventId = this.linkedEvent(booking)?.id;
+      // Déjà supprimé (par exemple dans Apple Calendar) : rien à faire.
+      if (!eventId) return;
       try {
         const removing = this.calendar.remove(eventId, 'all', null);
         if ((await withTimeout(removing, this.calendarTimeoutMs)) === TIMED_OUT) {
@@ -678,7 +830,6 @@ export class BookingService {
         return;
       } catch (err) {
         if (err instanceof BookingError) throw err;
-        // Déjà supprimé (par exemple dans Apple Calendar) : rien à faire.
         if (err instanceof NotFoundError) return;
         // Modifié ailleurs : la version du serveur vient d'être rechargée, on réessaie une fois.
         if (err instanceof ConflictError && attempt === 0) continue;
@@ -698,25 +849,28 @@ export class BookingService {
     let eventState: Booking['eventState'] = null;
     let eventStart: string | null = null;
     let eventEnd: string | null = null;
+    let notifiedStart: string | null = null;
     if (b.status === 'confirmed') {
-      const times = b.event_id ? this.store.eventTimes(b.event_id) : undefined;
-      if (!times) eventState = 'missing';
-      else if (times.startMs !== Date.parse(b.start_utc) || times.endMs !== Date.parse(b.end_utc)) {
+      // « Supprimé » seulement si l'événement a disparu de tous les calendriers (recherche par UID comprise).
+      if (!this.linkedEvent(b)) eventState = 'missing';
+      else if (b.notified_start && b.notified_start !== b.start_utc) {
         eventState = 'moved';
-        eventStart = new Date(times.startMs).toISOString();
-        eventEnd = new Date(times.endMs).toISOString();
+        eventStart = b.start_utc;
+        eventEnd = b.end_utc;
+        notifiedStart = b.notified_start;
       } else eventState = 'ok';
     }
     return {
       id: b.id, typeId: b.type_id, typeName: b.type_name, location: b.location, start: b.start_utc, end: b.end_utc,
       name: b.name, email: b.email, phone: b.phone, message: b.message, status: b.status, createdAt: b.created_at,
       cancelledAt: b.cancelled_at, cancelledBy: b.cancelled_by, eventId: b.event_id, calendarId: b.calendar_id,
-      eventState, eventStart, eventEnd, mailError: b.mail_error,
+      eventState, eventStart, eventEnd, notifiedStart, mailError: b.mail_error,
     };
   }
 
   /** upcoming : confirmées à venir, par date croissante. past : passées ou annulées, les plus récentes d'abord. */
   listBookings(scope: 'upcoming' | 'past', limit = 100, offset = 0): Booking[] {
+    this.reconcile();
     const nowIso = this.now().toISOString();
     const rows = scope === 'upcoming' ? this.data.listUpcoming(nowIso, limit) : this.data.listPast(nowIso, limit, offset);
     return rows.map((r) => this.toBooking(r));
@@ -733,20 +887,34 @@ export class BookingService {
     const row = this.requireBooking(id);
     if (row.status !== 'confirmed') throw new BookingError(409, 'already_cancelled', 'Cette réservation est déjà annulée');
     const cancelled = await this.cancel(id, 'admin', notifyClient);
-    return this.toBooking(cancelled ?? this.requireBooking(id));
+    return this.toBooking(cancelled?.row ?? this.requireBooking(id));
   }
 
   /**
-   * Renvoie la confirmation au client. Le jeton n'étant jamais conservé en clair,
-   * un nouveau lien d'annulation est créé : l'ancien cesse de fonctionner.
+   * Renvoie la confirmation au client (avec l'horaire actuel si l'événement a été déplacé).
+   * Le jeton n'étant jamais conservé en clair, un nouveau lien d'annulation est créé ; il ne
+   * remplace l'ancien qu'une fois l'e-mail réellement parti : si l'envoi échoue, le lien que
+   * le client possède déjà continue de fonctionner.
    */
   async resendConfirmation(id: string): Promise<Booking> {
+    this.reconcile();
     const row = this.requireBooking(id);
     if (row.status !== 'confirmed') throw new BookingError(409, 'already_cancelled', 'Cette réservation est annulée');
     if (!this.mailer.configured) throw new BookingError(400, 'mail_not_configured', 'L’envoi d’e-mails n’est pas configuré');
     const token = randomBytes(32).toString('base64url');
-    this.data.setTokenHash(id, hashToken(token));
-    await this.sendMails(id, [['Confirmation au client', clientConfirmation(this.mailData(row), this.mailContext(), cancelUrlFor(this.publicUrl, token))]]);
+    const messages: [string, MailMessage][] = [
+      ['Confirmation au client', clientConfirmation(this.mailData(row), this.mailContext(), cancelUrlFor(this.publicUrl, token))],
+    ];
+    const sending = this.dispatch(id, messages).then((sent) => {
+      const current = this.data.getBooking(id);
+      if (sent[0] && current?.status === 'confirmed') {
+        this.data.setTokenHash(id, hashToken(token));
+        // Le client connaît maintenant l'horaire que portait ce message.
+        if (current.start_utc === row.start_utc) this.data.setNotifiedStart(id, null);
+      }
+      return sent;
+    });
+    await this.sendMails(id, messages, sending);
     return this.toBooking(this.requireBooking(id));
   }
 

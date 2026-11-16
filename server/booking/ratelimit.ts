@@ -55,7 +55,8 @@ export class RateLimiter {
 
 /**
  * Clé de limitation pour une adresse : l'IPv4 telle quelle, l'IPv6 réduite à son
- * préfixe /64 (un même abonné dispose de tout le /64).
+ * préfixe /56 (un abonné ou un petit hébergement reçoit couramment un /56 entier :
+ * compter par /64 lui laisserait 256 « clients » distincts).
  */
 export function rateKey(address: string): string {
   let ip = address.trim().toLowerCase().slice(0, 64);
@@ -66,6 +67,9 @@ export function rateKey(address: string): string {
   const [head, tail = ''] = ip.split('::');
   const left = head ? head.split(':') : [];
   const right = tail ? tail.split(':') : [];
-  const groups = ip.includes('::') ? [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill('0'), ...right] : left;
-  return groups.slice(0, 4).map((g) => g.replace(/^0+(?=.)/, '')).join(':') + '::/64';
+  const groups: string[] = ip.includes('::') ? [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill('0'), ...right] : left;
+  const hex = (g: string | undefined) => (g ?? '0').replace(/^0+(?=.)/, '') || '0';
+  // Quatrième groupe : seuls ses 8 bits de poids fort font partie du /56.
+  const fourth = (groups[3] ?? '0').padStart(4, '0').slice(0, 2) + '00';
+  return `${[hex(groups[0]), hex(groups[1]), hex(groups[2]), hex(fourth)].join(':')}::/56`;
 }
