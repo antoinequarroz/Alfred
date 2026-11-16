@@ -1,0 +1,31 @@
+# Alfred sur le VPS : un conteneur, ~100 Mo de RAM, base SQLite dans un volume.
+# Lancer depuis la racine du dépôt : docker compose -f deploy/docker-compose.yml up -d --build
+name: alfred
+services:
+  alfred:
+    build: ..
+    image: alfred:latest
+    container_name: alfred
+    restart: unless-stopped
+    env_file: ../.env
+    volumes:
+      - alfred-data:/data
+    # Écoute seulement en local : c'est Caddy qui expose le service en HTTPS.
+    ports:
+      - "127.0.0.1:3200:3200"
+    networks:
+      - caddy
+    mem_limit: 256m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options: { max-size: "5m", max-file: "2" }
+
+volumes:
+  alfred-data:
+
+networks:
+  # Réseau Docker du conteneur Caddy existant, pour qu'il puisse joindre « alfred:3200 ».
+  caddy:
+    external: true
+    name: ${CADDY_NETWORK:-antoinequarroz-vitrine_appnet}

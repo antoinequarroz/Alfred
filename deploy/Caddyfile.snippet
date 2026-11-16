@@ -1,0 +1,6 @@
+# À ajouter au Caddyfile existant, une fois le DNS alfred.antoinequarroz.ch créé.
+# Caddy tourne en conteneur : il joint Alfred par son nom sur le réseau Docker partagé.
+alfred.antoinequarroz.ch {
+	encode zstd gzip
+	reverse_proxy alfred:3200
+}
