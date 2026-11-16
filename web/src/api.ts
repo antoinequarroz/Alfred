@@ -1,7 +1,7 @@
 import type {
   Booking, BookingAdminState, BookingHoursRange, BookingSettings, BookingType, BookingTypeInput,
   CalendarInfo, CaldavSaveResult, CaldavSettingsInput, ConnectionsState, ConnectionTest, EditScope, EventInput, Occurrence, PublicSlots,
-  SmtpSaveResult, SmtpSettingsInput, SyncStatus, VideoAdminState, VideoRoom, VideoRoomInput, VideoSettings,
+  PushPrefs, PushState, PushTestResult, SmtpSaveResult, SmtpSettingsInput, SyncStatus, VideoAdminState, VideoRoom, VideoRoomInput, VideoSettings,
 } from '../../shared/types';
 
 import { ApiError, requestJson } from './http';
@@ -74,4 +74,13 @@ export const videoApi = {
   personalRoom: (renew = false) => request<VideoRoom>('POST', '/api/video/personal', { renew }),
   endMeeting: (id: string) => request<{ ok: true }>('POST', `/api/video/rooms/${encodeURIComponent(id)}/end`, {}),
   deleteRoom: (id: string) => request<{ ok: true }>('DELETE', `/api/video/rooms/${encodeURIComponent(id)}`),
+};
+
+/** Notifications sur les appareils (Web Push, session requise). */
+export const pushApi = {
+  state: () => request<PushState>('GET', '/api/push'),
+  savePrefs: (patch: Partial<PushPrefs>) => request<PushState>('PUT', '/api/push/prefs', patch),
+  addDevice: (sub: PushSubscriptionJSON, label: string) => request<PushState>('POST', '/api/push/devices', { endpoint: sub.endpoint, keys: sub.keys, label }),
+  removeDevice: (id: string) => request<PushState>('DELETE', `/api/push/devices/${encodeURIComponent(id)}`),
+  test: (id?: string) => request<{ results: PushTestResult[]; state: PushState }>('POST', '/api/push/test', id ? { id } : {}),
 };

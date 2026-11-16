@@ -454,3 +454,48 @@ export interface VideoJoinInfo {
   isHost: boolean;
   quality: VideoQuality;
 }
+
+// --- notifications (Web Push) ----------------------------------------------
+
+/** Rappels : aucun, avant les rendez-vous pris en ligne, ou avant tout événement à heure fixe. */
+export type PushReminderMode = 'off' | 'bookings' | 'all';
+
+export interface PushPrefs {
+  newBooking: boolean;
+  cancellation: boolean;
+  guestArrived: boolean;
+  reminders: PushReminderMode;
+  /** Délai du rappel : 5, 10, 15, 30 ou 60 minutes avant le début. */
+  reminderMinutes: number;
+  /** Faux : les notifications ne montrent ni nom ni titre (écran verrouillé). */
+  details: boolean;
+}
+
+export interface PushDevice {
+  id: string;
+  label: string;
+  /** Service de push de l'appareil : Apple, Google, Mozilla… */
+  service: string;
+  /** Empreinte de l'abonnement (SHA-256 de son adresse, 16 caractères) : l'app reconnaît l'appareil sur lequel elle tourne. */
+  ref: string;
+  createdAt: string;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  lastErrorAt: string | null;
+}
+
+export interface PushState {
+  /** Clé publique VAPID (applicationServerKey), en base64url. */
+  publicKey: string;
+  prefs: PushPrefs;
+  devices: PushDevice[];
+}
+
+export interface PushTestResult {
+  id: string;
+  label: string;
+  ok: boolean;
+  /** L'appareil s'était désabonné : il a été retiré de la liste. */
+  removed: boolean;
+  error: string | null;
+}

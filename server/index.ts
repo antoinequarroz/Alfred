@@ -13,6 +13,7 @@ import { SecretBox } from './secrets.js';
 import { hashPassword } from './password.js';
 import { CalendarService } from './service.js';
 import { Store } from './store.js';
+import { PushService } from './push/service.js';
 import { VideoService } from './video/service.js';
 
 let passwordHash = config.passwordHash;
@@ -42,10 +43,12 @@ const mailer = connections.mailer;
 // La visio et la prise de rendez-vous se connaissent : une salle de rendez-vous suit sa réservation,
 // et une réservation « En visio » reçoit le lien d'une salle.
 let bookingRef: BookingService | null = null;
+let pushRef: PushService | null = null;
 const video = new VideoService({
   db: store.db, server: videoEnv, publicUrl: config.publicUrl, timezone: config.timezone,
   hostName: () => bookingRef?.getSettings().publicName ?? config.mail.from.name,
   bookingLink: (id) => bookingRef?.videoLink(id) ?? null,
+  onGuestJoin: (room, name) => void pushRef?.guestArrived(room, name).catch((err) => console.error('[alfred] notifications :', err)),
 });
 const booking = new BookingService({
   video,
@@ -53,9 +56,15 @@ const booking = new BookingService({
   publicUrl: config.publicUrl, defaultPublicName: config.mail.from.name,
 });
 bookingRef = booking;
+// Notifications sur les appareils d'Antoine (iPhone, Mac) : nouveaux rendez-vous, rappels, invités en visio.
+const push = new PushService({
+  db: store.db, store, publicUrl: config.publicUrl, timezone: config.timezone,
+  bookingVideoUrl: (id) => video.urlForBooking(id),
+});
+pushRef = push;
 connections.mailContext = () => ({ publicName: booking.getSettings().publicName, timezone: config.timezone, publicUrl: config.publicUrl });
 const app = createApp({
-  store, service, caldav, passwordHash, booking, connections, video,
+  store, service, caldav, passwordHash, booking, connections, video, push,
   secureCookies: config.production,
   sessionDays: config.sessionDays,
 });
@@ -84,6 +93,7 @@ serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => 
 
 // La synchro régulière tourne toujours : elle ne fait rien tant qu'aucun identifiant n'est en place.
 void caldav.sync();
+push.start();
 setInterval(() => void caldav.sync(), config.caldav.syncIntervalSeconds * 1000).unref();
 const SOURCES = { app: 'réglés dans l’app', env: 'du fichier .env', default: 'par défaut', none: 'absents' } as const;
 console.log(caldav.configured
