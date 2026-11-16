@@ -1,0 +1,27 @@
+# Bloc à AJOUTER au Caddyfile existant (ne rien modifier d'autre), puis :
+#   caddy validate --config /etc/caddy/Caddyfile && systemctl reload caddy
+# (ou `docker exec <conteneur-caddy> caddy reload --config /etc/caddy/Caddyfile` si Caddy est en Docker)
+#
+# Remplace rdv.example.ch par ton sous-domaine. Caddy obtient le certificat HTTPS tout seul.
+
+rdv.example.ch {
+	encode zstd gzip
+
+	# Une seule personne utilise l'outil : on ferme l'inscription publique.
+	# (Le compte admin se crée via /auth/setup au premier lancement.)
+	@signup path /signup /signup/* /auth/signup /auth/signup/*
+	redir @signup /auth/login 302
+
+	# Caddy sur l'hôte :
+	reverse_proxy 127.0.0.1:3100
+	# Caddy dans Docker (avec docker-compose.caddy-network.yml) : remplace la ligne du dessus par
+	# reverse_proxy alfred-calcom:3000
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+}

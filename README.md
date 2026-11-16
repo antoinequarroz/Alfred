@@ -11,7 +11,8 @@ Assistant personnel tout-en-un, auto-hébergé sur VPS. Premier chantier : le ca
 ## Documentation
 
 - [Audit de faisabilité](docs/AUDIT.md) : ce qui est possible, coûts, risques et plan par phases
+- [Installation de la phase 1](docs/PHASE1-INSTALL.md) : prise de RDV en ligne (Cal.com) synchronisée avec iCloud, config dans `deploy/calcom/`
 
 ## Statut
 
-Phase d'étude. Voir l'audit pour la feuille de route.
+Phase 1 en cours : la config de la prise de RDV est prête dans `deploy/calcom/`, à déployer sur le VPS. Voir l'audit pour la feuille de route.

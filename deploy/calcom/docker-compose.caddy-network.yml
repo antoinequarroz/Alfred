@@ -1,0 +1,18 @@
+# À utiliser SEULEMENT si ton Caddy tourne lui-même dans un conteneur Docker
+# (il ne peut alors pas joindre 127.0.0.1 de l'hôte).
+#
+# Branche Cal.com sur le réseau Docker de Caddy, sans toucher au conteneur Caddy.
+# Renseigne CADDY_NETWORK dans .env (nom trouvé avec `docker network ls`), puis :
+#   docker compose -f docker-compose.yml -f docker-compose.caddy-network.yml up -d
+# Dans le Caddyfile, utilise alors `reverse_proxy alfred-calcom:3000`.
+
+services:
+  calcom:
+    networks:
+      - calcom
+      - caddy
+
+networks:
+  caddy:
+    name: ${CADDY_NETWORK:?CADDY_NETWORK manquant dans .env}
+    external: true
