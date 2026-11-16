@@ -1,4 +1,5 @@
 import { addDays, capitalize, fmt, fmtTime, sameDay, startOfDay, startOfMonth, startOfWeek } from './dates';
+import { Chevron } from './icons';
 import { overlapsDay, type CalendarMap, type Occ } from './model';
 
 interface Props {
@@ -33,10 +34,11 @@ export function MonthView({ cursor, occs, calendars, onCreate, onOpen, onPickDay
             .filter((o) => overlapsDay(o, d))
             .sort((a, b) => Number(b.allDay) - Number(a.allDay) || a.startDate.getTime() - b.startDate.getTime());
           const outside = d.getMonth() !== cursor.getMonth();
+          const weekend = d.getDay() === 0 || d.getDay() === 6;
           return (
             <div
               key={d.getTime()}
-              className={`month-cell${outside ? ' outside' : ''}${sameDay(d, today) ? ' today' : ''}`}
+              className={`month-cell${outside ? ' outside' : ''}${weekend ? ' weekend' : ''}${sameDay(d, today) ? ' today' : ''}`}
               onClick={(e) => {
                 if (e.target !== e.currentTarget) return;
                 const start = startOfDay(d);
@@ -84,9 +86,9 @@ export function MiniMonth({ cursor, selected, onPick, onNavigate }: { cursor: Da
     <div className="mini">
       <div className="mini-head">
         <span>{capitalize(fmt(cursor, { month: 'long', year: 'numeric' }))}</span>
-        <span>
-          <button className="icon-btn" onClick={() => onNavigate(-1)} aria-label="Mois précédent">‹</button>
-          <button className="icon-btn" onClick={() => onNavigate(1)} aria-label="Mois suivant">›</button>
+        <span className="mini-nav">
+          <button className="icon-btn" onClick={() => onNavigate(-1)} aria-label="Mois précédent"><Chevron dir="left" /></button>
+          <button className="icon-btn" onClick={() => onNavigate(1)} aria-label="Mois suivant"><Chevron dir="right" /></button>
         </span>
       </div>
       <div className="mini-grid">

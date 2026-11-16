@@ -2,7 +2,7 @@ import { StrictMode, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { api } from './api';
 import { App } from './App';
-import '@fontsource-variable/plus-jakarta-sans';
+import '@fontsource-variable/inter/opsz.css';
 import './styles.css';
 
 function Login({ onDone }: { onDone: () => void }) {
@@ -27,6 +27,7 @@ function Login({ onDone }: { onDone: () => void }) {
       <form onSubmit={submit}>
         <span className="logo big">A</span>
         <h1>Alfred</h1>
+        <p className="login-sub">Calendrier personnel</p>
         <input type="text" name="username" autoComplete="username" value="alfred" readOnly hidden />
         <input
           type="password"

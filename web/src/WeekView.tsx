@@ -73,6 +73,15 @@ function shiftWall(date: Date, deltaMin: number): Date {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate(), date.getHours(), date.getMinutes() + deltaMin);
 }
 
+/** Numéro de semaine ISO 8601. */
+function isoWeek(d: Date): number {
+  const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  t.setUTCDate(t.getUTCDate() + 4 - (t.getUTCDay() || 7));
+  return Math.ceil(((t.getTime() - Date.UTC(t.getUTCFullYear(), 0, 1)) / 86_400_000 + 1) / 7);
+}
+
+const isWeekend = (d: Date) => d.getDay() === 0 || d.getDay() === 6;
+
 type Drag =
   | { kind: 'create'; dayIndex: number; anchorMin: number; curMin: number }
   | { kind: 'move'; occ: Occ; grabDay: number; grabMin: number; deltaMin: number }
@@ -177,13 +186,14 @@ export function WeekView({ days, occs, calendars, onCreate, onOpen, onMove, onPi
   const draggingKey = drag && drag.kind !== 'create' ? drag.occ.key : null;
   const allDay = shown.filter((o) => o.allDay);
   const hasAllDay = allDay.some((o) => days.some((d) => overlapsDay(o, d)));
+  const nowMin = days.some((d) => sameDay(d, now)) ? minutesOfDay(now) : null;
 
   return (
-    <div className="week" style={{ '--hour': `${HOUR}px` } as React.CSSProperties}>
+    <div className={`week${days.length === 1 ? ' single' : ''}`} style={{ '--hour': `${HOUR}px` } as React.CSSProperties}>
       <div className="week-head">
-        <div className="gutter" />
+        <div className="gutter week-num" title={`Semaine ${isoWeek(days[0])}`}>S{isoWeek(days[0])}</div>
         {days.map((d) => (
-          <button key={d.getTime()} className={`week-day${sameDay(d, now) ? ' today' : ''}`} onClick={() => onPickDay(d)}>
+          <button key={d.getTime()} className={`week-day${sameDay(d, now) ? ' today' : ''}${isWeekend(d) ? ' weekend' : ''}`} onClick={() => onPickDay(d)}>
             <span className="dow">{capitalize(fmt(d, { weekday: 'short' }).replace('.', ''))}</span>
             <span className="num">{d.getDate()}</span>
           </button>
@@ -195,7 +205,7 @@ export function WeekView({ days, occs, calendars, onCreate, onOpen, onMove, onPi
         {days.map((d) => (
           <div
             key={d.getTime()}
-            className="allday-cell"
+            className={`allday-cell${isWeekend(d) ? ' weekend' : ''}`}
             onClick={(e) => {
               if (e.target === e.currentTarget) onCreate(startOfDay(d), addDays(startOfDay(d), 1), true);
             }}
@@ -219,8 +229,11 @@ export function WeekView({ days, occs, calendars, onCreate, onOpen, onMove, onPi
         <div className="tg-body" style={{ height: 24 * HOUR }}>
           <div className="gutter hours">
             {Array.from({ length: 23 }, (_, i) => (
-              <span key={i} style={{ top: (i + 1) * HOUR }}>{String(i + 1).padStart(2, '0')}:00</span>
+              <span key={i} className={nowMin !== null && Math.abs((i + 1) * 60 - nowMin) < 14 ? 'hidden' : undefined} style={{ top: (i + 1) * HOUR }}>
+                {String(i + 1).padStart(2, '0')}:00
+              </span>
             ))}
+            {nowMin !== null && <span className="now-label" style={{ top: (nowMin / 60) * HOUR }}>{fmtTime(now)}</span>}
           </div>
           <div className="tg-cols" ref={colsRef}>
             {days.map((d, dayIndex) => {
@@ -229,7 +242,7 @@ export function WeekView({ days, occs, calendars, onCreate, onOpen, onMove, onPi
               return (
                 <div
                   key={d.getTime()}
-                  className={`tg-col${isToday ? ' today' : ''}`}
+                  className={`tg-col${isToday ? ' today' : ''}${isWeekend(d) ? ' weekend' : ''}`}
                   onPointerDown={(e) => {
                     if (e.target !== e.currentTarget) return;
                     const p = pointerPos(e);
@@ -278,8 +291,8 @@ export function WeekView({ days, occs, calendars, onCreate, onOpen, onMove, onPi
                       >
                         <span className="ev-title">{s.occ.title || '(Sans titre)'}</span>
                         <span className="ev-time">
-                          {fmtTime(s.occ.startDate)} – {fmtTime(s.occ.endDate)}
-                          {s.occ.location ? ` · ${s.occ.location}` : ''}
+                          {fmtTime(s.occ.startDate)}
+                          <span className="ev-end"> – {fmtTime(s.occ.endDate)}{s.occ.location ? ` · ${s.occ.location}` : ''}</span>
                         </span>
                         {!s.continuesAfter && (
                           <span
