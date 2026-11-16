@@ -16,6 +16,11 @@ export interface ResourceSummary {
   recurring: boolean;
   /** Fin de la dernière occurrence, null si la répétition est infinie. */
   recurEndMs: number | null;
+  /**
+   * Occupation d'une ressource non récurrente (un élément par VEVENT), calculée une fois
+   * à l'enregistrement. null pour une série : elle doit être développée sur la période.
+   */
+  busy: BusyOccurrence[] | null;
 }
 
 export interface ExpandedOccurrence {
@@ -149,6 +154,14 @@ export function summarize(ics: string): ResourceSummary {
       recurEndMs = last ? Math.max(timeToMs(last) + durationMs, maxEnd) : maxEnd;
     }
   }
+  let busy: BusyOccurrence[] | null = null;
+  if (!event.isRecurring() || master.hasProperty('recurrence-id')) {
+    busy = [];
+    for (const comp of vevents(vcal)) {
+      const e = new ICAL.Event(comp);
+      if (e.startDate) busy.push(busyOf(e, e.startDate, endOf(e.startDate, e.endDate)));
+    }
+  }
   return {
     uid: String(master.getFirstPropertyValue('uid') ?? ''),
     summary: String(master.getFirstPropertyValue('summary') ?? ''),
@@ -156,6 +169,7 @@ export function summarize(ics: string): ResourceSummary {
     endMs: maxEnd,
     recurring,
     recurEndMs,
+    busy,
   };
 }
 
@@ -175,6 +189,24 @@ export interface BusyOccurrence {
   cancelled: boolean;
 }
 
+function isTransparent(comp: ICAL.Component): boolean {
+  return text(comp, 'transp').trim().toUpperCase() === 'TRANSPARENT';
+}
+
+function isCancelled(comp: ICAL.Component): boolean {
+  return text(comp, 'status').trim().toUpperCase() === 'CANCELLED';
+}
+
+function busyOf(item: ICAL.Event, start: ICAL.Time, end: ICAL.Time): BusyOccurrence {
+  return {
+    start: start.isDate ? dateString(start) : new Date(timeToMs(start)).toISOString(),
+    end: start.isDate ? dateString(end) : new Date(timeToMs(end)).toISOString(),
+    allDay: start.isDate,
+    transparent: isTransparent(item.component),
+    cancelled: isCancelled(item.component),
+  };
+}
+
 /** Développe la ressource en occurrences qui chevauchent [rangeStart, rangeEnd). */
 export function expand(ics: string, rangeStart: Date, rangeEnd: Date): ExpandedOccurrence[] {
   return expandDetailed(ics, rangeStart, rangeEnd).map(({ transparent: _t, cancelled: _c, ...o }) => o);
@@ -185,6 +217,33 @@ export function expandBusy(ics: string, rangeStart: Date, rangeEnd: Date): BusyO
   return expandDetailed(ics, rangeStart, rangeEnd).map((o) => ({
     start: o.start, end: o.end, allDay: o.allDay, transparent: o.transparent, cancelled: o.cancelled,
   }));
+}
+
+/**
+ * Pour une série quotidienne ou hebdomadaire simple, une occurrence proche de la période
+ * demandée d'où reprendre l'itération : une série commencée il y a dix ans n'est pas
+ * reparcourue depuis son début. null : règle trop particulière, on itère depuis le DTSTART.
+ *
+ * Le saut se fait en jours « muraux » par multiples entiers de la période de la règle :
+ * l'heure locale, le jour de la semaine et l'alignement des semaines actives sont conservés.
+ */
+function nearStart(master: ICAL.Component, first: ICAL.Time, beforeMs: number): ICAL.Time | null {
+  const rrules = master.getAllProperties('rrule');
+  if (rrules.length !== 1 || master.hasProperty('rdate')) return null;
+  const rule = rrules[0].getFirstValue() as ICAL.Recur;
+  if (rule.count) return null; // le compte dépend du début réel
+  const parts = Object.keys(rule.parts ?? {});
+  const interval = Math.max(1, rule.interval ?? 1);
+  let periodDays: number;
+  if (rule.freq === 'DAILY' && parts.length === 0) periodDays = interval;
+  else if (rule.freq === 'WEEKLY' && parts.every((p) => p === 'BYDAY')) periodDays = 7 * interval;
+  else return null;
+  // Deux jours de marge : changements d'heure et fuseaux.
+  const periods = Math.floor(((beforeMs - timeToMs(first)) / 86_400_000 - 2) / periodDays);
+  if (periods < 1) return null;
+  const start = first.clone();
+  start.adjust(periods * periodDays, 0, 0, 0);
+  return start;
 }
 
 function expandDetailed(ics: string, rangeStart: Date, rangeEnd: Date): (ExpandedOccurrence & { transparent: boolean; cancelled: boolean })[] {
@@ -212,8 +271,8 @@ function expandDetailed(ics: string, rangeStart: Date, rangeEnd: Date): (Expande
       description: text(item.component, 'description'),
       recurring,
       repeat,
-      transparent: text(item.component, 'transp').trim().toUpperCase() === 'TRANSPARENT',
-      cancelled: text(item.component, 'status').trim().toUpperCase() === 'CANCELLED',
+      transparent: isTransparent(item.component),
+      cancelled: isCancelled(item.component),
     });
   };
 
@@ -229,27 +288,47 @@ function expandDetailed(ics: string, rangeStart: Date, rangeEnd: Date): (Expande
     return out;
   }
 
+  // Les exceptions (RECURRENCE-ID) sont émises à part : une occurrence peut avoir été déplacée
+  // loin de sa date d'origine, dans un sens comme dans l'autre.
+  const times = (name: string): number[] =>
+    master.getAllProperties(name).flatMap((p) => (p.getValues() as ICAL.Time[]).filter((v) => typeof v?.toJSDate === 'function').map(timeToMs));
+  const excluded = new Set(times('exdate'));
+  const moved = new Set<number>();
+  for (const comp of exceptionsOf(vcal)) {
+    const rid = comp.getFirstPropertyValue('recurrence-id') as ICAL.Time | null;
+    const exc = new ICAL.Event(comp);
+    if (!rid || typeof rid.toJSDate !== 'function' || !exc.startDate) continue;
+    const key = timeToMs(rid);
+    if (moved.has(key) || excluded.has(key)) continue;
+    moved.add(key);
+    push(exc, exc.startDate, endOf(exc.startDate, exc.endDate), occurrenceKey(rid), true);
+  }
+
   if (!master.hasProperty('rrule')) {
     // Répétition par dates seules (RDATE) : ical.js n'émet pas l'occurrence du DTSTART.
     const first = event.startDate;
     const key = timeToMs(first);
-    const listed = (name: string) =>
-      master.getAllProperties(name).some((p) => (p.getValues() as ICAL.Time[]).some((v) => typeof v?.toJSDate === 'function' && timeToMs(v) === key));
-    if (!listed('exdate') && !listed('rdate')) {
+    if (!excluded.has(key) && !moved.has(key) && !times('rdate').includes(key)) {
       const details = event.getOccurrenceDetails(first);
       push(details.item, details.startDate, endOf(details.startDate, details.endDate), occurrenceKey(details.recurrenceId), true);
     }
   }
 
-  const it = event.iterator();
+  const first = event.startDate;
+  const spanMs = Math.max(0, timeToMs(endOf(first, event.endDate)) - timeToMs(first));
+  // Marge : journées entières indexées en heure locale, durées qui traversent un changement d'heure.
+  const margin = 2 * 86_400_000;
+  const it = event.iterator(nearStart(master, first, fromMs - margin - spanMs) ?? undefined);
   for (let i = 0, next = it.next(); next && i < MAX_ITERATIONS; i++, next = it.next()) {
+    const startMs = timeToMs(next);
+    if (startMs >= toMs + margin) break;
+    // Avant la plage : inutile de calculer le détail de l'occurrence (les séries anciennes en ont des centaines).
+    if (startMs + spanMs < fromMs - margin) continue;
+    if (moved.has(startMs)) continue;
     const details = event.getOccurrenceDetails(next);
-    const end = endOf(details.startDate, details.endDate);
-    // Les exceptions peuvent avancer une occurrence : on s'arrête un peu après la plage.
-    if (timeToMs(next) >= toMs + 7 * 86_400_000) break;
-    push(details.item, details.startDate, end, occurrenceKey(details.recurrenceId), true);
+    push(details.item, details.startDate, endOf(details.startDate, details.endDate), occurrenceKey(details.recurrenceId), true);
   }
-  return out;
+  return out.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
 }
 
 // ---------------------------------------------------------------------------
@@ -317,10 +396,13 @@ function validate(input: EventInput): void {
   if (!input.title?.trim()) throw new IcsError('Le titre est obligatoire');
 }
 
-/** Crée une nouvelle ressource iCalendar. */
-export function buildNewEvent(input: EventInput, tzid: string): { uid: string; ics: string } {
+export function newUid(): string {
+  return `${randomUUID()}@alfred`;
+}
+
+/** Crée une nouvelle ressource iCalendar. uid : identifiant imposé par l'appelant (sinon tiré au hasard). */
+export function buildNewEvent(input: EventInput, tzid: string, uid = newUid()): { uid: string; ics: string } {
   validate(input);
-  const uid = `${randomUUID()}@alfred`;
   const vcal = new ICAL.Component(['vcalendar', [], []]);
   vcal.updatePropertyWithValue('prodid', PRODID);
   vcal.updatePropertyWithValue('version', '2.0');

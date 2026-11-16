@@ -189,7 +189,9 @@ export function busyIntervals(busy: BusyEvent[], timezone: string, padded = fals
       start = Date.parse(b.start);
       end = Date.parse(b.end);
       if (Number.isNaN(start) || Number.isNaN(end)) continue;
-      if (end < start) end = start;
+      // Événement ponctuel (durée nulle) : il occupe l'instant où il tombe, donc le créneau
+      // qui commence à cet instant, mais pas celui qui s'y termine.
+      if (end <= start) end = start + 1;
     }
     if (padded) {
       start -= Math.max(0, b.bufferBeforeMin ?? 0) * 60_000;
@@ -201,8 +203,7 @@ export function busyIntervals(busy: BusyEvent[], timezone: string, padded = fals
   const merged: Interval[] = [];
   for (const iv of list) {
     const last = merged[merged.length - 1];
-    // On ne fusionne que les intervalles qui se recouvrent vraiment : un événement
-    // ponctuel (durée nulle) reste distinct et bloque le créneau qui le contient.
+    // On ne fusionne que les intervalles qui se recouvrent vraiment.
     if (last && iv.start < last.end) last.end = Math.max(last.end, iv.end);
     else merged.push({ ...iv });
   }

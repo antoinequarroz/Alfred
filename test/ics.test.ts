@@ -55,6 +55,91 @@ describe('expand', () => {
     expect(occ.every((o) => o.recurring && o.repeat === 'weekly')).toBe(true);
   });
 
+  it('émet une occurrence avancée ou reculée de plusieurs semaines par une exception', () => {
+    // Série mensuelle le 7 à 09:00 ; l'occurrence du 7 décembre est avancée au 23 novembre,
+    // celle du 7 octobre repoussée au 25 novembre.
+    const monthly = `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:monthly-1
+DTSTAMP:20260101T000000Z
+DTSTART:20260107T080000Z
+DTEND:20260107T090000Z
+RRULE:FREQ=MONTHLY
+SUMMARY:Supervision
+END:VEVENT
+BEGIN:VEVENT
+UID:monthly-1
+DTSTAMP:20260101T000000Z
+RECURRENCE-ID:20261207T080000Z
+DTSTART:20261123T080000Z
+DTEND:20261123T090000Z
+SUMMARY:Supervision avancée
+END:VEVENT
+BEGIN:VEVENT
+UID:monthly-1
+DTSTAMP:20260101T000000Z
+RECURRENCE-ID:20261007T080000Z
+DTSTART:20261125T080000Z
+DTEND:20261125T090000Z
+SUMMARY:Supervision repoussée
+END:VEVENT
+END:VCALENDAR`;
+    const day = (d: string) => expand(monthly, new Date(`${d}T00:00:00Z`), new Date(`${d}T23:59:00Z`)).map((o) => [o.start, o.title, o.occurrenceId]);
+    expect(day('2026-11-23')).toEqual([['2026-11-23T08:00:00.000Z', 'Supervision avancée', '2026-12-07T08:00:00.000Z']]);
+    expect(day('2026-11-25')).toEqual([['2026-11-25T08:00:00.000Z', 'Supervision repoussée', '2026-10-07T08:00:00.000Z']]);
+    // Les dates d'origine sont libérées, les autres occurrences sont intactes et rien n'est doublé.
+    expect(day('2026-12-07')).toEqual([]);
+    expect(day('2026-10-07')).toEqual([]);
+    const all = expand(monthly, new Date('2026-10-01T00:00:00Z'), new Date('2027-01-01T00:00:00Z')).map((o) => o.start);
+    expect(all).toEqual(['2026-11-07T08:00:00.000Z', '2026-11-23T08:00:00.000Z', '2026-11-25T08:00:00.000Z']);
+  });
+
+  it('reprend une vieille série près de la période demandée, avec le même résultat que depuis son début', () => {
+    const series = (dtstart: string, rule: string, extra: string[] = []) => ['BEGIN:VCALENDAR', 'VERSION:2.0',
+      ...ICLOUD_WEEKLY.split('\n').slice(3, 20), // VTIMEZONE Europe/Zurich
+      'BEGIN:VEVENT', 'UID:old-1', 'DTSTAMP:20140101T000000Z', dtstart, 'DURATION:PT45M', `RRULE:${rule}`, ...extra, 'SUMMARY:Série', 'END:VEVENT', 'END:VCALENDAR'].join('\r\n');
+    const zurich = 'DTSTART;TZID=Europe/Zurich:20140106T023000'; // 02:30 : heure qui n'existe pas le jour du passage à l'heure d'été
+    const cases = [
+      series('DTSTART;TZID=Europe/Zurich:20140106T090000', 'FREQ=WEEKLY'),
+      series('DTSTART;TZID=Europe/Zurich:20140106T090000', 'FREQ=WEEKLY;INTERVAL=2'),
+      series('DTSTART;TZID=Europe/Zurich:20140106T090000', 'FREQ=WEEKLY;INTERVAL=3;BYDAY=MO,WE,FR'),
+      series('DTSTART;TZID=Europe/Zurich:20140108T090000', 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;WKST=SU'),
+      series('DTSTART;TZID=Europe/Zurich:20140106T090000', 'FREQ=WEEKLY;UNTIL=20261120T000000Z'),
+      series('DTSTART;TZID=Europe/Zurich:20140106T090000', 'FREQ=DAILY'),
+      series('DTSTART;TZID=Europe/Zurich:20140106T090000', 'FREQ=DAILY;INTERVAL=3'),
+      series(zurich, 'FREQ=DAILY'),
+      series('DTSTART:20140106T080000Z', 'FREQ=WEEKLY', ['EXDATE:20261116T080000Z', 'EXDATE:20270329T080000Z']),
+      series('DTSTART;VALUE=DATE:20140106', 'FREQ=WEEKLY;INTERVAL=2').replace('DURATION:PT45M', 'DTEND;VALUE=DATE:20140107'),
+      // Règles non accélérées : même résultat, par le chemin lent.
+      series('DTSTART;TZID=Europe/Zurich:20140106T090000', 'FREQ=WEEKLY;COUNT=700'),
+      series('DTSTART;TZID=Europe/Zurich:20140131T090000', 'FREQ=MONTHLY'),
+      series('DTSTART;TZID=Europe/Zurich:20140106T090000', 'FREQ=DAILY;BYDAY=MO,TH'),
+    ];
+    const ranges: [string, string][] = [
+      ['2026-11-09T00:00:00Z', '2026-12-01T00:00:00Z'],
+      ['2026-10-20T00:00:00Z', '2026-10-30T00:00:00Z'], // retour à l'heure d'hiver
+      ['2027-03-22T00:00:00Z', '2027-04-05T00:00:00Z'], // passage à l'heure d'été
+      ['2014-01-01T00:00:00Z', '2014-02-01T00:00:00Z'], // début de la série
+    ];
+    for (const ics of cases) {
+      // Référence : la série développée depuis son début, puis réduite à la période.
+      const all = expand(ics, new Date('2014-01-01T00:00:00Z'), new Date('2027-06-01T00:00:00Z'));
+      expect(all.length).toBeGreaterThan(50);
+      let found = 0;
+      for (const [from, to] of ranges) {
+        const got = expand(ics, new Date(from), new Date(to)).map((o) => [o.start, o.end, o.occurrenceId]);
+        const day = 86_400_000;
+        const want = all.filter((o) => (o.allDay
+          ? new Date(`${o.start}T00:00:00`).getTime() < Date.parse(to) + day && new Date(`${o.end}T00:00:00`).getTime() > Date.parse(from) - day
+          : o.start < new Date(to).toISOString() && o.end > new Date(from).toISOString())).map((o) => [o.start, o.end, o.occurrenceId]);
+        expect(got).toEqual(want);
+        found += got.length;
+      }
+      expect(found).toBeGreaterThan(0);
+    }
+  });
+
   it('résume une série infinie', () => {
     const s = summarize(ICLOUD_WEEKLY);
     expect(s.recurring).toBe(true);

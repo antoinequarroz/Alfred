@@ -255,6 +255,15 @@ describe('créneaux : occupation', () => {
     const t = times(query({ busy: [busy('2026-11-16T08:15:00Z', '2026-11-16T08:15:00Z')] }));
     expect(t.slice(0, 2)).toEqual(['09:30', '10:00']);
   });
+
+  it('un événement ponctuel posé exactement au début d’un créneau bloque ce créneau, pas le précédent', () => {
+    // Lundi 09:30 pile : [09:30, 10:00) le contient, [09:00, 09:30) se termine juste avant.
+    const t = times(query({ busy: [busy('2026-11-16T08:30:00Z', '2026-11-16T08:30:00Z')] }));
+    expect(t.slice(0, 3)).toEqual(['09:00', '10:00', '10:30']);
+    // Fin avant le début (donnée incohérente) : traité comme ponctuel.
+    const odd = times(query({ busy: [busy('2026-11-16T08:30:00Z', '2026-11-16T08:00:00Z')] }));
+    expect(odd.slice(0, 3)).toEqual(['09:00', '10:00', '10:30']);
+  });
 });
 
 describe('créneaux : préavis et horizon', () => {
