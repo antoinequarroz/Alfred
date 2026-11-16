@@ -5,7 +5,7 @@
   --panel: #fdfdfe;
   --panel-line: rgba(22, 30, 60, 0.1);
   --panel-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6) inset, 0 1px 2px rgba(22, 30, 60, 0.05), 0 12px 32px -16px rgba(22, 30, 60, 0.18);
-  --tint: rgba(22, 30, 60, 0.024);
+  --tint: rgba(47, 70, 160, 0.026);
   --bg-soft: #f3f4f8;
   --bg-hover: rgba(22, 30, 60, 0.06);
   --bg-active: rgba(22, 30, 60, 0.1);
@@ -33,15 +33,15 @@
   --ev-ink: 45%;
   --today-mix: 4%;
   --veil: 55%;
-  --halo-1: rgba(47, 91, 255, 0.105);
-  --halo-2: rgba(70, 150, 255, 0.08);
-  --halo-3: rgba(92, 96, 255, 0.07);
+  --halo-1: rgba(47, 91, 255, 0.14);
+  --halo-2: rgba(56, 160, 255, 0.11);
+  --halo-3: rgba(108, 92, 255, 0.09);
   --logo-bg: linear-gradient(160deg, #2a2f3d, #0b0d12);
   --logo-ink: #ffffff;
-  --overlay: rgba(24, 30, 54, 0.24);
+  --overlay: rgba(176, 186, 222, 0.4);
   --shadow-xs: 0 1px 1px rgba(22, 30, 60, 0.05);
   --shadow-sm: 0 1px 2px rgba(22, 30, 60, 0.08), 0 0 0 1px rgba(22, 30, 60, 0.02);
-  --shadow: 0 0 0 1px rgba(22, 30, 60, 0.05), 0 2px 4px rgba(22, 30, 60, 0.04), 0 12px 24px -6px rgba(22, 30, 60, 0.12), 0 32px 72px -16px rgba(22, 30, 60, 0.28);
+  --shadow: 0 0 0 1px rgba(22, 30, 60, 0.05), 0 2px 4px rgba(22, 30, 60, 0.04), 0 12px 24px -6px rgba(28, 40, 96, 0.12), 0 32px 72px -16px rgba(28, 40, 96, 0.26);
   --edge: inset 0 1px 0 rgba(255, 255, 255, 0.9);
   --r-sm: 4px;
   --r: 6px;
@@ -64,24 +64,24 @@
 /* Thème sombre : choisi à la main, ou suivi du système tant que rien n'est choisi. */
 :root[data-theme='dark'] {
   --bg: #07080b;
-  --panel: #0d0e12;
-  --panel-line: rgba(255, 255, 255, 0.075);
+  --panel: #0b0d15;
+  --panel-line: rgba(170, 185, 255, 0.1);
   --panel-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035), 0 16px 40px -16px rgba(0, 0, 0, 0.8);
-  --tint: rgba(255, 255, 255, 0.016);
+  --tint: rgba(150, 170, 255, 0.022);
   --bg-soft: #07080b;
   --bg-hover: rgba(255, 255, 255, 0.065);
   --bg-active: rgba(255, 255, 255, 0.11);
-  --surface: #14151b;
+  --surface: #12141d;
   --btn-bg: rgba(255, 255, 255, 0.045);
   --seg-on: rgba(255, 255, 255, 0.11);
   --seg-ring: rgba(255, 255, 255, 0.07);
-  --glass: rgba(18, 19, 25, 0.72);
+  --glass: rgba(16, 19, 30, 0.7);
   --field: rgba(0, 0, 0, 0.28);
   --text: #ececef;
   --muted: #9091a0;
   --faint: #6c6d7a;
-  --line: #262830;
-  --line-soft: #1a1b21;
+  --line: #232737;
+  --line-soft: #171a26;
   --accent: #4166f5;
   --accent-hi: #5c7dff;
   --accent-ink: #8aa2ff;
@@ -95,12 +95,12 @@
   --ev-ink: 42%;
   --today-mix: 6%;
   --veil: 30%;
-  --halo-1: rgba(65, 102, 245, 0.24);
-  --halo-2: rgba(56, 130, 255, 0.1);
+  --halo-1: rgba(65, 102, 245, 0.2);
+  --halo-2: rgba(56, 140, 255, 0.13);
   --halo-3: rgba(98, 84, 255, 0.13);
   --logo-bg: linear-gradient(160deg, #ffffff, #cfd3e0);
   --logo-ink: #0b0d12;
-  --overlay: rgba(2, 3, 8, 0.5);
+  --overlay: rgba(4, 6, 14, 0.4);
   --shadow-xs: 0 1px 1px rgba(0, 0, 0, 0.4);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
   --shadow: 0 0 0 1px rgba(0, 0, 0, 0.6), 0 8px 20px -4px rgba(0, 0, 0, 0.5), 0 32px 72px -12px rgba(0, 0, 0, 0.8);
@@ -111,24 +111,24 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
     --bg: #07080b;
-    --panel: #0d0e12;
-    --panel-line: rgba(255, 255, 255, 0.075);
+    --panel: #0b0d15;
+    --panel-line: rgba(170, 185, 255, 0.1);
     --panel-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035), 0 16px 40px -16px rgba(0, 0, 0, 0.8);
-    --tint: rgba(255, 255, 255, 0.016);
+    --tint: rgba(150, 170, 255, 0.022);
     --bg-soft: #07080b;
     --bg-hover: rgba(255, 255, 255, 0.065);
     --bg-active: rgba(255, 255, 255, 0.11);
-    --surface: #14151b;
+    --surface: #12141d;
     --btn-bg: rgba(255, 255, 255, 0.045);
     --seg-on: rgba(255, 255, 255, 0.11);
     --seg-ring: rgba(255, 255, 255, 0.07);
-    --glass: rgba(18, 19, 25, 0.72);
+    --glass: rgba(16, 19, 30, 0.7);
     --field: rgba(0, 0, 0, 0.28);
     --text: #ececef;
     --muted: #9091a0;
     --faint: #6c6d7a;
-    --line: #262830;
-    --line-soft: #1a1b21;
+    --line: #232737;
+    --line-soft: #171a26;
     --accent: #4166f5;
     --accent-hi: #5c7dff;
     --accent-ink: #8aa2ff;
@@ -142,12 +142,12 @@
     --ev-ink: 42%;
     --today-mix: 6%;
   --veil: 30%;
-    --halo-1: rgba(65, 102, 245, 0.24);
-    --halo-2: rgba(56, 130, 255, 0.1);
+    --halo-1: rgba(65, 102, 245, 0.2);
+    --halo-2: rgba(56, 140, 255, 0.13);
     --halo-3: rgba(98, 84, 255, 0.13);
     --logo-bg: linear-gradient(160deg, #ffffff, #cfd3e0);
     --logo-ink: #0b0d12;
-    --overlay: rgba(2, 3, 8, 0.5);
+    --overlay: rgba(4, 6, 14, 0.4);
     --shadow-xs: 0 1px 1px rgba(0, 0, 0, 0.4);
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
     --shadow: 0 0 0 1px rgba(0, 0, 0, 0.6), 0 8px 20px -4px rgba(0, 0, 0, 0.5), 0 32px 72px -12px rgba(0, 0, 0, 0.8);
@@ -674,8 +674,8 @@ kbd {
   display: grid;
   place-items: center;
   padding: 16px;
-  -webkit-backdrop-filter: blur(3px) saturate(120%);
-  backdrop-filter: blur(3px) saturate(120%);
+  -webkit-backdrop-filter: blur(6px) saturate(140%);
+  backdrop-filter: blur(6px) saturate(140%);
   animation: fade 0.16s ease-out both;
 }
 .dialog {
@@ -811,7 +811,7 @@ kbd {
       var(--bg);
   }
   .sidebar.open { transform: none; box-shadow: var(--shadow); }
-  .scrim { position: fixed; inset: 0; z-index: 39; background: var(--overlay); -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px); animation: fade 0.2s ease-out both; }
+  .scrim { position: fixed; inset: 0; z-index: 39; background: var(--overlay); -webkit-backdrop-filter: blur(6px) saturate(140%); backdrop-filter: blur(6px) saturate(140%); animation: fade 0.2s ease-out both; }
   .main { padding: 0; }
   .week, .month { border-width: 1px 0 0; border-radius: 16px 16px 0 0; }
   .menu-btn { display: inline-grid; margin-left: -6px; }
