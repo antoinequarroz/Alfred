@@ -4,13 +4,13 @@ import type {
 } from '../../../shared/types';
 import { ApiError, bookingApi } from '../api';
 import { AlertIcon, CheckIcon, Chevron, CloseIcon, CopyIcon, ExternalIcon, MenuIcon, PlusIcon } from '../icons';
+import { hoursProblems, WEEKDAYS } from './hours';
 import { dateTimeShortIn, dayKeyIn, dayLabel, durationLabel, timeIn } from './tz';
 import './rdv.css';
 
 type Tab = 'bookings' | 'types' | 'hours' | 'settings';
 const TABS: [Tab, string][] = [['bookings', 'Réservations'], ['types', 'Types'], ['hours', 'Horaires'], ['settings', 'Réglages']];
 const MODES: Record<BookingMode, string> = { cabinet: 'Au cabinet', telephone: 'Par téléphone', visio: 'En visio', autre: 'Autre (texte libre)' };
-const WEEKDAYS = ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche'];
 
 const message = (err: unknown) => (err instanceof Error ? err.message : 'Une erreur est survenue');
 
@@ -32,18 +32,44 @@ function Switch({ checked, onChange, label, disabled }: { checked: boolean; onCh
   );
 }
 
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/**
+ * Fenêtre modale : le focus y entre à l'ouverture, la tabulation y reste (l'app derrière le
+ * voile ne doit pas pouvoir être actionnée au clavier), Échap la ferme, et le focus revient
+ * à l'élément qui l'a ouverte.
+ */
 function Modal({ title, onClose, children, small }: { title: string; onClose: () => void; children: React.ReactNode; small?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
   const close = useRef(onClose);
   close.current = onClose;
   useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusables = () => [...(ref.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [])].filter((el) => el.getClientRects().length > 0);
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') close.current();
+      if (e.key === 'Escape') return close.current();
+      if (e.key !== 'Tab') return;
+      const list = focusables();
+      const active = document.activeElement;
+      if (list.length === 0) e.preventDefault();
+      else if (!ref.current?.contains(active)) {
+        e.preventDefault();
+        list[0].focus();
+      } else if (e.shiftKey && active === list[0]) {
+        e.preventDefault();
+        list[list.length - 1].focus();
+      } else if (!e.shiftKey && active === list[list.length - 1]) {
+        e.preventDefault();
+        list[0].focus();
+      }
     };
     window.addEventListener('keydown', onKey);
     ref.current?.querySelector<HTMLElement>('input:not([type=hidden]), select, textarea, button')?.focus();
-    return () => window.removeEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      if (opener?.isConnected) opener.focus();
+    };
   }, []);
   return (
     <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
@@ -298,7 +324,7 @@ function parseTime(value: string, isEnd: boolean): number | null {
  * Champ d'heure en texte, toujours sur 24 heures (le champ « time » du navigateur suit
  * la langue du système et peut passer en AM/PM). La valeur est validée en quittant le champ.
  */
-function TimeField({ value, isEnd, label, onChange }: { value: number; isEnd: boolean; label: string; onChange: (min: number) => void }) {
+function TimeField({ value, isEnd, label, invalid, onChange }: { value: number; isEnd: boolean; label: string; invalid?: boolean; onChange: (min: number) => void }) {
   const [text, setText] = useState(() => toTime(value));
   useEffect(() => setText(toTime(value)), [value]);
   const commit = () => {
@@ -317,6 +343,7 @@ function TimeField({ value, isEnd, label, onChange }: { value: number; isEnd: bo
       maxLength={5}
       placeholder={isEnd ? '12:00' : '09:00'}
       aria-label={label}
+      aria-invalid={invalid || undefined}
       value={text}
       onChange={(e) => setText(e.target.value)}
       onBlur={commit}
@@ -328,37 +355,43 @@ function TimeField({ value, isEnd, label, onChange }: { value: number; isEnd: bo
 const sortHours = (list: BookingHoursRange[]) => [...list].sort((a, b) => a.weekday - b.weekday || a.startMin - b.startMin);
 const sameHours = (a: BookingHoursRange[], b: BookingHoursRange[]) => JSON.stringify(sortHours(a)) === JSON.stringify(sortHours(b));
 
-function HoursCard({ hours, onSaved, notify }: { hours: BookingHoursRange[]; onSaved: (h: BookingHoursRange[]) => void; notify: (msg: string) => void }) {
+/**
+ * Horaires hebdomadaires. Le brouillon vit dans l'écran parent : il survit au changement
+ * d'onglet et au rafraîchissement automatique (draft null : rien en cours de saisie).
+ */
+function HoursCard({ hours, draft, setDraft, onSaved, notify }: {
+  hours: BookingHoursRange[]; draft: BookingHoursRange[] | null; setDraft: React.Dispatch<React.SetStateAction<BookingHoursRange[] | null>>;
+  onSaved: (h: BookingHoursRange[]) => void; notify: (msg: string) => void;
+}) {
   // L'ordre de saisie est conservé pendant l'édition (pas de tri qui ferait sauter les lignes).
-  const [draft, setDraft] = useState(hours);
+  const list = draft ?? hours;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => setDraft(hours), [hours]);
-  const dirty = !sameHours(draft, hours);
+  const dirty = draft !== null && !sameHours(draft, hours);
+  // Contrôle avant l'envoi : la plage fautive est marquée et le message nomme le jour.
+  const problems = useMemo(() => hoursProblems(list), [list]);
+  const problemAt = new Map(problems.map((p) => [p.index, p.message]));
+  const edit = (fn: (current: BookingHoursRange[]) => BookingHoursRange[]) => {
+    setError(null);
+    setDraft((prev) => fn(prev ?? hours));
+  };
 
-  const update = (range: BookingHoursRange, patch: Partial<BookingHoursRange>) => {
-    setError(null);
-    setDraft((list) => list.map((r) => (r === range ? { ...r, ...patch } : r)));
-  };
-  const add = (weekday: number) => {
-    setError(null);
-    setDraft((list) => {
-      const day = list.filter((r) => r.weekday === weekday);
-      const last = day.reduce((max, r) => Math.max(max, r.endMin), 0);
-      const startMin = day.length === 0 ? 540 : Math.min(last + 60, 1380);
-      return [...list, { weekday, startMin, endMin: Math.min(startMin + (day.length === 0 ? 180 : 120), 1440) }];
-    });
-  };
-  const remove = (range: BookingHoursRange) => {
-    setError(null);
-    setDraft((list) => list.filter((r) => r !== range));
-  };
+  const update = (range: BookingHoursRange, patch: Partial<BookingHoursRange>) => edit((current) => current.map((r) => (r === range ? { ...r, ...patch } : r)));
+  const add = (weekday: number) => edit((current) => {
+    const day = current.filter((r) => r.weekday === weekday);
+    const last = day.reduce((max, r) => Math.max(max, r.endMin), 0);
+    const startMin = day.length === 0 ? 540 : Math.min(last + 60, 1380);
+    return [...current, { weekday, startMin, endMin: Math.min(startMin + (day.length === 0 ? 180 : 120), 1440) }];
+  });
+  const remove = (range: BookingHoursRange) => edit((current) => current.filter((r) => r !== range));
 
   const save = async () => {
+    if (problems.length > 0) return;
     setBusy(true);
     setError(null);
     try {
-      onSaved(await bookingApi.saveHours(sortHours(draft)));
+      onSaved(await bookingApi.saveHours(sortHours(list)));
+      setDraft(null);
       notify('Horaires enregistrés');
     } catch (err) {
       setError(err instanceof ApiError && err.fields?.hours ? err.fields.hours : message(err));
@@ -372,41 +405,51 @@ function HoursCard({ hours, onSaved, notify }: { hours: BookingHoursRange[]; onS
       <ul className="bk-hours">
         {WEEKDAYS.map((name, i) => {
           const weekday = i + 1;
-          const ranges = draft.filter((r) => r.weekday === weekday);
+          const ranges = list.filter((r) => r.weekday === weekday);
           return (
             <li key={weekday} className={ranges.length === 0 ? 'closed' : ''}>
               <span className="bk-dayname">{name}</span>
               <div className="bk-ranges">
                 {ranges.length === 0 && <span className="bk-closed">Fermé</span>}
-                {ranges.map((r, j) => (
-                  <span key={j} className="bk-range">
-                    <TimeField value={r.startMin} isEnd={false} label={`${name}, début de la plage ${j + 1}`} onChange={(startMin) => update(r, { startMin })} />
-                    <span aria-hidden="true">–</span>
-                    <TimeField value={r.endMin} isEnd label={`${name}, fin de la plage ${j + 1}`} onChange={(endMin) => update(r, { endMin })} />
-                    <button type="button" className="icon-btn" onClick={() => remove(r)} aria-label={`Supprimer la plage ${j + 1} du ${name.toLowerCase()}`}><CloseIcon /></button>
-                  </span>
-                ))}
+                {ranges.map((r, j) => {
+                  const invalid = problemAt.has(list.indexOf(r));
+                  return (
+                    <span key={j} className={`bk-range${invalid ? ' invalid' : ''}`}>
+                      <TimeField value={r.startMin} isEnd={false} invalid={invalid} label={`${name}, début de la plage ${j + 1}`} onChange={(startMin) => update(r, { startMin })} />
+                      <span aria-hidden="true">–</span>
+                      <TimeField value={r.endMin} isEnd invalid={invalid} label={`${name}, fin de la plage ${j + 1}`} onChange={(endMin) => update(r, { endMin })} />
+                      <button type="button" className="icon-btn" onClick={() => remove(r)} aria-label={`Supprimer la plage ${j + 1} du ${name.toLowerCase()}`}><CloseIcon /></button>
+                    </span>
+                  );
+                })}
               </div>
               <button type="button" className="icon-btn bk-add" onClick={() => add(weekday)} aria-label={`Ajouter une plage le ${name.toLowerCase()}`} title="Ajouter une plage"><PlusIcon /></button>
             </li>
           );
         })}
       </ul>
-      {error && <p className="form-error" role="alert">{error}</p>}
+      {problems.length > 0 && (
+        <p className="form-error" role="alert">
+          {problems[0].message}{problems.length > 1 ? ` (et ${problems.length - 1} autre${problems.length > 2 ? 's' : ''} plage${problems.length > 2 ? 's' : ''} à corriger)` : ''}.
+        </p>
+      )}
+      {error && problems.length === 0 && <p className="form-error" role="alert">{error}</p>}
       {dirty && (
         <div className="bk-savebar">
           <span>Modifications non enregistrées</span>
-          <button className="btn ghost" onClick={() => { setDraft(hours); setError(null); }}>Annuler</button>
-          <button className="btn primary" disabled={busy} onClick={() => void save()}>Enregistrer les horaires</button>
+          <button className="btn ghost" onClick={() => { setDraft(null); setError(null); }}>Annuler</button>
+          <button className="btn primary" disabled={busy || problems.length > 0} onClick={() => void save()}>Enregistrer les horaires</button>
         </div>
       )}
     </Card>
   );
 }
 
-function BlockingCard({ calendars, onChange }: { calendars: CalendarInfo[]; onChange: (c: CalendarInfo, blocks: boolean) => void }) {
+function BlockingCard({ calendars, allDayBlocks, onChange, onAllDay }: {
+  calendars: CalendarInfo[]; allDayBlocks: boolean; onChange: (c: CalendarInfo, blocks: boolean) => void; onAllDay: (blocks: boolean) => void;
+}) {
   return (
-    <Card title="Calendriers qui bloquent les créneaux" sub="Un événement d’un calendrier coché rend le créneau indisponible, même si le calendrier est masqué. Les événements marqués « disponible » ne bloquent jamais.">
+    <Card title="Calendriers qui bloquent les créneaux" sub="Un événement d’un calendrier coché rend le créneau indisponible, même si le calendrier est masqué. Les événements marqués « disponible » ne bloquent pas.">
       {calendars.length === 0 ? <p className="bk-empty">Aucun calendrier pour l’instant.</p> : (
         <div className="bk-cals">
           {calendars.map((c) => (
@@ -418,18 +461,32 @@ function BlockingCard({ calendars, onChange }: { calendars: CalendarInfo[]; onCh
           ))}
         </div>
       )}
+      <div className="bk-option">
+        <label className="check">
+          <input type="checkbox" checked={allDayBlocks} onChange={(e) => onAllDay(e.target.checked)} />
+          Une journée entière bloque toujours toute la journée
+        </label>
+        <p className="bk-hint">
+          Apple Calendar marque « disponible » les journées entières qu’il crée, congés compris. Case cochée, elles bloquent quand même.
+          Décoche-la si tes journées entières sont surtout des rappels, ou décoche plus haut le calendrier qui les porte (anniversaires, jours fériés).
+        </p>
+      </div>
     </Card>
   );
 }
 
 // --- réglages ------------------------------------------------------------------
 
-function SettingsCard({ state, calendars, onSaved, notify }: { state: BookingAdminState; calendars: CalendarInfo[]; onSaved: (s: BookingAdminState) => void; notify: (msg: string) => void }) {
-  const [d, setD] = useState<BookingSettings>(state.settings);
+/** Réglages de la page publique. Comme pour les horaires, le brouillon vit dans l'écran parent. */
+function SettingsCard({ state, calendars, draft, setDraft, onSaved, notify }: {
+  state: BookingAdminState; calendars: CalendarInfo[]; draft: BookingSettings | null; setDraft: (d: BookingSettings | null) => void;
+  onSaved: (s: BookingAdminState) => void; notify: (msg: string) => void;
+}) {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
-  useEffect(() => setD(state.settings), [state.settings]);
   const s = state.settings;
+  const d = draft ?? s;
+  const setD = setDraft;
   const dirty = d.publicName !== s.publicName || d.welcomeText !== s.welcomeText || d.calendarId !== s.calendarId || d.slotStepMin !== s.slotStepMin;
   const writable = calendars.filter((c) => !c.readOnly);
   const effective = calendars.find((c) => c.id === state.effectiveCalendarId);
@@ -440,6 +497,7 @@ function SettingsCard({ state, calendars, onSaved, notify }: { state: BookingAdm
     setErrors({});
     try {
       onSaved(await bookingApi.saveSettings({ publicName: d.publicName.trim(), welcomeText: d.welcomeText, calendarId: d.calendarId, slotStepMin: d.slotStepMin }));
+      setDraft(null);
       notify('Réglages enregistrés');
     } catch (err) {
       if (err instanceof ApiError && err.fields) setErrors(err.fields);
@@ -481,7 +539,7 @@ function SettingsCard({ state, calendars, onSaved, notify }: { state: BookingAdm
         </div>
         <div className="bk-savebar static">
           {dirty && <span>Modifications non enregistrées</span>}
-          {dirty && <button type="button" className="btn ghost" onClick={() => { setD(s); setErrors({}); }}>Annuler</button>}
+          {dirty && <button type="button" className="btn ghost" onClick={() => { setDraft(null); setErrors({}); }}>Annuler</button>}
           <button className="btn primary" disabled={busy || !dirty}>Enregistrer</button>
         </div>
       </form>
@@ -521,6 +579,14 @@ function MailCard({ state, lastError, timezone, notify }: { state: BookingAdminS
       <dl className="bk-dl">
         <div><dt>Expéditeur</dt><dd>{state.mail.from}</dd></div>
         <div><dt>Avis envoyés à</dt><dd>{state.mail.notifyTo}</dd></div>
+        {state.mail.configured && (
+          <div>
+            <dt>Envois sur 24 h</dt>
+            <dd className={state.mail.sentLast24h >= state.mail.dailyLimit ? 'bk-err-text' : undefined}>
+              {state.mail.sentLast24h} sur {state.mail.dailyLimit} au plus{state.mail.sentLast24h >= state.mail.dailyLimit ? ' : plafond atteint, plus rien ne part' : ''}
+            </dd>
+          </div>
+        )}
         <div>
           <dt>Dernière erreur</dt>
           <dd>
@@ -570,14 +636,19 @@ function BookingRow({ b, timezone, mailConfigured, onCancel, onResend }: {
               <AlertIcon />Événement supprimé du calendrier
             </span>
           )}
-          {b.eventState === 'moved' && b.eventStart && (
-            <span className="tag warn" title="L’événement a été déplacé dans le calendrier. Le client n’est pas prévenu automatiquement.">
-              <AlertIcon />Déplacé au {dateTimeShortIn(timezone, b.eventStart)}
+          {b.eventState === 'moved' && b.notifiedStart && (
+            <span className="tag warn" title="L’événement a été déplacé dans le calendrier : la réservation suit le nouvel horaire. Le client n’est pas prévenu automatiquement.">
+              <AlertIcon />Déplacé : le client a reçu l’horaire du {dateTimeShortIn(timezone, b.notifiedStart)}
             </span>
           )}
           {b.mailError && <span className="tag warn"><AlertIcon />{b.mailError}</span>}
         </div>
         {b.eventState === 'missing' && <p className="bk-hint">Le créneau reste pris. Annule la réservation pour prévenir le client et libérer le créneau.</p>}
+        {b.eventState === 'moved' && (
+          <p className="bk-hint">
+            {mailConfigured ? '« Renvoyer l’e-mail » lui annonce le nouvel horaire.' : 'Pense à lui annoncer le nouvel horaire toi-même.'}
+          </p>
+        )}
       </div>
       {upcoming && (
         <div className="bk-row-actions">
@@ -631,6 +702,10 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
   const [state, setState] = useState<BookingAdminState | null>(null);
   const [types, setTypes] = useState<BookingType[]>([]);
   const [hours, setHours] = useState<BookingHoursRange[]>([]);
+  // Saisies en cours : gardées ici pour survivre au changement d'onglet et au rafraîchissement
+  // automatique, qui ne remplace que les valeurs du serveur.
+  const [hoursDraft, setHoursDraft] = useState<BookingHoursRange[] | null>(null);
+  const [settingsDraft, setSettingsDraft] = useState<BookingSettings | null>(null);
   const [calendars, setCalendars] = useState<CalendarInfo[]>([]);
   const [upcoming, setUpcoming] = useState<Booking[]>([]);
   const [past, setPast] = useState<Booking[]>([]);
@@ -694,6 +769,16 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
     }
   };
 
+  const setAllDayBlocks = async (allDayBlocks: boolean) => {
+    setState((s) => (s ? { ...s, settings: { ...s.settings, allDayBlocks } } : s));
+    try {
+      setState(await bookingApi.saveSettings({ allDayBlocks }));
+    } catch (err) {
+      notify(message(err));
+      void reload();
+    }
+  };
+
   const copyLink = async () => {
     if (!state) return;
     try {
@@ -719,13 +804,17 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
   const resend = async (b: Booking) => {
     try {
       const res = await bookingApi.resendConfirmation(b.id);
-      notify(res.mailError ? `E-mail non envoyé : ${res.mailError}` : `Confirmation renvoyée à ${b.email} (nouveau lien d’annulation).`);
+      notify(res.mailError
+        ? `E-mail non envoyé : ${res.mailError}. Le lien d’annulation que le client a déjà reste valable.`
+        : `Confirmation renvoyée à ${b.email} (nouveau lien d’annulation).`);
     } catch (err) {
       notify(message(err));
     }
     void reload();
   };
 
+  const hoursDirty = hoursDraft !== null && !sameHours(hoursDraft, hours);
+  const settingsDirty = settingsDraft !== null && state !== null && (['publicName', 'welcomeText', 'calendarId', 'slotStepMin'] as const).some((k) => settingsDraft[k] !== state.settings[k]);
   const list = scope === 'upcoming' ? upcoming : past;
   const attention = upcoming.filter((b) => b.eventState === 'missing' || b.eventState === 'moved').length;
 
@@ -768,6 +857,9 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
                   <button key={key} role="tab" aria-selected={tab === key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>
                     {label}
                     {key === 'bookings' && upcoming.length > 0 && <span className={`bk-count${attention > 0 ? ' alert' : ''}`}>{upcoming.length}</span>}
+                    {((key === 'hours' && hoursDirty) || (key === 'settings' && settingsDirty)) && (
+                      <span className="bk-unsaved" title="Modifications non enregistrées"><span className="sr-only">(modifications non enregistrées)</span></span>
+                    )}
                   </button>
                 ))}
               </div>
@@ -797,13 +889,13 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
               {tab === 'types' && <TypesTab types={types} reload={reload} notify={notify} />}
               {tab === 'hours' && (
                 <>
-                  <HoursCard hours={hours} onSaved={(h) => { setHours(h); void reload(); }} notify={notify} />
-                  <BlockingCard calendars={calendars} onChange={(c, v) => void setBlocks(c, v)} />
+                  <HoursCard hours={hours} draft={hoursDraft} setDraft={setHoursDraft} onSaved={(h) => { setHours(h); void reload(); }} notify={notify} />
+                  <BlockingCard calendars={calendars} allDayBlocks={state.settings.allDayBlocks} onChange={(c, v) => void setBlocks(c, v)} onAllDay={(v) => void setAllDayBlocks(v)} />
                 </>
               )}
               {tab === 'settings' && (
                 <>
-                  <SettingsCard state={state} calendars={calendars} onSaved={setState} notify={notify} />
+                  <SettingsCard state={state} calendars={calendars} draft={settingsDraft} setDraft={setSettingsDraft} onSaved={setState} notify={notify} />
                   <MailCard state={state} lastError={lastMailError} timezone={state.timezone} notify={notify} />
                 </>
               )}
