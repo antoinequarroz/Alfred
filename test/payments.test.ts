@@ -232,7 +232,7 @@ describe('paiement en ligne : réservation avec acompte', () => {
     const confirmation = await book(ctx);
     expect(confirmation.payment).toMatchObject({ amountCents: 5000, currency: 'CHF' });
     expect(confirmation.payment!.url).toMatch(/^https:\/\/checkout\.stripe\.com\//);
-    expect(confirmation.cancelUrl).toMatch(/\/rdv\/annulation\/[A-Za-z0-9_-]{43}$/);
+    expect(confirmation.cancelUrl).toMatch(/\/rdv\/(gerer|annulation)\/[A-Za-z0-9_-]{43}$/);
     expect(confirmation.emailSent).toBe(false);
 
     const session = [...ctx.stripe.sessions.values()][0];

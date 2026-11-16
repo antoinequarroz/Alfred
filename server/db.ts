@@ -96,6 +96,15 @@ CREATE TABLE IF NOT EXISTS bookings (
 CREATE INDEX IF NOT EXISTS bookings_start ON bookings(start_utc);
 CREATE INDEX IF NOT EXISTS bookings_status ON bookings(status, end_utc);
 
+-- Liens supplémentaires vers une réservation (rappels, déplacement) : le jeton n'est jamais
+-- conservé en clair, chaque e-mail qui porte un lien en reçoit donc un nouveau.
+CREATE TABLE IF NOT EXISTS booking_tokens (
+  token_hash  TEXT PRIMARY KEY,        -- SHA-256 du jeton
+  booking_id  TEXT NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS booking_tokens_booking ON booking_tokens(booking_id);
+
 -- Connexions réglées depuis l'app (SMTP, CalDAV). Une ligne par réglage : « smtp.host »,
 -- « caldav.password »… Les secrets (secret = 1) sont chiffrés, voir server/secrets.ts.
 CREATE TABLE IF NOT EXISTS connection_settings (
@@ -176,6 +185,12 @@ function migrate(db: DatabaseSync): void {
   addColumn('bookings', 'event_uid', 'TEXT');
   // Horaire annoncé au client quand il diffère de l'horaire actuel (événement déplacé dans l'agenda).
   addColumn('bookings', 'notified_start', 'TEXT');
+  // Rappels déjà partis pour l'horaire actuel (« 24,1 »), et instant à partir duquel le client
+  // connaît cet horaire (NULL : created_at). Un rappel dont le moment précède cet instant n'est pas envoyé.
+  addColumn('bookings', 'reminders_sent', "TEXT NOT NULL DEFAULT ''");
+  addColumn('bookings', 'reminder_ref', 'TEXT');
+  // Déplacements faits par le client lui-même, depuis le lien de ses e-mails.
+  addColumn('bookings', 'client_reschedules', 'INTEGER NOT NULL DEFAULT 0');
   // Acompte : montant par type, et paiement de chaque réservation (NULL : pas d'acompte).
   addColumn('booking_types', 'deposit_cents', 'INTEGER NOT NULL DEFAULT 0');
   addColumn('bookings', 'payment_amount_cents', 'INTEGER');

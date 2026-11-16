@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import type {
-  Booking, BookingAdminState, BookingHoursRange, BookingMode, BookingSettings, BookingStep, BookingType, BookingTypeInput, CalendarInfo,
+import {
+  CHANGE_NOTICE_CHOICES, REMINDER_HOURS_CHOICES,
+  type Booking, type BookingAdminState, type BookingHoursRange, type BookingMode, type BookingSettings, type BookingStep, type BookingType,
+  type BookingTypeInput, type CalendarInfo,
 } from '../../../shared/types';
 import { ApiError, bookingApi } from '../api';
 import { AlertIcon, CheckIcon, Chevron, CloseIcon, CopyIcon, ExternalIcon, MenuIcon, PlusIcon } from '../icons';
@@ -555,6 +557,68 @@ function SettingsCard({ state, calendars, draft, setDraft, onSaved, notify }: {
   );
 }
 
+/** « 1 h », « 24 h », « 3 jours » */
+function hoursLabel(h: number): string {
+  return h >= 48 && h % 24 === 0 ? `${h / 24} jours` : `${h} h`;
+}
+
+/** Rappels et changements faits par le client. Chaque case s'enregistre aussitôt, comme « journée entière ». */
+function RemindersCard({ settings, mailConfigured, onChange }: {
+  settings: BookingSettings; mailConfigured: boolean; onChange: (patch: Partial<BookingSettings>) => void;
+}) {
+  const noticeId = useId();
+  const toggleHour = (h: number, on: boolean) => {
+    const next = on ? [...settings.reminderHours, h] : settings.reminderHours.filter((x) => x !== h);
+    onChange({ reminderHours: REMINDER_HOURS_CHOICES.filter((x) => next.includes(x)) });
+  };
+  const reminders = settings.reminderHours;
+  return (
+    <Card
+      title="Rappels et changements"
+      sub="Ce que tes clients reçoivent avant le rendez-vous, et ce qu’ils peuvent faire eux-mêmes depuis le lien de leurs e-mails."
+    >
+      <div className="bk-form">
+        <div className="bk-reminders">
+          <span className="fld-label">Rappel par e-mail au client</span>
+          <div className="bk-checks" role="group" aria-label="Moments des rappels">
+            {REMINDER_HOURS_CHOICES.map((h) => (
+              <label key={h} className="check">
+                <input type="checkbox" checked={reminders.includes(h)} onChange={(e) => toggleHour(h, e.target.checked)} />
+                {hoursLabel(h)} avant
+              </label>
+            ))}
+          </div>
+          <p className="bk-hint">
+            {reminders.length === 0
+              ? 'Aucun rappel n’est envoyé.'
+              : `Le rappel reprend l’heure, le lieu ou le lien de la visio, et le lien pour déplacer ou annuler. Il ne part pas si le rendez-vous a été pris après son moment (un rendez-vous pris 3 h avant ne reçoit pas le rappel « 24 h avant »).`}
+            {!mailConfigured && reminders.length > 0 && ' L’envoi d’e-mails n’est pas configuré : aucun rappel ne part pour l’instant.'}
+          </p>
+        </div>
+        <div className="bk-option">
+          <label className="check">
+            <input type="checkbox" checked={settings.allowReschedule} onChange={(e) => onChange({ allowReschedule: e.target.checked })} />
+            Le client peut déplacer lui-même son rendez-vous
+          </label>
+          <p className="bk-hint">
+            Il choisit un autre créneau libre, l’événement est déplacé dans ton calendrier et tu reçois un e-mail. Trois déplacements au plus par rendez-vous.
+            Case décochée, le lien permet seulement d’annuler.
+          </p>
+        </div>
+        <div className="bk-option fld bk-notice">
+          <label htmlFor={noticeId}>Annuler ou déplacer en ligne</label>
+          <select id={noticeId} value={settings.changeNoticeHours} onChange={(e) => onChange({ changeNoticeHours: Number(e.target.value) })}>
+            {CHANGE_NOTICE_CHOICES.map((h) => (
+              <option key={h} value={h}>{h === 0 ? 'Jusqu’au début du rendez-vous' : `Jusqu’à ${hoursLabel(h)} avant`}</option>
+            ))}
+          </select>
+          <p className="bk-hint">Passé ce délai, le client doit te contacter directement. Toi, tu peux toujours annuler depuis la liste des réservations.</p>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 // --- réservations --------------------------------------------------------------
 
 function BookingRow({ b, timezone, mailConfigured, onCancel, onResend, onRefund }: {
@@ -594,6 +658,12 @@ function BookingRow({ b, timezone, mailConfigured, onCancel, onResend, onRefund 
             <span className="tag warn" title="L’événement a été déplacé dans le calendrier : la réservation suit le nouvel horaire. Le client n’est pas prévenu automatiquement.">
               <AlertIcon />Déplacé : le client a reçu l’horaire du {dateTimeShortIn(timezone, b.notifiedStart)}
             </span>
+          )}
+          {confirmed && b.clientReschedules > 0 && (
+            <span className="tag">Déplacé par le client{b.clientReschedules > 1 ? ` (${b.clientReschedules} fois)` : ''}</span>
+          )}
+          {confirmed && b.remindersSent.length > 0 && (
+            <span className="tag">Rappel envoyé ({b.remindersSent.map(hoursLabel).join(', ')} avant)</span>
           )}
           {b.mailError && <span className="tag warn"><AlertIcon />{b.mailError}</span>}
           {pay && pay.status === 'paid' && <span className="tag ok">Acompte payé : {amount}</span>}
@@ -762,6 +832,16 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
     }
   };
 
+  const saveSettings = async (patch: Partial<BookingSettings>) => {
+    setState((s) => (s ? { ...s, settings: { ...s.settings, ...patch } } : s));
+    try {
+      setState(await bookingApi.saveSettings(patch));
+    } catch (err) {
+      notify(message(err));
+      void reload();
+    }
+  };
+
   const copyLink = async () => {
     if (!state) return;
     try {
@@ -913,6 +993,7 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
               {tab === 'settings' && (
                 <>
                   <SettingsCard state={state} calendars={calendars} draft={settingsDraft} setDraft={setSettingsDraft} onSaved={setState} notify={notify} />
+                  <RemindersCard settings={state.settings} mailConfigured={state.mail.configured} onChange={(patch) => void saveSettings(patch)} />
                   {connections.state ? (
                     <SmtpCard
                       id="bk-mail" state={connections.state} notify={notify} autoFocus={mailFocus} onFocused={clearMailFocus}

@@ -22,6 +22,8 @@ export interface BookingLimits {
   cancel: [number, number];
   /** Suivi d'un paiement (chaque appel peut interroger Stripe), par adresse IP. */
   payment: [number, number];
+  /** Essais de déplacement par jeton, par adresse IP. */
+  reschedule: [number, number];
 }
 
 export const DEFAULT_BOOKING_LIMITS: BookingLimits = {
@@ -33,6 +35,7 @@ export const DEFAULT_BOOKING_LIMITS: BookingLimits = {
   bookGlobal: [60, 3_600_000],
   cancel: [10, 3_600_000],
   payment: [60, 60_000],
+  reschedule: [20, 3_600_000],
 };
 
 /**
@@ -60,6 +63,7 @@ export function registerPublicBookingRoutes(app: Hono, booking: BookingService, 
   const bookGlobal = new RateLimiter(...limits.bookGlobal, 1);
   const cancel = new RateLimiter(...limits.cancel);
   const payment = new RateLimiter(...limits.payment);
+  const reschedule = new RateLimiter(...limits.reschedule);
 
   const tooMany = (c: Context, retryAfterSec?: number): Response => {
     if (retryAfterSec) c.header('Retry-After', String(retryAfterSec));
@@ -131,6 +135,20 @@ export function registerPublicBookingRoutes(app: Hono, booking: BookingService, 
   app.post('/api/public/booking/payment/:ref/abandon', async (c) =>
     limited(c, payment) ?? c.json(await booking.abandonPayment(c.req.param('ref'))),
   );
+
+  // Déplacement par le client : autres créneaux, puis choix de l'un d'eux. Même jeton que l'annulation.
+  app.get('/api/public/booking/manage/:token/slots', (c) =>
+    limited(c, slots) ?? limited(c, slotsGlobal, '*') ?? c.json(booking.manageSlots(c.req.param('token'), c.req.query('from'), c.req.query('to'))),
+  );
+
+  app.post('/api/public/booking/manage/:token/reschedule', async (c) => {
+    const blocked = limited(c, reschedule);
+    if (blocked) return blocked;
+    if (!/^application\/json\b/i.test(c.req.header('content-type') ?? '')) {
+      throw new BookingError(415, 'unsupported', 'Le corps doit être en JSON (Content-Type: application/json)');
+    }
+    return c.json(await booking.rescheduleByToken(c.req.param('token'), await c.req.json()));
+  });
 
   // La route « introuvable » des /api/public/* est posée par createApp, après les routes publiques de la visio.
 }

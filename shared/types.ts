@@ -95,7 +95,21 @@ export interface BookingSettings {
    * Faux : seules les journées entières marquées « occupé » bloquent.
    */
   allDayBlocks: boolean;
+  /**
+   * Rappels envoyés au client avant le rendez-vous, en heures (parmi REMINDER_HOURS_CHOICES),
+   * du plus tôt au plus tard. Vide : aucun rappel. Par défaut : 24 h et 1 h.
+   */
+  reminderHours: number[];
+  /** Vrai (défaut) : le client peut choisir lui-même un autre créneau depuis le lien de ses e-mails. */
+  allowReschedule: boolean;
+  /** Annulation et déplacement en ligne possibles jusqu'à ce nombre d'heures avant le début (0 : jusqu'au début). */
+  changeNoticeHours: number;
 }
+
+/** Moments de rappel proposés, en heures avant le rendez-vous. */
+export const REMINDER_HOURS_CHOICES = [72, 48, 24, 12, 4, 2, 1] as const;
+/** Délais proposés pour annuler ou déplacer en ligne, en heures avant le rendez-vous. */
+export const CHANGE_NOTICE_CHOICES = [0, 1, 2, 4, 12, 24, 48] as const;
 
 export interface BookingType {
   id: string;
@@ -184,6 +198,10 @@ export interface Booking {
   notifiedStart: string | null;
   /** Dernier échec d'envoi d'e-mail, null si tout est parti. */
   mailError: string | null;
+  /** Rappels déjà envoyés pour l'horaire actuel (heures avant le début), du plus tôt au plus tard. */
+  remindersSent: number[];
+  /** Nombre de fois où le client a déplacé lui-même ce rendez-vous. */
+  clientReschedules: number;
   /** Acompte payé en ligne, null si le rendez-vous n'en avait pas. */
   payment: BookingPayment | null;
 }
@@ -266,11 +284,19 @@ export interface PublicBooking {
   locationLabel: string;
   name: string;
   status: BookingStatus;
-  /** Faux si le rendez-vous est déjà commencé ou passé. */
+  /** Faux si le rendez-vous est déjà commencé, passé, ou trop proche pour être annulé en ligne. */
   cancellable: boolean;
+  /** Vrai si le client peut choisir lui-même un autre créneau (voir manage/:token/slots). */
+  reschedulable: boolean;
+  /** Dernier instant (ISO UTC) où annuler ou déplacer en ligne est possible. */
+  changeUntil: string;
+  /** Mode du rendez-vous (icône du lieu), et ce qu'il faut pour proposer d'autres créneaux. */
+  mode: BookingMode;
+  durationMin: number;
+  horizonDays: number;
   /** Lien de la visio Alfred du rendez-vous, s'il en a une. */
   videoUrl: string | null;
-  /** Réponse à une annulation seulement : vrai si un e-mail de confirmation d'annulation est parti. */
+  /** Réponse à une annulation ou à un déplacement seulement : vrai si l'e-mail au client est parti. */
   emailSent?: boolean;
   /** Acompte payé en ligne, et ce qu'il devient si le client annule maintenant. */
   deposit?: PublicDeposit | null;
@@ -289,7 +315,7 @@ export interface PublicDeposit {
 
 export interface BookingConfirmation {
   booking: PublicBooking;
-  /** Lien d'annulation (aussi envoyé par e-mail). */
+  /** Lien pour déplacer ou annuler le rendez-vous (aussi envoyé par e-mail). */
   cancelUrl: string;
   /** Faux si l'e-mail de confirmation n'a pas pu partir : afficher le récapitulatif et le lien. */
   emailSent: boolean;

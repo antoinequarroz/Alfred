@@ -21,6 +21,9 @@ const publicApi = {
   book: (body: BookingRequest) => requestJson<BookingConfirmation>('POST', `${BASE}/book`, body),
   getByToken: (token: string) => requestJson<PublicBooking>('GET', `${BASE}/cancel/${token || '-'}`),
   cancel: (token: string) => requestJson<PublicBooking>('POST', `${BASE}/cancel/${token || '-'}`),
+  manageSlots: (token: string, from: string, to: string) =>
+    requestJson<PublicSlots>('GET', `${BASE}/manage/${token || '-'}/slots?from=${from}&to=${to}`),
+  reschedule: (token: string, start: string) => requestJson<PublicBooking>('POST', `${BASE}/manage/${token || '-'}/reschedule`, { start }),
   payment: (ref: string) => requestJson<PublicPaymentStatus>('GET', `${BASE}/payment/${ref || '-'}`),
   abandon: (ref: string) => requestJson<PublicPaymentStatus>('POST', `${BASE}/payment/${ref || '-'}/abandon`),
 };
@@ -37,6 +40,9 @@ function readPending(ref: string): PendingPayment | null {
     return null;
   }
 }
+
+/** Charge les créneaux libres d'une période (jours AAAA-MM-JJ inclus). */
+type SlotsLoader = (from: string, to: string) => Promise<PublicSlots>;
 
 /** Message d'erreur pour le client (vouvoiement), d'après le code de l'API. */
 function errorText(err: unknown): string {
@@ -220,7 +226,7 @@ const EMPTY_SLOTS: SlotsState = { days: new Map(), loaded: new Set(), loading: t
 const PROBE_DAYS = 41;
 
 /** Charge les créneaux d'un type, mois par mois, et propose le premier jour libre. */
-function useSlots(type: PublicBookingType, timezone: string, preferredDay: string | null) {
+function useSlots(type: PublicBookingType, timezone: string, preferredDay: string | null, loader?: SlotsLoader) {
   const today = useMemo(() => dayKeyIn(timezone, new Date()), [timezone]);
   const lastDay = useMemo(() => addDaysKey(today, type.horizonDays), [today, type.horizonDays]);
   const [state, setState] = useState<SlotsState>(EMPTY_SLOTS);
@@ -234,7 +240,7 @@ function useSlots(type: PublicBookingType, timezone: string, preferredDay: strin
     const gen = generation.current;
     setState((s) => ({ ...s, loading: true, error: null }));
     try {
-      const res = await publicApi.slots(type.slug, from, to);
+      const res = await (loader ? loader(from, to) : publicApi.slots(type.slug, from, to));
       if (gen !== generation.current) return;
       setState((s) => {
         const days = new Map(s.days);
@@ -255,7 +261,7 @@ function useSlots(type: PublicBookingType, timezone: string, preferredDay: strin
       if (gen !== generation.current) return;
       setState((s) => ({ ...s, loading: false, error: errorText(err), ready: s.ready }));
     }
-  }, [type.slug]);
+  }, [type.slug, loader]);
 
   // Sonde initiale : de aujourd'hui à 41 jours plus tard ; les mois suivants sont demandés un par un.
   const probe = useCallback(() => {
@@ -288,10 +294,12 @@ function useSlots(type: PublicBookingType, timezone: string, preferredDay: strin
 
 const DOW = [['L', 'lundi'], ['M', 'mardi'], ['M', 'mercredi'], ['J', 'jeudi'], ['V', 'vendredi'], ['S', 'samedi'], ['D', 'dimanche']];
 
-function SlotPicker({ type, timezone, preferredDay, onPick }: {
+function SlotPicker({ type, timezone, preferredDay, onPick, loader }: {
   type: PublicBookingType; timezone: string; preferredDay: string | null; onPick: (start: string) => void;
+  /** Source des créneaux, si ce ne sont pas ceux du type (déplacement d'un rendez-vous). */
+  loader?: SlotsLoader;
 }) {
-  const s = useSlots(type, timezone, preferredDay);
+  const s = useSlots(type, timezone, preferredDay, loader);
   const weeks = useMemo(() => monthWeeks(s.month), [s.month]);
   const slotsRef = useRef<HTMLElement>(null);
   const dayTitleRef = useRef<HTMLHeadingElement>(null);
@@ -509,7 +517,7 @@ function BookingForm({ type, start, timezone, values, onChange, onBack, onDone, 
       <Field label="Nom et prénom" error={errors.name}>
         {(p) => <input {...p} type="text" name="name" autoComplete="name" maxLength={60} required value={values.name} onChange={(e) => set({ name: e.target.value })} />}
       </Field>
-      <Field label="Adresse e-mail" error={errors.email} hint="La confirmation et le lien d’annulation y sont envoyés.">
+      <Field label="Adresse e-mail" error={errors.email} hint="La confirmation et le lien pour déplacer ou annuler y sont envoyés.">
         {(p) => <input {...p} type="email" name="email" autoComplete="email" inputMode="email" maxLength={254} required value={values.email} onChange={(e) => set({ email: e.target.value })} />}
       </Field>
       <Field label="Téléphone" error={errors.phone} optional={!type.phoneRequired} hint={type.phoneRequired ? 'Le numéro auquel vous serez appelé.' : undefined}>
@@ -663,14 +671,14 @@ function BookingFlow() {
         <div className="rdv-panel rdv-done">
           <span className="rdv-badge ok" aria-hidden="true"><CheckIcon /></span>
           <StepTitle sub={done.confirmation.emailSent
-            ? <>Un e-mail de confirmation vient d’être envoyé à <strong>{done.email}</strong>. Il contient le récapitulatif, un fichier à ajouter à votre agenda et le lien d’annulation.</>
+            ? <>Un e-mail de confirmation vient d’être envoyé à <strong>{done.email}</strong>. Il contient le récapitulatif, un fichier à ajouter à votre agenda et le lien pour déplacer ou annuler.</>
             : undefined}
           >
             Votre rendez-vous est confirmé
           </StepTitle>
           {!done.confirmation.emailSent && (
             <Notice kind="warn">
-              Votre rendez-vous est bien enregistré, mais l’e-mail de confirmation n’a pas pu être envoyé. Notez la date et l’heure ci-dessous, et conservez le lien d’annulation.
+              Votre rendez-vous est bien enregistré, mais l’e-mail de confirmation n’a pas pu être envoyé. Notez la date et l’heure ci-dessous, et conservez le lien pour déplacer ou annuler.
             </Notice>
           )}
           <Recap typeName={b.typeName} start={b.start} end={b.end} timezone={b.timezone} location={b.locationLabel} mode={type?.mode} name={b.name} />
@@ -681,7 +689,7 @@ function BookingFlow() {
           )}
           <div className="rdv-actions">
             <button type="button" className="btn" onClick={restart}>Prendre un autre rendez-vous</button>
-            <a className="rdv-link danger" href={cancelPath}>Annuler ce rendez-vous</a>
+            <a className="rdv-link" href={cancelPath}>{b.reschedulable ? 'Déplacer ou annuler' : 'Annuler ce rendez-vous'}</a>
           </div>
         </div>
       </Shell>
@@ -812,49 +820,85 @@ function BookingFlow() {
   );
 }
 
-// --- annulation -------------------------------------------------------------------------
+// --- déplacement et annulation ---------------------------------------------------------
 
-type CancelState =
+type ManageMode = 'overview' | 'cancel' | 'pick' | 'confirm';
+
+type ManageState =
   | { kind: 'loading' }
   | { kind: 'gone' }
   | { kind: 'error'; message: string }
-  | { kind: 'ready'; booking: PublicBooking; failure: string | null; busy: boolean }
-  | { kind: 'cancelled'; booking: PublicBooking };
+  | { kind: 'ready'; booking: PublicBooking; mode: ManageMode; pick: string | null; slotLost: boolean; failure: string | null; busy: boolean }
+  | { kind: 'cancelled'; booking: PublicBooking }
+  | { kind: 'moved'; booking: PublicBooking; previous: PublicBooking };
 
-function CancelPage({ token }: { token: string }) {
-  const [state, setState] = useState<CancelState>({ kind: 'loading' });
+/** Premier écran : vue d'ensemble si le client peut déplacer, sinon directement la confirmation d'annulation. */
+function firstMode(b: PublicBooking): ManageMode {
+  return b.reschedulable ? 'overview' : 'cancel';
+}
+
+/** « lundi 16 novembre, 09:00 – 09:30 » */
+function whenLabel(b: Pick<PublicBooking, 'start' | 'end' | 'timezone'>): string {
+  return `${dayLongIn(b.timezone, b.start)}, ${timeIn(b.timezone, b.start)} – ${timeIn(b.timezone, b.end)}`;
+}
+
+/**
+ * Page du lien reçu par e-mail (/rdv/gerer/<jeton>, ou /rdv/annulation/<jeton> pour les anciens
+ * e-mails) : déplacer le rendez-vous sur un autre créneau libre, ou l'annuler.
+ */
+function ManagePage({ token }: { token: string }) {
+  const [state, setState] = useState<ManageState>({ kind: 'loading' });
   const [name, setName] = useState('');
   useEffect(() => {
     // Le nom affiché en tête de page ; sans lui, la page fonctionne quand même.
     publicApi.info().then((info) => setName(info.publicName), () => undefined);
   }, []);
 
-  // Consulter n'annule rien : l'annulation n'est envoyée qu'au clic (les aperçus de liens ouvrent les e-mails).
+  // Consulter ne change rien : seul un clic déplace ou annule (les aperçus de liens ouvrent les e-mails).
   const load = useCallback(() => {
     setState({ kind: 'loading' });
     publicApi.getByToken(token).then(
-      (booking) => setState({ kind: 'ready', booking, failure: null, busy: false }),
+      (booking) => setState({ kind: 'ready', booking, mode: firstMode(booking), pick: null, slotLost: false, failure: null, busy: false }),
       (err) => setState(err instanceof ApiError && err.status === 404 ? { kind: 'gone' } : { kind: 'error', message: errorText(err) }),
     );
   }, [token]);
   useEffect(load, [load]);
   useEffect(() => {
-    document.title = 'Annuler un rendez-vous';
+    document.title = 'Votre rendez-vous';
   }, []);
 
-  const cancel = async (booking: PublicBooking) => {
-    setState({ kind: 'ready', booking, failure: null, busy: true });
+  const loader = useCallback<SlotsLoader>((from, to) => publicApi.manageSlots(token, from, to), [token]);
+  const update = (patch: Partial<Extract<ManageState, { kind: 'ready' }>>) =>
+    setState((s) => (s.kind === 'ready' ? { ...s, ...patch } : s));
+
+  const cancel = async () => {
+    update({ busy: true, failure: null });
     try {
       setState({ kind: 'cancelled', booking: await publicApi.cancel(token) });
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) return setState({ kind: 'gone' });
-      if (err instanceof ApiError && err.code === 'too_late') return setState({ kind: 'ready', booking: { ...booking, cancellable: false }, failure: null, busy: false });
-      setState({ kind: 'ready', booking, failure: errorText(err), busy: false });
+      // Trop tard entre-temps : la page relue le dit.
+      if (err instanceof ApiError && err.code === 'too_late') return load();
+      update({ busy: false, failure: errorText(err) });
+    }
+  };
+
+  const confirmMove = async (booking: PublicBooking, start: string) => {
+    update({ busy: true, failure: null });
+    try {
+      setState({ kind: 'moved', booking: await publicApi.reschedule(token, start), previous: booking });
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) return setState({ kind: 'gone' });
+      if (err instanceof ApiError && err.code === 'slot_unavailable') return update({ busy: false, mode: 'pick', pick: null, slotLost: true });
+      if (err instanceof ApiError && ['too_late', 'reschedule_disabled', 'too_many_changes', 'not_reschedulable'].includes(err.code ?? '')) {
+        return setState({ kind: 'ready', booking: { ...booking, reschedulable: false }, mode: 'overview', pick: null, slotLost: false, failure: err.message, busy: false });
+      }
+      update({ busy: false, failure: errorText(err) });
     }
   };
 
   const recap = (b: PublicBooking) => (
-    <Recap typeName={b.typeName} start={b.start} end={b.end} timezone={b.timezone} location={b.locationLabel} name={b.name}
+    <Recap typeName={b.typeName} start={b.start} end={b.end} timezone={b.timezone} location={b.locationLabel} mode={b.mode} name={b.name}
       deposit={b.deposit ? `${formatAmount(b.deposit.amountCents, b.deposit.currency)}, ${b.deposit.refunded ? 'remboursé' : 'payé en ligne'}` : undefined} />
   );
   /** Ce que devient l'acompte si le client annule maintenant. */
@@ -872,6 +916,33 @@ function CancelPage({ token }: { token: string }) {
   };
   const again = <a className="btn" href="/rdv">Prendre un nouveau rendez-vous</a>;
 
+  // Choix d'un nouveau créneau : page large, comme à la réservation.
+  if (state.kind === 'ready' && state.mode === 'pick') {
+    const b = state.booking;
+    const type: PublicBookingType = {
+      slug: 'deplacement', name: b.typeName, durationMin: b.durationMin, description: '', mode: b.mode,
+      locationLabel: b.locationLabel, phoneRequired: false, horizonDays: b.horizonDays, depositCents: 0, currency: 'CHF',
+    };
+    return (
+      <Shell name={name}>
+        <div className="rdv-panel wide">
+          <button type="button" className="rdv-back" onClick={() => update({ mode: 'overview', slotLost: false })}><ArrowLeftIcon />Retour</button>
+          <StepTitle sub={<>Rendez-vous actuel : {whenLabel(b)}. Il reste réservé tant que vous n’avez pas confirmé le nouveau créneau.</>}>
+            Choisissez un nouveau créneau
+          </StepTitle>
+          {state.slotLost && <Notice kind="warn">Ce créneau vient d’être pris par quelqu’un d’autre. Choisissez-en un autre : votre rendez-vous actuel n’a pas changé.</Notice>}
+          <SlotPicker
+            type={type}
+            timezone={b.timezone}
+            preferredDay={dayKeyIn(b.timezone, new Date(state.pick ?? b.start))}
+            loader={loader}
+            onPick={(iso) => update({ mode: 'confirm', pick: iso, slotLost: false, failure: null })}
+          />
+        </div>
+      </Shell>
+    );
+  }
+
   return (
     <Shell name={name}>
       <div className="rdv-panel narrow rdv-done">
@@ -886,27 +957,113 @@ function CancelPage({ token }: { token: string }) {
             <div className="rdv-actions">{again}</div>
           </>
         )}
-        {state.kind === 'ready' && state.booking.cancellable && (
+
+        {state.kind === 'ready' && state.mode === 'overview' && (
+          state.booking.reschedulable || state.booking.cancellable ? (
+            <>
+              <StepTitle sub="Un empêchement ? Choisissez un autre créneau, ou annulez le rendez-vous.">Votre rendez-vous</StepTitle>
+              {recap(state.booking)}
+              {state.failure && <Notice kind="warn">{state.failure}</Notice>}
+              <div className="rdv-actions">
+                {state.booking.reschedulable && (
+                  <button type="button" className="btn primary" onClick={() => update({ mode: 'pick', failure: null })}>Choisir un autre créneau</button>
+                )}
+                {state.booking.cancellable && (
+                  <button type="button" className="rdv-link danger" onClick={() => update({ mode: 'cancel', failure: null })}>Annuler le rendez-vous</button>
+                )}
+              </div>
+              {state.booking.videoUrl && (
+                <Notice kind="info" action={<a className="btn" href={state.booking.videoUrl} target="_blank" rel="noopener">Ouvrir la visio</a>}>
+                  À l’heure du rendez-vous, rejoignez la visio depuis ce lien. Rien à installer.
+                </Notice>
+              )}
+            </>
+          ) : (
+            <>
+              <StepTitle sub={Date.parse(state.booking.start) <= Date.now()
+                ? 'Ce rendez-vous a déjà commencé ou est passé : il ne peut plus être modifié en ligne.'
+                : 'Ce rendez-vous est trop proche pour être déplacé ou annulé en ligne. Contactez-nous directement.'}
+              >
+                Modification en ligne impossible
+              </StepTitle>
+              {recap(state.booking)}
+              {state.failure && <Notice kind="warn">{state.failure}</Notice>}
+            </>
+          )
+        )}
+
+        {state.kind === 'ready' && state.mode === 'cancel' && (
+          state.booking.cancellable ? (
+            <>
+              <StepTitle sub="Vérifiez qu’il s’agit bien du rendez-vous à annuler. Cette action est définitive : le créneau sera libéré.">Annuler ce rendez-vous ?</StepTitle>
+              {recap(state.booking)}
+              {refundNote(state.booking)}
+              {state.failure && <Notice kind="error">{state.failure}</Notice>}
+              <div className="rdv-actions">
+                <button type="button" className="btn danger-solid" disabled={state.busy} aria-busy={state.busy} onClick={() => void cancel()}>
+                  {state.busy && <span className="rdv-spinner light" aria-hidden="true" />}
+                  {state.busy ? 'Annulation…' : 'Annuler ce rendez-vous'}
+                </button>
+                {state.booking.reschedulable && (
+                  <button type="button" className="btn" disabled={state.busy} onClick={() => update({ mode: 'pick', failure: null })}>Plutôt le déplacer</button>
+                )}
+              </div>
+              <p className="rdv-fine">Vous souhaitez le conserver ? Fermez simplement cette page.</p>
+            </>
+          ) : (
+            <>
+              <StepTitle sub={Date.parse(state.booking.start) <= Date.now()
+                ? 'Ce rendez-vous a déjà commencé ou est passé : il ne peut plus être annulé en ligne.'
+                : 'Ce rendez-vous est trop proche pour être annulé en ligne. Contactez-nous directement.'}
+              >
+                Annulation impossible
+              </StepTitle>
+              {recap(state.booking)}
+            </>
+          )
+        )}
+
+        {state.kind === 'ready' && state.mode === 'confirm' && state.pick && (() => {
+          const b = state.booking;
+          const next = { start: state.pick, end: new Date(Date.parse(state.pick) + b.durationMin * 60_000).toISOString(), timezone: b.timezone };
+          return (
+            <>
+              <button type="button" className="rdv-back" disabled={state.busy} onClick={() => update({ mode: 'pick', failure: null })}><ArrowLeftIcon />Autre créneau</button>
+              <StepTitle sub={<>Au lieu de : {whenLabel(b)}.</>}>Confirmer le nouvel horaire ?</StepTitle>
+              <Recap typeName={b.typeName} start={next.start} end={next.end} timezone={b.timezone} location={b.locationLabel} mode={b.mode} name={b.name} />
+              {state.failure && <Notice kind="error">{state.failure}</Notice>}
+              <div className="rdv-actions">
+                <button type="button" className="btn primary" disabled={state.busy} aria-busy={state.busy} onClick={() => void confirmMove(b, state.pick!)}>
+                  {state.busy && <span className="rdv-spinner light" aria-hidden="true" />}
+                  {state.busy ? 'Déplacement…' : 'Confirmer le déplacement'}
+                </button>
+              </div>
+            </>
+          );
+        })()}
+
+        {state.kind === 'moved' && (
           <>
-            <StepTitle sub="Vérifiez qu’il s’agit bien du rendez-vous à annuler. Cette action est définitive : le créneau sera libéré.">Annuler ce rendez-vous ?</StepTitle>
+            <span className="rdv-badge ok" aria-hidden="true"><CheckIcon /></span>
+            <StepTitle sub={state.booking.emailSent
+              ? 'Un e-mail vous confirme le nouvel horaire, avec le rendez-vous à jour à ajouter à votre agenda.'
+              : 'C’est enregistré. Notez le nouvel horaire ci-dessous.'}
+            >
+              Votre rendez-vous est déplacé
+            </StepTitle>
             {recap(state.booking)}
-            {refundNote(state.booking)}
-            {state.failure && <Notice kind="error">{state.failure}</Notice>}
+            <p className="rdv-fine">Ancien horaire : {whenLabel(state.previous)}</p>
+            {state.booking.videoUrl && (
+              <Notice kind="info" action={<a className="btn primary" href={state.booking.videoUrl} target="_blank" rel="noopener">Ouvrir la visio</a>}>
+                Le lien de la visio ne change pas : rejoignez-la à la nouvelle heure.
+              </Notice>
+            )}
             <div className="rdv-actions">
-              <button type="button" className="btn danger-solid" disabled={state.busy} aria-busy={state.busy} onClick={() => void cancel(state.booking)}>
-                {state.busy && <span className="rdv-spinner light" aria-hidden="true" />}
-                {state.busy ? 'Annulation…' : 'Annuler ce rendez-vous'}
-              </button>
+              <button type="button" className="rdv-link" onClick={load}>Revenir à mon rendez-vous</button>
             </div>
-            <p className="rdv-fine">Vous souhaitez le conserver ? Fermez simplement cette page.</p>
           </>
         )}
-        {state.kind === 'ready' && !state.booking.cancellable && (
-          <>
-            <StepTitle sub="Ce rendez-vous a déjà commencé ou est passé : il ne peut plus être annulé en ligne.">Annulation impossible</StepTitle>
-            {recap(state.booking)}
-          </>
-        )}
+
         {state.kind === 'cancelled' && (
           <>
             <span className="rdv-badge ok" aria-hidden="true"><CheckIcon /></span>
@@ -926,11 +1083,11 @@ function CancelPage({ token }: { token: string }) {
 }
 
 export function PublicApp() {
-  const cancel = /^\/rdv\/annulation\/([^/]*)\/?$/.exec(location.pathname);
-  if (cancel) return <CancelPage token={cancel[1]} />;
   const payment = /^\/rdv\/paiement\/([^/]*)\/?$/.exec(location.pathname);
   if (payment) return <PaymentPage paymentRef={payment[1]} abandoned={new URLSearchParams(location.search).has('abandon')} />;
-  return <BookingFlow />;
+  // /rdv/gerer/<jeton> ; /rdv/annulation/<jeton> pour les liens des e-mails envoyés avant les déplacements.
+  const manage = /^\/rdv\/(?:gerer|annulation)\/([^/]*)\/?$/.exec(location.pathname);
+  return manage ? <ManagePage token={manage[1]} /> : <BookingFlow />;
 }
 
 // --- retour de la page de paiement ------------------------------------------------------

@@ -87,6 +87,9 @@ serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => 
 // La synchro régulière tourne toujours : elle ne fait rien tant qu'aucun identifiant n'est en place.
 void caldav.sync();
 setInterval(() => void caldav.sync(), config.caldav.syncIntervalSeconds * 1000).unref();
+// Rappels aux clients avant leurs rendez-vous : un passage par minute (rien ne part sans SMTP ni rappel réglé).
+setTimeout(() => void booking.sendDueReminders(), 30_000).unref();
+setInterval(() => void booking.sendDueReminders(), 60_000).unref();
 // Paiements d'acompte en cours : vérifiés auprès de Stripe toutes les 30 s (le client a pu
 // payer puis fermer la page sans revenir sur Alfred). Rien n'est appelé s'il n'y en a aucun.
 void booking.sweepPayments();

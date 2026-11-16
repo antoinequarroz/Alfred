@@ -1,4 +1,8 @@
-import type { BookingHoursRange, BookingMode, BookingSettings, BookingStatus, BookingStep, BookingType, PaymentStatus } from '../../shared/types.js';
+import {
+  CHANGE_NOTICE_CHOICES, REMINDER_HOURS_CHOICES,
+  type BookingHoursRange, type BookingMode, type BookingSettings, type BookingStatus, type BookingStep, type BookingType,
+  type PaymentStatus,
+} from '../../shared/types.js';
 import { tx, type Db } from '../db.js';
 
 export interface BookingRow {
@@ -33,6 +37,17 @@ export interface BookingRow {
   payment_intent?: string | null;
   payment_status?: PaymentStatus | null;
   payment_error?: string | null;
+  /** Rappels partis pour l'horaire actuel, en heures, séparés par des virgules (« 24,1 »). Absent avant la migration. */
+  reminders_sent?: string;
+  /** Instant à partir duquel le client connaît l'horaire actuel ; null : created_at. */
+  reminder_ref?: string | null;
+  /** Déplacements faits par le client lui-même. */
+  client_reschedules?: number;
+}
+
+/** Heures de rappel lues dans la colonne reminders_sent. */
+export function parseReminderHours(value: string | undefined | null): number[] {
+  return (value ?? '').split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0);
 }
 
 export type HoldStatus = 'pending' | 'paid' | 'completed' | 'expired';
@@ -114,6 +129,8 @@ export class BookingStore {
     const rows = this.db.prepare('SELECT key, value FROM booking_settings').all() as unknown as { key: string; value: string }[];
     const map = new Map(rows.map((r) => [r.key, r.value]));
     const step = Number(map.get('slot_step_min'));
+    const reminders = map.has('reminder_hours') ? parseReminderHours(map.get('reminder_hours')) : [24, 1];
+    const notice = Number(map.get('change_notice_hours') ?? 0);
     return {
       enabled: map.get('enabled') === '1',
       publicName: map.get('public_name') ?? defaults.publicName,
@@ -121,6 +138,9 @@ export class BookingStore {
       calendarId: map.get('calendar_id') || null,
       slotStepMin: step === 15 || step === 60 ? step : (30 as BookingStep),
       allDayBlocks: map.get('all_day_blocks') !== '0',
+      reminderHours: (REMINDER_HOURS_CHOICES as readonly number[]).filter((h) => reminders.includes(h)),
+      allowReschedule: map.get('allow_reschedule') !== '0',
+      changeNoticeHours: (CHANGE_NOTICE_CHOICES as readonly number[]).includes(notice) ? notice : 0,
     };
   }
 
@@ -133,6 +153,9 @@ export class BookingStore {
       set.run('calendar_id', s.calendarId ?? '');
       set.run('slot_step_min', String(s.slotStepMin));
       set.run('all_day_blocks', s.allDayBlocks ? '1' : '0');
+      set.run('reminder_hours', s.reminderHours.join(','));
+      set.run('allow_reschedule', s.allowReschedule ? '1' : '0');
+      set.run('change_notice_hours', String(s.changeNoticeHours));
     });
   }
 
@@ -218,8 +241,44 @@ export class BookingStore {
     return this.db.prepare('SELECT * FROM bookings WHERE id = ?').get(id) as unknown as BookingRow | undefined;
   }
 
+  /** Réservation d'un jeton : celui de la confirmation, ou l'un de ceux des e-mails suivants (rappels, déplacement). */
   getBookingByTokenHash(hash: string): BookingRow | undefined {
-    return this.db.prepare('SELECT * FROM bookings WHERE token_hash = ?').get(hash) as unknown as BookingRow | undefined;
+    const row = this.db.prepare('SELECT * FROM bookings WHERE token_hash = ?').get(hash) as unknown as BookingRow | undefined;
+    if (row) return row;
+    return this.db
+      .prepare('SELECT b.* FROM booking_tokens t JOIN bookings b ON b.id = t.booking_id WHERE t.token_hash = ?')
+      .get(hash) as unknown as BookingRow | undefined;
+  }
+
+  /** Ajoute un lien vers la réservation, sans retirer les précédents. */
+  addToken(bookingId: string, hash: string, atIso: string): void {
+    this.db.prepare('INSERT INTO booking_tokens (token_hash, booking_id, created_at) VALUES (?, ?, ?)').run(hash, bookingId, atIso);
+  }
+
+  /** Réservations confirmées dont le début tombe dans ]from, to] (instants ISO UTC), les plus proches d'abord. */
+  confirmedStartingBetween(fromIso: string, toIso: string): BookingRow[] {
+    return this.db
+      .prepare("SELECT * FROM bookings WHERE status = 'confirmed' AND start_utc > ? AND start_utc <= ? ORDER BY start_utc")
+      .all(fromIso, toIso) as unknown as BookingRow[];
+  }
+
+  setRemindersSent(id: string, hours: number[]): void {
+    this.db.prepare('UPDATE bookings SET reminders_sent = ? WHERE id = ?').run(hours.join(','), id);
+  }
+
+  /** Le client connaît un nouvel horaire depuis atIso : les rappels repartent de zéro pour cet horaire. */
+  resetReminders(id: string, atIso: string): void {
+    this.db.prepare("UPDATE bookings SET reminders_sent = '', reminder_ref = ? WHERE id = ?").run(atIso, id);
+  }
+
+  /** Déplacement par le client : nouvel horaire, connu de lui, et compteur augmenté. */
+  rescheduleByClient(id: string, startIso: string, endIso: string, atIso: string): void {
+    this.db
+      .prepare(
+        `UPDATE bookings SET start_utc = ?, end_utc = ?, notified_start = NULL, reminders_sent = '', reminder_ref = ?,
+           client_reschedules = client_reschedules + 1 WHERE id = ?`,
+      )
+      .run(startIso, endIso, atIso, id);
   }
 
   /** Réservations confirmées qui recoupent [from, to) (instants ISO UTC). */

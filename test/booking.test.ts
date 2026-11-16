@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type {
-  Booking, BookingAdminState, BookingConfirmation, BookingType, CalendarInfo, Occurrence, PublicBookingInfo, PublicSlots,
+  Booking, BookingAdminState, BookingConfirmation, BookingType, CalendarInfo, Occurrence, PublicBooking, PublicBookingInfo, PublicSlots,
 } from '../shared/types.js';
 import { createApp } from '../server/app.js';
 import type { Mailer, MailMessage } from '../server/booking/mail.js';
@@ -198,7 +198,9 @@ describe('prise de rendez-vous : réglages', () => {
   it('lit et modifie les réglages', async () => {
     const ctx = await setup();
     const state = (await (await ctx.admin('/api/booking/settings')).json()) as BookingAdminState;
-    expect(state.settings).toEqual({ enabled: false, publicName: 'Antoine Quarroz', welcomeText: '', calendarId: null, slotStepMin: 30, allDayBlocks: true });
+    expect(state.settings).toEqual({ enabled: false, publicName: 'Antoine Quarroz', welcomeText: '', calendarId: null, slotStepMin: 30, allDayBlocks: true,
+      reminderHours: [24, 1], allowReschedule: true, changeNoticeHours: 0,
+    });
     expect(state.effectiveCalendarId).toBe(ctx.calendar.id);
     expect(state.timezone).toBe('Europe/Zurich');
     expect(state.publicPageUrl).toBe('https://alfred.example.ch/rdv');
@@ -213,7 +215,7 @@ describe('prise de rendez-vous : réglages', () => {
     const next = (await res.json()) as BookingAdminState;
     expect(next.settings).toEqual({
       enabled: true, publicName: 'Cabinet Quarroz', welcomeText: 'Bienvenue.\nChoisissez un créneau.', calendarId: ctx.calendar.id, slotStepMin: 15,
-      allDayBlocks: true,
+      allDayBlocks: true, reminderHours: [24, 1], allowReschedule: true, changeNoticeHours: 0,
     });
     // Modification partielle : le reste est conservé.
     const partial = (await (await ctx.admin('/api/booking/settings', 'PUT', { slotStepMin: 60 })).json()) as BookingAdminState;
@@ -558,10 +560,11 @@ describe('prise de rendez-vous : réservation', () => {
     const confirmation = (await res.json()) as BookingConfirmation;
     expect(confirmation.booking).toEqual({
       typeName: 'Consultation', start: MONDAY_9, end: '2026-11-16T08:30:00.000Z', timezone: 'Europe/Zurich',
-      locationLabel: 'Rue du Lac 1, Sion', name: 'Élodie Müller', status: 'confirmed', cancellable: true, videoUrl: null, deposit: null,
+      locationLabel: 'Rue du Lac 1, Sion', name: 'Élodie Müller', status: 'confirmed', cancellable: true, videoUrl: null,
+      reschedulable: true, changeUntil: MONDAY_9, mode: 'cabinet', durationMin: 30, horizonDays: 60, deposit: null,
     });
     expect(confirmation.emailSent).toBe(true);
-    expect(confirmation.cancelUrl).toMatch(/^https:\/\/alfred\.example\.ch\/rdv\/annulation\/[A-Za-z0-9_-]{43}$/);
+    expect(confirmation.cancelUrl).toMatch(/^https:\/\/alfred\.example\.ch\/rdv\/gerer\/[A-Za-z0-9_-]{43}$/);
 
     // L'événement est dans le calendrier d'Antoine.
     const events = (await (await ctx.admin('/api/events?start=2026-11-16T00:00:00Z&end=2026-11-17T00:00:00Z')).json()) as Occurrence[];
@@ -844,7 +847,7 @@ describe('prise de rendez-vous : réservation', () => {
     expect(res.status).toBe(201);
     const confirmation = (await res.json()) as BookingConfirmation;
     expect(confirmation.emailSent).toBe(false);
-    expect(confirmation.cancelUrl).toContain('/rdv/annulation/');
+    expect(confirmation.cancelUrl).toContain('/rdv/gerer/');
     const [b] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
     expect(b.status).toBe('confirmed');
     expect(b.eventState).toBe('ok');
@@ -879,7 +882,7 @@ describe('prise de rendez-vous : réservation', () => {
     const resend = await ctx.admin(`/api/booking/bookings/${b.id}/resend`, 'POST');
     expect(resend.status).toBe(200);
     expect(ctx.sent).toHaveLength(1);
-    const link = /https:\/\/alfred\.example\.ch\/rdv\/annulation\/[A-Za-z0-9_-]{43}/.exec(ctx.sent[0].text)![0];
+    const link = /https:\/\/alfred\.example\.ch\/rdv\/gerer\/[A-Za-z0-9_-]{43}/.exec(ctx.sent[0].text)![0];
     expect(link).not.toBe(confirmation.cancelUrl);
     // L'ancien lien ne fonctionne plus, le nouveau oui.
     expect((await ctx.json(`/api/public/booking/cancel/${tokenOf(confirmation)}`)).status).toBe(404);
@@ -915,7 +918,7 @@ describe('prise de rendez-vous : réservation', () => {
     const confirmation = (await res.json()) as BookingConfirmation;
     // Le client voit son récapitulatif et son lien, avec l'avertissement « e-mail non envoyé ».
     expect(confirmation.emailSent).toBe(false);
-    expect(confirmation.cancelUrl).toContain('/rdv/annulation/');
+    expect(confirmation.cancelUrl).toContain('/rdv/gerer/');
     let [b] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
     expect(b.mailError).toContain('en cours');
     // Le serveur finit par répondre : les deux messages partent et l'état est mis à jour.
@@ -1012,7 +1015,7 @@ describe('prise de rendez-vous : annulation', () => {
 
     const res = await ctx.json(`/api/public/booking/cancel/${token}`, 'POST');
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ...confirmation.booking, status: 'cancelled', cancellable: false, emailSent: true });
+    expect(await res.json()).toEqual({ ...confirmation.booking, status: 'cancelled', cancellable: false, reschedulable: false, emailSent: true });
 
     expect(ctx.store.occurrences(new Date('2026-11-16T00:00:00Z'), new Date('2026-11-17T00:00:00Z'))).toEqual([]);
     expect(await (await ctx.admin('/api/booking/bookings')).json()).toEqual([]);
@@ -1364,5 +1367,276 @@ describe('prise de rendez-vous : limitation de débit', () => {
     expect(rateKey('2001:db8:1:2::1')).not.toBe(rateKey('2001:db8:2:2::1'));
     expect(rateKey('2001:db8:1:12ab::1')).toBe('2001:db8:1:1200::/56');
     expect(rateKey('::1')).toBe('0:0:0:0::/56');
+  });
+});
+
+/** Mardi 17 novembre, 09:00 à Zurich. */
+const TUESDAY_9 = '2026-11-17T08:00:00.000Z';
+
+describe('prise de rendez-vous : rappels', () => {
+  it('envoie le rappel 24 h puis 1 h avant, une seule fois chacun, avec un lien de gestion valable', async () => {
+    const ctx = await setup();
+    await open(ctx);
+    const confirmation = (await (await bookRequest(ctx, { start: TUESDAY_9 })).json()) as BookingConfirmation;
+    ctx.sent.length = 0;
+
+    ctx.clock.now = new Date('2026-11-16T07:59:00Z');
+    expect(await ctx.booking.sendDueReminders()).toBe(0);
+    ctx.clock.now = new Date('2026-11-16T08:00:00Z');
+    expect(await ctx.booking.sendDueReminders()).toBe(1);
+    expect(await ctx.booking.sendDueReminders()).toBe(0);
+    expect(ctx.sent).toHaveLength(1);
+    const reminder = ctx.sent[0];
+    expect(reminder.to).toEqual({ name: 'Élodie Müller', address: 'elodie@example.org' });
+    expect(reminder.subject).toBe('Rappel : Consultation, demain à 09:00');
+    expect(reminder.text).toContain('Petit rappel : votre rendez-vous a lieu demain à 09:00.');
+    expect(reminder.text).toContain('Rue du Lac 1, Sion');
+    expect(reminder.text).toContain('déplacer ou annuler');
+    // Un nouveau lien, distinct de celui de la confirmation, qui fonctionne aussi.
+    const link = /https:\/\/alfred\.example\.ch\/rdv\/gerer\/([A-Za-z0-9_-]{43})/.exec(reminder.text)![1];
+    expect(link).not.toBe(tokenOf(confirmation));
+    expect((await ctx.json(`/api/public/booking/cancel/${link}`)).status).toBe(200);
+    expect((await ctx.json(`/api/public/booking/cancel/${tokenOf(confirmation)}`)).status).toBe(200);
+
+    ctx.clock.now = new Date('2026-11-17T07:00:00Z');
+    expect(await ctx.booking.sendDueReminders()).toBe(1);
+    expect(ctx.sent[1].subject).toBe('Rappel : Consultation, aujourd’hui à 09:00');
+    expect(ctx.sent[1].text.split('\n')[0]).toBe('Bonjour Élodie Müller,');
+    ctx.clock.now = new Date('2026-11-17T07:30:00Z');
+    expect(await ctx.booking.sendDueReminders()).toBe(0);
+    const [b] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
+    expect(b.remindersSent).toEqual([24, 1]);
+    expect(b.mailError).toBeNull();
+  });
+
+  it('n’envoie pas le rappel dont le moment précède la réservation, ni deux messages après une interruption', async () => {
+    const ctx = await setup();
+    await open(ctx);
+    // Pris dimanche 12:00 pour lundi 09:00 : le client connaît l'horaire depuis moins de 24 h.
+    await bookRequest(ctx);
+    ctx.sent.length = 0;
+    ctx.clock.now = new Date('2026-11-15T12:00:00Z');
+    expect(await ctx.booking.sendDueReminders()).toBe(0);
+    ctx.clock.now = new Date('2026-11-16T07:00:00Z');
+    expect(await ctx.booking.sendDueReminders()).toBe(1);
+    expect(ctx.sent).toHaveLength(1);
+
+    // Alfred arrêté pendant les deux moments de rappel : un seul message, les deux notés.
+    const ctx2 = await setup();
+    await open(ctx2);
+    await bookRequest(ctx2, { start: TUESDAY_9 });
+    ctx2.sent.length = 0;
+    ctx2.clock.now = new Date('2026-11-17T07:40:00Z');
+    expect(await ctx2.booking.sendDueReminders()).toBe(1);
+    expect(await ctx2.booking.sendDueReminders()).toBe(0);
+    expect(ctx2.sent[0].subject).toBe('Rappel : Consultation, aujourd’hui à 09:00');
+    expect(ctx2.sent[0].html).toContain('Votre rendez-vous commence bientôt');
+    expect(((await (await ctx2.admin('/api/booking/bookings')).json()) as Booking[])[0].remindersSent).toEqual([24, 1]);
+  });
+
+  it('ne rappelle ni un rendez-vous annulé, ni sans envoi configuré, ni quand les rappels sont désactivés', async () => {
+    const ctx = await setup();
+    await open(ctx);
+    const confirmation = (await (await bookRequest(ctx, { start: TUESDAY_9 })).json()) as BookingConfirmation;
+    await ctx.json(`/api/public/booking/cancel/${tokenOf(confirmation)}`, 'POST');
+    ctx.clock.now = new Date('2026-11-16T09:00:00Z');
+    expect(await ctx.booking.sendDueReminders()).toBe(0);
+
+    const none = await setup({ mail: 'none' });
+    await open(none);
+    await bookRequest(none, { start: TUESDAY_9 });
+    none.clock.now = new Date('2026-11-16T09:00:00Z');
+    expect(await none.booking.sendDueReminders()).toBe(0);
+
+    const off = await setup();
+    await open(off);
+    expect((await off.admin('/api/booking/settings', 'PUT', { reminderHours: [] })).status).toBe(200);
+    await bookRequest(off, { start: TUESDAY_9 });
+    off.sent.length = 0;
+    off.clock.now = new Date('2026-11-17T07:30:00Z');
+    expect(await off.booking.sendDueReminders()).toBe(0);
+    expect(off.sent).toHaveLength(0);
+  });
+
+  it('suit les moments de rappel réglés, et refuse des valeurs inconnues', async () => {
+    const ctx = await setup();
+    await open(ctx);
+    const res = await ctx.admin('/api/booking/settings', 'PUT', { reminderHours: [1, 48] });
+    expect(((await res.json()) as BookingAdminState).settings.reminderHours).toEqual([48, 1]);
+    for (const bad of [[3], 'oui', [24, 24, 24, 24, 24, 24, 24, 24]]) {
+      expect((await ctx.admin('/api/booking/settings', 'PUT', { reminderHours: bad })).status).toBe(400);
+    }
+    expect((await ctx.admin('/api/booking/settings', 'PUT', { changeNoticeHours: 5 })).status).toBe(400);
+    expect((await ctx.admin('/api/booking/settings', 'PUT', { allowReschedule: 'oui' })).status).toBe(400);
+    await bookRequest(ctx, { start: '2026-11-18T08:00:00.000Z' });
+    ctx.sent.length = 0;
+    ctx.clock.now = new Date('2026-11-16T08:00:00Z');
+    expect(await ctx.booking.sendDueReminders()).toBe(1);
+    ctx.clock.now = new Date('2026-11-17T08:00:00Z');
+    expect(await ctx.booking.sendDueReminders()).toBe(0);
+  });
+
+  it('annonce le nouvel horaire quand Antoine a déplacé l’événement, et le rappel le met à jour', async () => {
+    const ctx = await setup();
+    await open(ctx);
+    await bookRequest(ctx, { start: TUESDAY_9 });
+    const [b] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
+    // Antoine déplace le rendez-vous au mercredi 14:00 deux jours avant.
+    await ctx.service.update(b.eventId!, {
+      calendarId: ctx.calendar.id, title: 'Consultation : Élodie Müller', start: '2026-11-18T13:00:00.000Z', end: '2026-11-18T13:30:00.000Z', allDay: false,
+    }, 'all', null);
+    ctx.sent.length = 0;
+    ctx.clock.now = new Date('2026-11-16T08:00:00Z');
+    expect(await ctx.booking.sendDueReminders()).toBe(0);
+    ctx.clock.now = new Date('2026-11-17T13:00:00Z');
+    expect(await ctx.booking.sendDueReminders()).toBe(1);
+    expect(ctx.sent[0].subject).toBe('Rappel : Consultation, demain à 14:00');
+    expect(ctx.sent[0].text).toContain('l’horaire a changé');
+    expect(ctx.sent[0].attachments?.[0].content).toContain('DTSTART;TZID=Europe/Zurich:20261118T140000');
+    const [after] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
+    expect(after).toMatchObject({ eventState: 'ok', notifiedStart: null });
+  });
+
+  it('ne propose plus de lien quand il est trop tard pour changer en ligne', async () => {
+    const ctx = await setup();
+    await open(ctx);
+    await ctx.admin('/api/booking/settings', 'PUT', { changeNoticeHours: 24 });
+    await bookRequest(ctx, { start: TUESDAY_9 });
+    ctx.sent.length = 0;
+    ctx.clock.now = new Date('2026-11-17T07:00:00Z');
+    expect(await ctx.booking.sendDueReminders()).toBe(1);
+    expect(ctx.sent[0].text).toContain('Répondez simplement à cet e-mail.');
+    expect(ctx.sent[0].text).not.toContain('/rdv/gerer/');
+  });
+});
+
+describe('prise de rendez-vous : déplacement par le client', () => {
+  async function manageSlots(ctx: Ctx, token: string, from = '2026-11-16', to = '2026-11-17') {
+    const res = await ctx.json(`/api/public/booking/manage/${token}/slots?from=${from}&to=${to}`);
+    return { res, slots: res.status === 200 ? ((await res.json()) as PublicSlots).days.flatMap((d) => d.slots) : [] };
+  }
+  const move = (ctx: Ctx, token: string, start: string) => ctx.json(`/api/public/booking/manage/${token}/reschedule`, 'POST', { start });
+
+  it('déplace le rendez-vous : même événement à la nouvelle heure, créneaux mis à jour, e-mails envoyés', async () => {
+    const ctx = await setup();
+    await open(ctx);
+    const confirmation = (await (await bookRequest(ctx)).json()) as BookingConfirmation;
+    const token = tokenOf(confirmation);
+    const [before] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
+    const uid = ctx.store.findEvent(before.eventId, null)!.uid;
+
+    // L'horaire actuel n'est pas proposé ; 09:30, qu'il ne bloque que pour lui-même, l'est.
+    const { slots } = await manageSlots(ctx, token);
+    expect(slots).not.toContain(MONDAY_9);
+    expect(slots).toContain('2026-11-16T08:30:00.000Z');
+    expect(slots).toContain(TUESDAY_9);
+
+    ctx.sent.length = 0;
+    const res = await move(ctx, token, TUESDAY_9);
+    expect(res.status).toBe(200);
+    const moved = (await res.json()) as PublicBooking;
+    expect(moved).toMatchObject({ start: TUESDAY_9, end: '2026-11-17T08:30:00.000Z', status: 'confirmed', emailSent: true, reschedulable: true });
+
+    // Même événement (même UID), à la nouvelle heure, avec la trace du déplacement.
+    const events = (await (await ctx.admin('/api/events?start=2026-11-16T00:00:00Z&end=2026-11-18T00:00:00Z')).json()) as Occurrence[];
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ start: TUESDAY_9, title: 'Consultation : Élodie Müller', location: 'Rue du Lac 1, Sion' });
+    expect(events[0].description).toContain('Déplacé en ligne par le client (horaire précédent : lundi 16 novembre 2026, de 09:00 à 09:30).');
+    expect(ctx.store.findEvent(null, uid)?.startMs).toBe(Date.parse(TUESDAY_9));
+
+    // Lundi 09:00 est libre, mardi 09:00 pris.
+    expect(await slotsOf(ctx)).toContain(MONDAY_9);
+    expect(await slotsOf(ctx, '2026-11-17', '2026-11-17')).not.toContain(TUESDAY_9);
+
+    // Client : nouvel horaire, ancien pour mémoire, même lien, événement à jour. Antoine : un avis.
+    expect(ctx.sent).toHaveLength(2);
+    const [toClient, toOwner] = ctx.sent;
+    expect(toClient.subject).toBe('Rendez-vous déplacé : Consultation, mardi 17 novembre 2026, de 09:00 à 09:30');
+    expect(toClient.text).toContain('Ancien horaire : lundi 16 novembre 2026, de 09:00 à 09:30');
+    expect(toClient.text).toContain(confirmation.cancelUrl);
+    expect(toClient.attachments?.[0].content).toContain('SEQUENCE:1');
+    expect(toOwner.to).toBe('info@antoinequarroz.ch');
+    expect(toOwner.subject).toBe('Rendez-vous déplacé : Consultation, Élodie Müller');
+
+    const [after] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
+    expect(after).toMatchObject({ start: TUESDAY_9, eventState: 'ok', notifiedStart: null, clientReschedules: 1, remindersSent: [] });
+    // Le lien reste valable, et l'annulation fonctionne toujours.
+    expect((await ctx.json(`/api/public/booking/cancel/${token}`, 'POST')).status).toBe(200);
+  });
+
+  it('refuse un créneau pris, le même horaire, un créneau invalide ou un jeton inconnu', async () => {
+    const ctx = await setup();
+    await open(ctx);
+    const token = tokenOf((await (await bookRequest(ctx)).json()) as BookingConfirmation);
+    await bookRequest(ctx, { start: TUESDAY_9, email: 'autre@example.org' });
+    expect((await manageSlots(ctx, token)).slots).not.toContain(TUESDAY_9);
+    const taken = await move(ctx, token, TUESDAY_9);
+    expect(taken.status).toBe(409);
+    expect(((await taken.json()) as { code: string }).code).toBe('slot_unavailable');
+    expect(((await (await move(ctx, token, MONDAY_9)).json()) as { code: string }).code).toBe('same_slot');
+    expect((await move(ctx, token, '2026-11-16T08:07:00.000Z')).status).toBe(409);
+    expect((await move(ctx, token, 'demain')).status).toBe(400);
+    expect((await move(ctx, 'x'.repeat(43), TUESDAY_9)).status).toBe(404);
+    expect((await manageSlots(ctx, 'x'.repeat(43))).res.status).toBe(404);
+    // Rien n'a bougé.
+    expect(ctx.booking.listBookings('upcoming').map((b) => b.start)).toEqual([MONDAY_9, TUESDAY_9]);
+  });
+
+  it('respecte les réglages : déplacement désactivé, délai avant le rendez-vous, nombre de déplacements', async () => {
+    const ctx = await setup();
+    await open(ctx);
+    const token = tokenOf((await (await bookRequest(ctx)).json()) as BookingConfirmation);
+
+    await ctx.admin('/api/booking/settings', 'PUT', { allowReschedule: false });
+    expect(((await (await ctx.json(`/api/public/booking/cancel/${token}`)).json()) as PublicBooking).reschedulable).toBe(false);
+    let res = await move(ctx, token, TUESDAY_9);
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { code: string }).code).toBe('reschedule_disabled');
+    expect((await manageSlots(ctx, token)).res.status).toBe(403);
+
+    // Lundi 09:00 est dans 21 heures : avec un délai de 24 heures, ni déplacement ni annulation en ligne.
+    await ctx.admin('/api/booking/settings', 'PUT', { allowReschedule: true, changeNoticeHours: 24 });
+    const view = (await (await ctx.json(`/api/public/booking/cancel/${token}`)).json()) as PublicBooking;
+    expect(view).toMatchObject({ cancellable: false, reschedulable: false, changeUntil: '2026-11-15T08:00:00.000Z' });
+    res = await move(ctx, token, TUESDAY_9);
+    expect(((await res.json()) as { code: string; error: string })).toMatchObject({ code: 'too_late' });
+    res = await ctx.json(`/api/public/booking/cancel/${token}`, 'POST');
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain('moins de 24 heures');
+
+    // Trois déplacements au plus.
+    await ctx.admin('/api/booking/settings', 'PUT', { changeNoticeHours: 0 });
+    for (const start of [TUESDAY_9, '2026-11-17T09:00:00.000Z', '2026-11-17T10:00:00.000Z']) expect((await move(ctx, token, start)).status).toBe(200);
+    res = await move(ctx, token, '2026-11-17T12:30:00.000Z');
+    expect(((await res.json()) as { code: string }).code).toBe('too_many_changes');
+
+    // Prise de rendez-vous fermée : plus de déplacement, l'annulation reste possible.
+    const other = await setup();
+    await open(other);
+    const t2 = tokenOf((await (await bookRequest(other)).json()) as BookingConfirmation);
+    await other.admin('/api/booking/settings', 'PUT', { enabled: false });
+    expect((await move(other, t2, TUESDAY_9)).status).toBe(403);
+    expect((await other.json(`/api/public/booking/cancel/${t2}`, 'POST')).status).toBe(200);
+  });
+
+  it('n’accorde le nouveau créneau qu’une fois quand deux clients le demandent en même temps', async () => {
+    const ctx = await setup();
+    await open(ctx);
+    const a = tokenOf((await (await bookRequest(ctx)).json()) as BookingConfirmation);
+    const b = tokenOf((await (await bookRequest(ctx, { start: '2026-11-16T09:00:00.000Z', email: 'b@example.org' })).json()) as BookingConfirmation);
+    const results = await Promise.all([move(ctx, a, TUESDAY_9), move(ctx, b, TUESDAY_9)]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+  });
+
+  it('ne déplace pas un rendez-vous dont l’événement a été supprimé du calendrier', async () => {
+    const ctx = await setup();
+    await open(ctx);
+    const token = tokenOf((await (await bookRequest(ctx)).json()) as BookingConfirmation);
+    const [b] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
+    await ctx.service.remove(b.eventId!, 'all', null);
+    const res = await move(ctx, token, TUESDAY_9);
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { code: string }).code).toBe('not_reschedulable');
+    expect(ctx.booking.listBookings('upcoming')[0].start).toBe(MONDAY_9);
   });
 });

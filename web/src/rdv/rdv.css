@@ -214,6 +214,7 @@ a.btn { text-decoration: none; color: inherit; }
 .rdv-form .fld label { font-size: 14px; }
 .rdv-link { align-self: flex-start; margin: -8px 0 0; padding: 4px 0; border: 0; background: transparent; color: var(--accent-ink); font-size: 14px; font-weight: 550; text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent-ink) 35%, transparent); text-underline-offset: 3px; border-radius: 4px; }
 .rdv-link:hover { text-decoration-color: currentColor; }
+.rdv-actions .rdv-link { margin: 0; align-self: center; }
 .rdv-link.danger { color: var(--danger); margin: 0; align-self: center; text-decoration-color: color-mix(in srgb, var(--danger) 35%, transparent); }
 .rdv-trap { position: absolute; left: -10000px; top: auto; width: 1px; height: 1px; overflow: hidden; }
 .rdv .rdv-submit { height: 46px; font-size: 15.5px; border-radius: 10px; }
@@ -378,6 +379,9 @@ a.btn { text-decoration: none; color: inherit; }
 .bk-option { display: flex; flex-direction: column; gap: 4px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
 .bk-option .check { height: auto; min-height: 28px; }
 .bk-option .bk-hint { max-width: 64ch; }
+.bk-checks { display: flex; flex-wrap: wrap; gap: 2px 18px; }
+.bk-reminders { display: flex; flex-direction: column; gap: 6px; }
+.bk-notice select { max-width: 320px; }
 .bk-unsaved { display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: var(--accent); vertical-align: middle; }
 .bk-add { margin-top: 1px; }
 .bk-savebar { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin: 0 -20px -20px; padding: 12px 20px; border-top: 1px solid var(--line-soft); border-radius: 0 0 var(--r-lg) var(--r-lg); background: var(--tint); }
