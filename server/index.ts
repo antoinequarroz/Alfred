@@ -4,8 +4,10 @@ import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { createApp } from './app.js';
+import { createDisabledMailer, createSmtpMailer } from './booking/mail.js';
+import { BookingService } from './booking/service.js';
 import { CaldavSync } from './caldav.js';
-import { caldavConfigured, config } from './config.js';
+import { caldavConfigured, config, mailConfigured } from './config.js';
 import { openDb } from './db.js';
 import { hashPassword } from './password.js';
 import { CalendarService } from './service.js';
@@ -28,8 +30,14 @@ const caldav = caldavConfigured
 if (!caldav) store.ensureLocalCalendar();
 
 const service = new CalendarService(store, caldav, config.timezone);
+const fromLabel = config.mail.from.name ? `${config.mail.from.name} <${config.mail.from.address}>` : config.mail.from.address;
+const mailer = mailConfigured ? createSmtpMailer(config.mail) : createDisabledMailer(fromLabel, config.mail.notifyTo);
+const booking = new BookingService({
+  store, calendar: service, caldav, timezone: config.timezone, mailer,
+  publicUrl: config.publicUrl, defaultPublicName: config.mail.from.name,
+});
 const app = createApp({
-  store, service, caldav, passwordHash,
+  store, service, caldav, passwordHash, booking,
   secureCookies: config.production,
   sessionDays: config.sessionDays,
 });
@@ -64,6 +72,9 @@ if (caldav) {
 } else {
   console.log('[alfred] pas de CalDAV configuré : calendrier local uniquement');
 }
+console.log(mailer.configured
+  ? `[alfred] e-mails de la prise de RDV via ${config.mail.host}:${config.mail.port}, expéditeur ${mailer.from}`
+  : '[alfred] SMTP non configuré : la prise de RDV fonctionne sans envoyer d’e-mails');
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {

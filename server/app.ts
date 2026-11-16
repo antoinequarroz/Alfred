@@ -5,6 +5,8 @@ import { csrf } from 'hono/csrf';
 import { HTTPException } from 'hono/http-exception';
 import { secureHeaders } from 'hono/secure-headers';
 import type { EditScope, EventInput, RepeatRule } from '../shared/types.js';
+import { DEFAULT_BOOKING_LIMITS, registerAdminBookingRoutes, registerPublicBookingRoutes, type BookingLimits } from './booking/routes.js';
+import { BookingError, BookingService } from './booking/service.js';
 import { ConflictError, RemoteError, type CaldavSync } from './caldav.js';
 import { IcsError } from './ics.js';
 import { verifyPassword } from './password.js';
@@ -22,6 +24,10 @@ export interface AppDeps {
   passwordHash: string;
   secureCookies: boolean;
   sessionDays: number;
+  /** Prise de rendez-vous. Par défaut : un moteur sans envoi d'e-mails, en Europe/Zurich. */
+  booking?: BookingService;
+  /** Limites de débit de la partie publique (valeurs par défaut sinon). */
+  bookingLimits?: Partial<BookingLimits>;
 }
 
 class BadRequest extends Error {}
@@ -62,6 +68,7 @@ class LoginThrottle {
 
 export function createApp(deps: AppDeps): Hono {
   const { store, service, caldav } = deps;
+  const booking = deps.booking ?? new BookingService({ store, calendar: service, caldav, timezone: 'Europe/Zurich' });
   const throttle = new LoginThrottle();
   const app = new Hono();
 
@@ -95,6 +102,7 @@ export function createApp(deps: AppDeps): Hono {
 
   app.onError((err, c) => {
     if (err instanceof HTTPException) return c.json({ error: 'Requête refusée' }, err.status);
+    if (err instanceof BookingError) return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}) }, err.status);
     if (err instanceof BadRequest || err instanceof IcsError) return c.json({ error: err.message }, 400);
     if (err instanceof SyntaxError) return c.json({ error: 'Requête illisible' }, 400);
     if (err instanceof NotFoundError) return c.json({ error: err.message }, 404);
@@ -109,6 +117,10 @@ export function createApp(deps: AppDeps): Hono {
     const sid = getCookie(c, COOKIE);
     return Boolean(sid && store.isSessionValid(sid));
   };
+
+  // --- prise de rendez-vous, partie publique (sans session) -----------------
+
+  registerPublicBookingRoutes(app, booking, { ...DEFAULT_BOOKING_LIMITS, ...deps.bookingLimits });
 
   // --- connexion -----------------------------------------------------------
 
@@ -183,6 +195,10 @@ export function createApp(deps: AppDeps): Hono {
     await service.remove(c.req.param('id'), parseScope(c.req.query('scope')), c.req.query('occurrenceId') ?? null);
     return c.json({ ok: true });
   });
+
+  // --- prise de rendez-vous, administration --------------------------------
+
+  registerAdminBookingRoutes(app, booking, store);
 
   // --- synchro -------------------------------------------------------------
 
