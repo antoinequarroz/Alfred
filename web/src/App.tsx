@@ -5,6 +5,7 @@ import { addDays, addMonths, capitalize, fmt, startOfDay, startOfWeek } from './
 import { EventDialog, ScopeDialog } from './EventDialog';
 import { draftFromOcc, draftToInput, movedInput, newDraft, toOcc, type CalendarMap, type Draft, type Occ } from './model';
 import { MiniMonth, monthGrid, MonthView } from './MonthView';
+import { MoonIcon, SunIcon, ThemeSwitch, useTheme } from './theme';
 import { WeekView } from './WeekView';
 
 type View = 'day' | 'week' | 'month';
@@ -42,6 +43,22 @@ function syncLabel(s: SyncStatus | null): string {
   return min < 1 ? 'Synchronisé à l’instant' : `Synchronisé il y a ${min} min`;
 }
 
+function Chevron({ dir }: { dir: 'left' | 'right' }) {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d={dir === 'left' ? 'M15 5l-7 7 7 7' : 'M9 5l7 7-7 7'} />
+    </svg>
+  );
+}
+
+function MenuIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+      <path d="M4 7h16M4 12h16M4 17h16" />
+    </svg>
+  );
+}
+
 export function App({ onLogout }: { onLogout: () => void }) {
   const [view, setView] = useState<View>(initialView);
   const [cursor, setCursor] = useState(() => new Date());
@@ -55,6 +72,7 @@ export function App({ onLogout }: { onLogout: () => void }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [miniCursor, setMiniCursor] = useState(() => new Date());
   const requestId = useRef(0);
+  const theme = useTheme();
 
   const [from, to] = useMemo(() => viewRange(view, cursor), [view, cursor]);
   const calendarMap: CalendarMap = useMemo(() => new Map(calendars.map((c) => [c.id, c])), [calendars]);
@@ -227,7 +245,8 @@ export function App({ onLogout }: { onLogout: () => void }) {
     <div className="app">
       <aside className={`sidebar${menuOpen ? ' open' : ''}`}>
         <div className="brand">
-          <span className="logo">A</span> Alfred
+          <span className="logo">A</span>
+          <span>Alfred</span>
         </div>
         <button className="btn primary wide" onClick={() => { setMenuOpen(false); openNew(); }}>+ Nouvel événement</button>
         <MiniMonth
@@ -248,6 +267,7 @@ export function App({ onLogout }: { onLogout: () => void }) {
           {calendars.length === 0 && <p className="muted">Aucun calendrier pour l’instant.</p>}
         </div>
         <div className="sidebar-foot">
+          <ThemeSwitch theme={theme.theme} onChange={theme.setTheme} />
           <div className={`sync${sync?.lastError ? ' error' : ''}`} title={sync?.lastError ?? undefined}>
             <span className="sync-dot" />
             <span>{syncLabel(sync)}</span>
@@ -265,13 +285,16 @@ export function App({ onLogout }: { onLogout: () => void }) {
 
       <main className="main">
         <header className="toolbar">
-          <button className="icon-btn menu-btn" onClick={() => setMenuOpen(true)} aria-label="Menu">☰</button>
+          <button className="icon-btn menu-btn" onClick={() => setMenuOpen(true)} aria-label="Menu"><MenuIcon /></button>
           <button className="btn" onClick={() => setCursor(new Date())}>Aujourd’hui</button>
           <div className="nav">
-            <button className="icon-btn" onClick={() => navigate(-1)} aria-label="Précédent">‹</button>
-            <button className="icon-btn" onClick={() => navigate(1)} aria-label="Suivant">›</button>
+            <button className="icon-btn" onClick={() => navigate(-1)} aria-label="Précédent"><Chevron dir="left" /></button>
+            <button className="icon-btn" onClick={() => navigate(1)} aria-label="Suivant"><Chevron dir="right" /></button>
           </div>
           <h1>{title(view, cursor)}</h1>
+          <button className="icon-btn theme-btn" onClick={theme.toggle} aria-label={theme.dark ? 'Passer en thème clair' : 'Passer en thème sombre'} title={theme.dark ? 'Thème clair' : 'Thème sombre'}>
+            {theme.dark ? <SunIcon /> : <MoonIcon />}
+          </button>
           <div className="seg" role="tablist" aria-label="Vue">
             {(Object.keys(VIEW_LABELS) as View[]).map((v) => (
               <button key={v} role="tab" aria-selected={view === v} className={view === v ? 'active' : ''} onClick={() => setView(v)}>

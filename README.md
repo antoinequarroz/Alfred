@@ -2,7 +2,9 @@
 
 Assistant personnel tout-en-un, auto-hébergé sur VPS. Premier chantier : **le calendrier**.
 
-![Vue semaine](docs/images/semaine-sombre.png)
+![Vue semaine, thème clair](docs/images/semaine-clair.png)
+
+![Vue semaine, thème sombre](docs/images/semaine-sombre.png)
 
 ## Où on en est
 
@@ -15,7 +17,7 @@ Assistant personnel tout-en-un, auto-hébergé sur VPS. Premier chantier : **le 
 
 ## Ce que fait la v1
 
-- **Calendrier complet** : jour, semaine, mois, mini-calendrier, plusieurs calendriers avec leurs couleurs, thème clair et sombre.
+- **Calendrier complet** : jour, semaine, mois, mini-calendrier, plusieurs calendriers avec leurs couleurs, thème clair, sombre ou automatique.
 - **Édition rapide** : clic ou glisser dans la grille pour créer, glisser-déposer pour déplacer, poignée pour changer la durée, journées entières, répétitions.
 - **Événements récurrents** : affichage fidèle (exceptions, heure d'été), modification ou suppression « seulement cet événement » ou « toute la série ».
 - **Synchro iCloud dans les deux sens** (CalDAV) : les calendriers restent dans iCloud. Ce qui est fait dans Alfred part tout de suite dans iCloud, ce qui est fait sur l'iPhone ou le Mac arrive dans Alfred en 2 minutes au plus.

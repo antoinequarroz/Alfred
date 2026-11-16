@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { addDays, addMinutes, capitalize, fmt, fmtTime, minutesOfDay, sameDay, snapMinutes, startOfDay } from './dates';
 import { overlapsDay, type CalendarMap, type Occ } from './model';
 
-const HOUR = 48; // hauteur d'une heure en pixels
+const HOUR = 60; // hauteur d'une heure en pixels
 const MIN_BLOCK = 20; // durée minimale affichée, en minutes
 const DRAG_THRESHOLD = 4;
 
@@ -164,7 +164,7 @@ export function WeekView({ days, occs, calendars, onCreate, onOpen, onMove, onPi
   const hasAllDay = allDay.some((o) => days.some((d) => overlapsDay(o, d)));
 
   return (
-    <div className="week">
+    <div className="week" style={{ '--hour': `${HOUR}px` } as React.CSSProperties}>
       <div className="week-head">
         <div className="gutter" />
         {days.map((d) => (
@@ -236,11 +236,11 @@ export function WeekView({ days, occs, calendars, onCreate, onOpen, onMove, onPi
                         key={s.occ.key}
                         role="button"
                         tabIndex={0}
-                        className={`ev${height < 34 ? ' short' : ''}${draggingKey === s.occ.key ? ' dragging' : ''}`}
+                        className={`ev${height < 42 ? ' short' : ''}${draggingKey === s.occ.key ? ' dragging' : ''}`}
                         style={{
                           '--c': color,
                           top: (s.startMin / 60) * HOUR,
-                          height: Math.max(height - 2, 14),
+                          height: Math.max(height - 3, 18),
                           left: `calc(${(s.col / s.cols) * 100}% + 1px)`,
                           width: `calc(${100 / s.cols}% - 3px)`,
                         } as React.CSSProperties}

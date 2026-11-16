@@ -2,6 +2,7 @@ import { StrictMode, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { api } from './api';
 import { App } from './App';
+import '@fontsource-variable/plus-jakarta-sans';
 import './styles.css';
 
 function Login({ onDone }: { onDone: () => void }) {
