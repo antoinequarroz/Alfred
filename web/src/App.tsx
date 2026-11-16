@@ -3,6 +3,7 @@ import type { CalendarInfo, EditScope, SyncStatus } from '../../shared/types';
 import { api, ApiError } from './api';
 import { addDays, addMonths, capitalize, fmt, startOfDay, startOfWeek } from './dates';
 import { EventDialog, ScopeDialog } from './EventDialog';
+import { Chevron, MenuIcon, PlusIcon } from './icons';
 import { draftFromOcc, draftToInput, movedInput, newDraft, toOcc, type CalendarMap, type Draft, type Occ } from './model';
 import { MiniMonth, monthGrid, MonthView } from './MonthView';
 import { MoonIcon, SunIcon, ThemeSwitch, useTheme } from './theme';
@@ -43,19 +44,14 @@ function syncLabel(s: SyncStatus | null): string {
   return min < 1 ? 'Synchronisé à l’instant' : `Synchronisé il y a ${min} min`;
 }
 
-function Chevron({ dir }: { dir: 'left' | 'right' }) {
+/** Titre de la période : l'année passe en retrait pour laisser lire le jour ou le mois. */
+function Title({ text }: { text: string }) {
+  const m = /^(.*) (\d{4})$/.exec(text);
+  if (!m) return <h1>{text}</h1>;
   return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d={dir === 'left' ? 'M15 5l-7 7 7 7' : 'M9 5l7 7-7 7'} />
-    </svg>
-  );
-}
-
-function MenuIcon() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-      <path d="M4 7h16M4 12h16M4 17h16" />
-    </svg>
+    <h1>
+      {m[1]} <span className="title-year">{m[2]}</span>
+    </h1>
   );
 }
 
@@ -252,7 +248,11 @@ export function App({ onLogout }: { onLogout: () => void }) {
           <span className="logo">A</span>
           <span>Alfred</span>
         </div>
-        <button className="btn primary wide" onClick={() => { setMenuOpen(false); openNew(); }}>+ Nouvel événement</button>
+        <button className="btn primary new-btn" onClick={() => { setMenuOpen(false); openNew(); }}>
+          <PlusIcon />
+          <span>Nouvel événement</span>
+          <kbd>N</kbd>
+        </button>
         <MiniMonth
           cursor={miniCursor}
           selected={cursor}
@@ -290,12 +290,12 @@ export function App({ onLogout }: { onLogout: () => void }) {
       <main className="main">
         <header className="toolbar">
           <button className="icon-btn menu-btn" onClick={() => setMenuOpen(true)} aria-label="Menu"><MenuIcon /></button>
-          <button className="btn" onClick={() => setCursor(new Date())}>Aujourd’hui</button>
+          <Title text={title(view, cursor)} />
+          <button className="btn today-btn" onClick={() => setCursor(new Date())}>Aujourd’hui</button>
           <div className="nav">
             <button className="icon-btn" onClick={() => navigate(-1)} aria-label="Précédent"><Chevron dir="left" /></button>
             <button className="icon-btn" onClick={() => navigate(1)} aria-label="Suivant"><Chevron dir="right" /></button>
           </div>
-          <h1>{title(view, cursor)}</h1>
           <button className="icon-btn theme-btn" onClick={theme.toggle} aria-label={theme.dark ? 'Passer en thème clair' : 'Passer en thème sombre'} title={theme.dark ? 'Thème clair' : 'Thème sombre'}>
             {theme.dark ? <SunIcon /> : <MoonIcon />}
           </button>
@@ -322,7 +322,7 @@ export function App({ onLogout }: { onLogout: () => void }) {
             onPickDay={pickDay}
           />
         )}
-        <button className="fab" onClick={openNew} aria-label="Nouvel événement">+</button>
+        <button className="fab" onClick={openNew} aria-label="Nouvel événement"><PlusIcon /></button>
       </main>
 
       {draft && (
