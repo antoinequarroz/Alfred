@@ -16,6 +16,8 @@ Alfred tourne dans un seul conteneur, limité à 256 Mo de RAM, derrière le Cad
 
 ## 2. Installation
 
+Le plus simple, une fois le code dans `/opt/alfred` : `bash /opt/alfred/deploy/configurer.sh`. Le script demande l'identifiant Apple, le mot de passe d'application et le mot de passe d'Alfred (saisie masquée), écrit le `.env` en `chmod 600` et démarre le conteneur. À la main, ça donne :
+
 ```bash
 git clone https://github.com/antoinequarroz/alfred.git /opt/alfred
 cd /opt/alfred
