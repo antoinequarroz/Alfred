@@ -100,6 +100,7 @@ if [[ -n "$smtp_user" && -n "$smtp_pw" ]]; then
     if [[ -n "$answer_pw" ]]; then smtp_pw=$answer_pw; fi
   fi
 else
+  echo "Envoi des e-mails : il se règle aussi plus tard dans l'app (Rendez-vous > Réglages)."
   read -rp "Identifiant SMTP (adresse de la boîte ; Entrée pour passer) : " smtp_user
   if [[ -n "$smtp_user" ]]; then
     read -rsp "Mot de passe SMTP (Entrée pour passer) : " smtp_pw; echo

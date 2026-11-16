@@ -46,7 +46,7 @@ npm install
 npm run dev        # serveur sur :3200, app web sur http://localhost:5173
 ```
 
-Sans configuration, Alfred démarre avec un calendrier local et le mot de passe `alfred` (mode dev uniquement). Pour relier iCloud, copier `.env.example` en `.env` et le remplir.
+Sans configuration, Alfred démarre avec un calendrier local et le mot de passe `alfred` (mode dev uniquement). Pour relier iCloud, ouvrir **Réglages** dans l'app, ou copier `.env.example` en `.env` et le remplir.
 
 ```bash
 npm test           # tests (la synchro CalDAV est testée contre un vrai serveur si RADICALE_URL est défini)
