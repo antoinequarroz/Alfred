@@ -9,6 +9,7 @@ import { CaldavSync } from './caldav.js';
 import { allowPrivateHosts, config, connectionEnv, secretKeyEnv, videoEnv } from './config.js';
 import { ConnectionsService } from './connections.js';
 import { openDb } from './db.js';
+import { PaymentsService } from './payments/service.js';
 import { SecretBox } from './secrets.js';
 import { hashPassword } from './password.js';
 import { CalendarService } from './service.js';
@@ -47,15 +48,16 @@ const video = new VideoService({
   hostName: () => bookingRef?.getSettings().publicName ?? config.mail.from.name,
   bookingLink: (id) => bookingRef?.videoLink(id) ?? null,
 });
+const payments = new PaymentsService({ db: store.db, secrets, pendingCount: () => bookingRef?.pendingPayments() ?? 0 });
 const booking = new BookingService({
-  video,
+  video, payments,
   store, calendar: service, caldav, timezone: config.timezone, mailer, mailProblem: () => connections.smtpProblem(),
   publicUrl: config.publicUrl, defaultPublicName: config.mail.from.name,
 });
 bookingRef = booking;
 connections.mailContext = () => ({ publicName: booking.getSettings().publicName, timezone: config.timezone, publicUrl: config.publicUrl });
 const app = createApp({
-  store, service, caldav, passwordHash, booking, connections, video,
+  store, service, caldav, passwordHash, booking, connections, video, payments,
   secureCookies: config.production,
   sessionDays: config.sessionDays,
 });
@@ -85,6 +87,10 @@ serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => 
 // La synchro régulière tourne toujours : elle ne fait rien tant qu'aucun identifiant n'est en place.
 void caldav.sync();
 setInterval(() => void caldav.sync(), config.caldav.syncIntervalSeconds * 1000).unref();
+// Paiements d'acompte en cours : vérifiés auprès de Stripe toutes les 30 s (le client a pu
+// payer puis fermer la page sans revenir sur Alfred). Rien n'est appelé s'il n'y en a aucun.
+void booking.sweepPayments();
+setInterval(() => void booking.sweepPayments(), 30_000).unref();
 const SOURCES = { app: 'réglés dans l’app', env: 'du fichier .env', default: 'par défaut', none: 'absents' } as const;
 console.log(caldav.configured
   ? `[alfred] synchro CalDAV toutes les ${config.caldav.syncIntervalSeconds} s avec ${connectionsState.caldav.url.value} (identifiants ${SOURCES[connectionsState.caldav.password.source]})`
@@ -95,6 +101,9 @@ console.log(mailer.configured
 console.log(video.configured
   ? `[alfred] visio : serveur ${videoEnv.internalUrl}, adresse publique ${videoEnv.publicUrl}`
   : '[alfred] visio non configurée (LIVEKIT_API_KEY / LIVEKIT_API_SECRET absents)');
+console.log(payments.configured
+  ? `[alfred] paiement en ligne : Stripe (${payments.state().mode === 'live' ? 'mode réel' : 'mode test'}), ${payments.paymentMethods.join(' + ')}`
+  : '[alfred] paiement en ligne non configuré (réglable dans l’app : Rendez-vous > Réglages)');
 for (const notice of connectionsState.notices) console.warn(`[alfred] ${notice}`);
 // Un réglage de l'app passe avant le .env : le dire, pour qui modifie le .env et ne voit aucun effet.
 if (connectionEnv.caldav.password && connectionsState.caldav.password.source === 'app') {

@@ -2,17 +2,19 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { newUid, type BusyOccurrence } from '../ics.js';
 import type {
   Booking, BookingAdminState, BookingConfirmation, BookingHoursRange, BookingMode, BookingSettings, BookingType,
-  PublicBooking, PublicBookingInfo, PublicBookingType, PublicSlots,
+  PublicBooking, PublicBookingInfo, PublicBookingType, PublicDeposit, PublicPaymentStatus, PublicSlots,
 } from '../../shared/types.js';
+import { formatAmount } from '../../shared/money.js';
+import { StripeError, type StripeClient } from '../payments/stripe.js';
 import { ConflictError, type CaldavSync } from '../caldav.js';
 import { ForbiddenError, NotFoundError, type CalendarService } from '../service.js';
 import type { Store } from '../store.js';
 import {
-  cancelUrlFor, clientCancellation, clientConfirmation, createDisabledMailer, ownerCancellation, ownerNotification,
+  cancelUrlFor, clientCancellation, clientConfirmation, createDisabledMailer, formatWhen, ownerCancellation, ownerNotification,
   type BookingMailData, type Mailer, type MailContext, type MailMessage,
 } from './mail.js';
 import { addDays, computeSlotDays, isDateString, localDateOf, startOfLocalDay, type BusyEvent, type SlotDay } from './slots.js';
-import { BookingStore, type BookingRow } from './store.js';
+import { BookingStore, type BookingRow, type HoldRow } from './store.js';
 
 /** Erreur métier de la prise de rendez-vous : statut HTTP, code stable, message affichable. */
 export class BookingError extends Error {
@@ -34,9 +36,23 @@ export interface BookingVideo {
   closeForBooking(bookingId: string): void;
 }
 
+/** Ce que la prise de rendez-vous attend du paiement en ligne (voir server/payments/service.ts). */
+export interface BookingPayments {
+  readonly configured: boolean;
+  /** Le client qui annule au moins tant d'heures avant est remboursé ; null : jamais automatiquement. */
+  readonly refundHours: number | null;
+  readonly paymentMethods: string[];
+  client(): StripeClient | null;
+  state(): { mode: 'test' | 'live' | null };
+}
+
 export interface BookingOptions {
   /** Visio : les rendez-vous « En visio » reçoivent le lien d'une salle Alfred. */
   video?: BookingVideo;
+  /** Paiement des acomptes (Stripe). Sans lui, aucun type avec acompte n'est réservable. */
+  payments?: BookingPayments;
+  /** Durée de validité de la page de paiement, en minutes (Stripe : 30 au moins). */
+  paymentMinutes?: number;
   store: Store;
   calendar: CalendarService;
   caldav: CaldavSync | null;
@@ -66,6 +82,23 @@ export interface BookingOptions {
   quietCancelMinutes?: number;
 }
 
+interface Contact {
+  name: string;
+  email: string;
+  phone: string;
+  message: string;
+}
+
+/** Ce qu'une réservation reprend de son type (copié dans la retenue pendant le paiement). */
+interface TypeSnapshot {
+  id: string | null;
+  name: string;
+  mode: BookingMode;
+  location: string;
+  bufferBeforeMin: number;
+  bufferAfterMin: number;
+}
+
 const DAY_MS = 86_400_000;
 /** Étendue maximale d'une demande de créneaux, en jours (un mois affiché, semaines entières comprises). */
 export const MAX_RANGE_DAYS = 42;
@@ -77,6 +110,10 @@ const MODES: BookingMode[] = ['cabinet', 'telephone', 'visio', 'autre'];
 const MODE_LABELS: Record<BookingMode, string> = { cabinet: 'Au cabinet', telephone: 'Par téléphone', visio: 'En visio', autre: '' };
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,48}[a-z0-9])?$/;
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+/** Plus petit acompte accepté par Stripe en francs suisses : 0.50. */
+const MIN_DEPOSIT_CENTS = 50;
+const MAX_DEPOSIT_CENTS = 100_000;
+const CURRENCY = 'CHF';
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/;
 const EMAIL_RE = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$/;
 const PHONE_RE = /^\+?[0-9][0-9 ().\/-]{5,28}$/;
@@ -161,6 +198,10 @@ export class BookingService {
   private readonly mailDailyLimit: number;
   private readonly quietCancelMs: number;
   private readonly video: BookingVideo | null;
+  private readonly payments: BookingPayments | null;
+  private readonly paymentMs: number;
+  /** Retenues en cours de vérification auprès de Stripe : une seule vérification à la fois par retenue. */
+  private settling = new Map<string, Promise<void>>();
   private chain: Promise<unknown> = Promise.resolve();
   private waiting = 0;
   /** Occupation de l'agenda sur toute la période réservable, recalculée seulement quand l'agenda change. */
@@ -174,6 +215,8 @@ export class BookingService {
     this.store = opts.store;
     this.data = new BookingStore(opts.store.db);
     this.video = opts.video ?? null;
+    this.payments = opts.payments ?? null;
+    this.paymentMs = Math.max(30, opts.paymentMinutes ?? 31) * 60_000;
     this.calendar = opts.calendar;
     this.caldav = opts.caldav;
     this.timezone = opts.timezone;
@@ -278,6 +321,10 @@ export class BookingService {
       warnings.push('Le calendrier choisi pour les rendez-vous n’est plus utilisable : un autre calendrier est utilisé à la place.');
     }
     if (!this.data.listTypes().some((t) => t.active)) warnings.push('Aucun type de rendez-vous actif.');
+    const unpaid = this.data.listTypes().filter((t) => t.active && t.depositCents > 0);
+    if (unpaid.length > 0 && !this.payments?.configured) {
+      warnings.push(`Le paiement en ligne n’est pas configuré : ${unpaid.map((t) => `« ${t.name} »`).join(', ')} ${unpaid.length > 1 ? 'ne sont pas proposés' : 'n’est pas proposé'} sur la page publique tant qu’aucune clé Stripe n’est enregistrée (Rendez-vous > Réglages).`);
+    }
     if (this.data.getHours().length === 0) warnings.push('Aucun horaire d’ouverture : aucun créneau n’est proposé.');
     const sync = this.caldav?.configured ? this.caldav.getStatus() : undefined;
     if (sync?.lastError) warnings.push('La synchro iCloud est en échec : les créneaux sont calculés sur la dernière copie connue.');
@@ -324,7 +371,7 @@ export class BookingService {
     const fields: Record<string, string> = {};
     const t: BookingType = base ? { ...base } : {
       id: randomUUID(), slug: '', name: '', durationMin: 0, description: '', mode: 'cabinet', location: '',
-      bufferBeforeMin: 0, bufferAfterMin: 0, minNoticeHours: 12, horizonDays: 60, active: true, sort: this.data.nextTypeSort(),
+      bufferBeforeMin: 0, bufferAfterMin: 0, minNoticeHours: 12, horizonDays: 60, depositCents: 0, active: true, sort: this.data.nextTypeSort(),
     };
     const text = (key: 'name' | 'description' | 'location', max: number, label: string, multiline = false) => {
       if (!(key in body)) return;
@@ -348,6 +395,16 @@ export class BookingService {
     int('minNoticeHours', 0, 720, 'Préavis (heures)');
     int('horizonDays', 1, 365, 'Horizon (jours)');
     int('sort', 0, 10_000, 'Ordre');
+    if ('depositCents' in body) {
+      const v = intIn(body.depositCents, 0, MAX_DEPOSIT_CENTS);
+      if (v === null || (v > 0 && v < MIN_DEPOSIT_CENTS) || v % 5 !== 0) {
+        fields.depositCents = `Acompte : 0 (aucun) ou un montant entre ${formatAmount(MIN_DEPOSIT_CENTS, CURRENCY)} et ${formatAmount(MAX_DEPOSIT_CENTS, CURRENCY)}, arrondi à 5 centimes`;
+      } else {
+        if (v > 0 && v !== base?.depositCents && !this.payments?.configured) {
+          fields.depositCents = 'Enregistre d’abord ta clé Stripe dans Rendez-vous > Réglages > Paiement en ligne';
+        } else t.depositCents = v;
+      }
+    }
     if ('mode' in body) {
       if (MODES.includes(body.mode as BookingMode)) t.mode = body.mode as BookingMode;
       else fields.mode = 'Mode : cabinet, telephone, visio ou autre';
@@ -522,6 +579,10 @@ export class BookingService {
     for (const b of this.data.confirmedBetween(new Date(fromMs).toISOString(), new Date(toMs).toISOString())) {
       busy.push({ start: b.start_utc, end: b.end_utc, bufferBeforeMin: b.buffer_before_min, bufferAfterMin: b.buffer_after_min });
     }
+    // Un créneau en cours de paiement est retenu, comme s'il était déjà réservé.
+    for (const h of this.data.activeHoldsBetween(new Date(fromMs).toISOString(), new Date(toMs).toISOString())) {
+      busy.push({ start: h.start_utc, end: h.end_utc, bufferBeforeMin: h.buffer_before_min, bufferAfterMin: h.buffer_after_min });
+    }
     return computeSlotDays({
       type, hours: this.data.getHours(), stepMin: this.getSettings().slotStepMin,
       timezone: this.timezone, from: first, to: last, now, busy,
@@ -552,7 +613,13 @@ export class BookingService {
       slug: t.slug, name: t.name, durationMin: t.durationMin, description: t.description, mode: t.mode,
       locationLabel: locationLabel(t.mode, t.location), phoneRequired: t.mode === 'telephone',
       horizonDays: t.horizonDays,
+      depositCents: t.depositCents, currency: CURRENCY,
     };
+  }
+
+  /** Un type avec acompte n'est proposé que si le paiement en ligne est en place. */
+  private bookable(t: BookingType): boolean {
+    return t.active && (t.depositCents === 0 || Boolean(this.payments?.configured));
   }
 
   publicInfo(): PublicBookingInfo {
@@ -560,7 +627,7 @@ export class BookingService {
     if (!s.enabled) return { enabled: false, publicName: s.publicName, welcomeText: '', timezone: this.timezone, types: [] };
     return {
       enabled: true, publicName: s.publicName, welcomeText: s.welcomeText, timezone: this.timezone,
-      types: this.data.listTypes().filter((t) => t.active).map((t) => this.toPublicType(t)),
+      types: this.data.listTypes().filter((t) => this.bookable(t)).map((t) => this.toPublicType(t)),
     };
   }
 
@@ -570,7 +637,7 @@ export class BookingService {
 
   private publicType(slug: unknown): BookingType {
     const type = typeof slug === 'string' && slug.length <= 64 ? this.data.getTypeBySlug(slug) : undefined;
-    if (!type || !type.active) throw new BookingError(404, 'unknown_type', 'Ce type de rendez-vous n’existe pas ou n’est plus proposé.');
+    if (!type || !this.bookable(type)) throw new BookingError(404, 'unknown_type', 'Ce type de rendez-vous n’existe pas ou n’est plus proposé.');
     return type;
   }
 
@@ -586,6 +653,22 @@ export class BookingService {
       typeName: b.type_name, start: b.start_utc, end: b.end_utc, timezone: this.timezone, locationLabel: b.location,
       name: b.name, status: b.status, videoUrl: b.status === 'confirmed' ? (this.video?.urlForBooking(b.id) ?? null) : null,
       cancellable: b.status === 'confirmed' && Date.parse(b.start_utc) > this.now().getTime(),
+      deposit: this.publicDeposit(b),
+    };
+  }
+
+  /** Remboursement automatique si le client annule maintenant (règle des Réglages). */
+  private refundsOnClientCancel(b: BookingRow): boolean {
+    const hours = this.payments?.refundHours ?? null;
+    return b.payment_status === 'paid' && hours !== null && Date.parse(b.start_utc) - this.now().getTime() >= hours * 3_600_000;
+  }
+
+  private publicDeposit(b: BookingRow): PublicDeposit | null {
+    if (!b.payment_amount_cents) return null;
+    return {
+      amountCents: b.payment_amount_cents, currency: b.payment_currency ?? CURRENCY,
+      refundOnCancel: this.refundsOnClientCancel(b), refundHours: this.payments?.refundHours ?? null,
+      refunded: b.payment_status === 'refunded',
     };
   }
 
@@ -647,91 +730,50 @@ export class BookingService {
 
     const start = new Date(startMs).toISOString();
     const token = randomBytes(32).toString('base64url');
-    // UID choisi avant la création : si elle tourne mal, l'événement peut être retrouvé et retiré.
-    const uid = newUid();
 
     // La synchro est commune à toutes les demandes en cours : on l'attend hors du verrou.
     await this.freshSync();
-    const row = await this.locked(async (): Promise<BookingRow> => {
+    const contact: Contact = { name, email, phone, message };
+    const result = await this.locked(async (): Promise<{ row: BookingRow } | { hold: HoldRow; ref: string }> => {
       // Après la synchro et l'attente du verrou, tout a pu changer : réglages, type, agenda,
       // réservations des autres clients. Tout est donc relu ici.
       if (!this.getSettings().enabled) throw new BookingError(403, 'closed', 'La prise de rendez-vous n’est pas ouverte.');
       const type = this.data.getType(requested.id);
-      if (!type || !type.active) throw new BookingError(404, 'unknown_type', 'Ce type de rendez-vous n’existe pas ou n’est plus proposé.');
+      if (!type || !this.bookable(type)) throw new BookingError(404, 'unknown_type', 'Ce type de rendez-vous n’existe pas ou n’est plus proposé.');
       if (type.mode === 'telephone' && !phone) throw invalid({ phone: 'Le téléphone est nécessaire pour ce rendez-vous' });
       if (!this.isFree(type, startMs)) throw taken();
       // Plafond par adresse destinataire, annulations comprises : le formulaire ne doit pas servir à
       // inonder une adresse d'e-mails. Même refus que la limite de débit : rien n'est révélé sur l'adresse.
       const since = new Date(this.now().getTime() - DAY_MS).toISOString();
-      if (this.data.countCreatedForEmailSince(email, since) >= this.maxPerEmailPerDay) {
+      if (this.data.countCreatedForEmailSince(email, since) + this.data.countHoldsForEmailSince(email, since) >= this.maxPerEmailPerDay) {
         throw new BookingError(429, 'rate_limited', 'Trop de demandes. Réessayez un peu plus tard.');
       }
       admit?.();
-      const calendarId = this.targetCalendarId();
-      if (!calendarId) throw new BookingError(503, 'calendar_unavailable', 'La réservation est momentanément impossible. Réessayez plus tard.');
+      if (!this.targetCalendarId()) throw new BookingError(503, 'calendar_unavailable', 'La réservation est momentanément impossible. Réessayez plus tard.');
       const end = new Date(startMs + type.durationMin * 60_000).toISOString();
-      const location = locationLabel(type.mode, type.location);
-      // Rendez-vous « En visio » : une salle Alfred, dont le lien va dans l'événement (lieu cliquable dans Apple Calendar).
-      // Sauf si le type porte déjà un lien (Zoom, Meet…) : c'est alors ce lien qui vaut, sans second lien concurrent.
-      const ownLink = /https?:\/\//i.test(type.location);
-      const room = type.mode === 'visio' && !ownLink ? this.video?.reserveForBooking(`${type.name} : ${name}`, start, end) ?? null : null;
-      const description = [
-        'Rendez-vous pris en ligne.',
-        room ? `Visio : ${room.url}` : '',
-        room && type.location.trim() ? `Lieu : ${location}` : '',
-        `Nom : ${name}`,
-        `E-mail : ${email}`,
-        phone ? `Téléphone : ${phone}` : '',
-        message ? `Message : ${message}` : '',
-      ].filter(Boolean).join('\n');
-      const unavailable = () => new BookingError(502, 'calendar_unavailable', 'La réservation est momentanément impossible. Réessayez plus tard.');
-      // Le serveur de calendrier a pu enregistrer l'événement sans que la réponse nous parvienne :
-      // on le retire au mieux (il se retrouve par son UID), pour ne pas laisser de rendez-vous fantôme.
-      const discard = () => this.calendar.discardCreated(calendarId, uid).catch((err) => {
-        console.error('[alfred] réservation : l’événement abandonné n’a pas pu être retiré :', err);
-      });
-      const creating = this.calendar.create({ calendarId, title: `${type.name} : ${name}`, start, end, allDay: false, location: room ? room.url : location, description }, uid);
-      let eventId: string | typeof TIMED_OUT;
-      try {
-        eventId = await withTimeout(creating, this.calendarTimeoutMs);
-      } catch (err) {
-        console.error('[alfred] réservation : création de l’événement en échec :', err);
-        void discard();
-        throw unavailable();
+      if (type.depositCents > 0) {
+        // Acompte : le créneau est retenu le temps du paiement ; rien n'est écrit dans le calendrier
+        // et aucun e-mail ne part avant que le paiement ait abouti.
+        const ref = randomBytes(32).toString('base64url');
+        const now = this.now();
+        const hold: HoldRow = {
+          id: randomUUID(), ref_hash: hashToken(ref), status: 'pending', type_id: type.id, type_name: type.name, mode: type.mode,
+          location: type.location, buffer_before_min: type.bufferBeforeMin, buffer_after_min: type.bufferAfterMin,
+          start_utc: start, end_utc: end, name, email, phone, message, token_hash: hashToken(token), cancel_token: token,
+          amount_cents: type.depositCents, currency: CURRENCY, checkout_id: null, payment_intent: null, booking_id: null,
+          created_at: now.toISOString(), expires_at: new Date(now.getTime() + this.paymentMs).toISOString(), last_error: null,
+        };
+        this.data.insertHold(hold);
+        return { hold, ref };
       }
-      if (eventId === TIMED_OUT) {
-        // Le serveur de calendrier ne répond pas : on libère le verrou. Que la création finisse
-        // par aboutir ou par échouer, l'événement est retiré pour ne pas rester sans réservation.
-        console.error('[alfred] réservation : le calendrier ne répond pas, demande abandonnée');
-        creating.then((late) => this.calendar.remove(late, 'all', null), discard).catch(() => undefined);
-        throw unavailable();
-      }
-      const booking: BookingRow = {
-        id: randomUUID(), type_id: type.id, type_name: type.name, location,
-        buffer_before_min: type.bufferBeforeMin, buffer_after_min: type.bufferAfterMin,
-        event_id: eventId, event_uid: uid, calendar_id: calendarId, start_utc: start, end_utc: end,
-        name, email, phone, message, status: 'confirmed', token_hash: hashToken(token),
-        created_at: this.now().toISOString(), cancelled_at: null, cancelled_by: null, mail_error: null, notified_start: null,
-      };
-      try {
-        this.data.insertBooking(booking);
-      } catch (err) {
-        // Pas de réservation enregistrée : on ne laisse pas d'événement orphelin.
-        await this.calendar.remove(eventId, 'all', null).catch(() => undefined);
-        throw err;
-      }
-      if (room) {
-        try {
-          room.commit(booking.id);
-        } catch (err) {
-          console.error('[alfred] réservation : la salle de visio n’a pas pu être enregistrée :', err);
-        }
-      }
-      return booking;
+      return { row: await this.createBookingLocked(this.snapshot(type), start, end, contact, hashToken(token), null) };
     });
 
-    const ctx = this.mailContext();
     const cancelUrl = cancelUrlFor(this.publicUrl, token);
+    if ('hold' in result) return this.startCheckout(result.hold, result.ref, cancelUrl);
+
+    const row = result.row;
+    const ctx = this.mailContext();
     const data = this.mailData(row);
     const [clientSent] = await this.sendMails(row.id, [
       ['Confirmation au client', clientConfirmation(data, ctx, cancelUrl)],
@@ -740,11 +782,319 @@ export class BookingService {
     return { booking: this.toPublicBooking(row), cancelUrl, emailSent: clientSent };
   }
 
+  private snapshot(type: BookingType): TypeSnapshot {
+    return {
+      id: type.id, name: type.name, mode: type.mode, location: type.location,
+      bufferBeforeMin: type.bufferBeforeMin, bufferAfterMin: type.bufferAfterMin,
+    };
+  }
+
+  /**
+   * Crée l'événement dans le calendrier puis enregistre la réservation. À appeler dans la
+   * section critique, une fois le créneau vérifié (ou payé).
+   */
+  private async createBookingLocked(
+    type: TypeSnapshot, start: string, end: string, contact: Contact, tokenHash: string,
+    payment: { amountCents: number; currency: string; intent: string | null } | null,
+  ): Promise<BookingRow> {
+    const { name, email, phone, message } = contact;
+    const calendarId = this.targetCalendarId();
+    if (!calendarId) throw new BookingError(503, 'calendar_unavailable', 'La réservation est momentanément impossible. Réessayez plus tard.');
+    const location = locationLabel(type.mode, type.location);
+    // Rendez-vous « En visio » : une salle Alfred, dont le lien va dans l'événement (lieu cliquable dans Apple Calendar).
+    // Sauf si le type porte déjà un lien (Zoom, Meet…) : c'est alors ce lien qui vaut, sans second lien concurrent.
+    const ownLink = /https?:\/\//i.test(type.location);
+    const room = type.mode === 'visio' && !ownLink ? this.video?.reserveForBooking(`${type.name} : ${name}`, start, end) ?? null : null;
+    const description = [
+      'Rendez-vous pris en ligne.',
+      room ? `Visio : ${room.url}` : '',
+      room && type.location.trim() ? `Lieu : ${location}` : '',
+      `Nom : ${name}`,
+      `E-mail : ${email}`,
+      phone ? `Téléphone : ${phone}` : '',
+      payment ? `Acompte payé en ligne : ${formatAmount(payment.amountCents, payment.currency)}` : '',
+      message ? `Message : ${message}` : '',
+    ].filter(Boolean).join('\n');
+    const unavailable = () => new BookingError(502, 'calendar_unavailable', 'La réservation est momentanément impossible. Réessayez plus tard.');
+    const uid = newUid();
+    // Le serveur de calendrier a pu enregistrer l'événement sans que la réponse nous parvienne :
+    // on le retire au mieux (il se retrouve par son UID), pour ne pas laisser de rendez-vous fantôme.
+    const discard = () => this.calendar.discardCreated(calendarId, uid).catch((err) => {
+      console.error('[alfred] réservation : l’événement abandonné n’a pas pu être retiré :', err);
+    });
+    const creating = this.calendar.create({ calendarId, title: `${type.name} : ${name}`, start, end, allDay: false, location: room ? room.url : location, description }, uid);
+    let eventId: string | typeof TIMED_OUT;
+    try {
+      eventId = await withTimeout(creating, this.calendarTimeoutMs);
+    } catch (err) {
+      console.error('[alfred] réservation : création de l’événement en échec :', err);
+      void discard();
+      throw unavailable();
+    }
+    if (eventId === TIMED_OUT) {
+      // Le serveur de calendrier ne répond pas : on libère le verrou. Que la création finisse
+      // par aboutir ou par échouer, l'événement est retiré pour ne pas rester sans réservation.
+      console.error('[alfred] réservation : le calendrier ne répond pas, demande abandonnée');
+      creating.then((late) => this.calendar.remove(late, 'all', null), discard).catch(() => undefined);
+      throw unavailable();
+    }
+    const booking: BookingRow = {
+      // Le type a pu être supprimé pendant le paiement : la réservation garde son nom, sans lien.
+      id: randomUUID(), type_id: type.id && this.data.getType(type.id) ? type.id : null, type_name: type.name, location,
+      buffer_before_min: type.bufferBeforeMin, buffer_after_min: type.bufferAfterMin,
+      event_id: eventId, event_uid: uid, calendar_id: calendarId, start_utc: start, end_utc: end,
+      name, email, phone, message, status: 'confirmed', token_hash: tokenHash,
+      created_at: this.now().toISOString(), cancelled_at: null, cancelled_by: null, mail_error: null, notified_start: null,
+      payment_amount_cents: payment?.amountCents ?? null, payment_currency: payment?.currency ?? null,
+      payment_intent: payment?.intent ?? null, payment_status: payment ? 'paid' : null, payment_error: null,
+    };
+    try {
+      this.data.insertBooking(booking);
+    } catch (err) {
+      // Pas de réservation enregistrée : on ne laisse pas d'événement orphelin.
+      await this.calendar.remove(eventId, 'all', null).catch(() => undefined);
+      throw err;
+    }
+    if (room) {
+      try {
+        room.commit(booking.id);
+      } catch (err) {
+        console.error('[alfred] réservation : la salle de visio n’a pas pu être enregistrée :', err);
+      }
+    }
+    return booking;
+  }
+
+  // --- acomptes : paiement, suivi, remboursement ----------------------------
+
+  private stripe(): StripeClient {
+    const client = this.payments?.client();
+    if (!client) throw new BookingError(503, 'payment_unavailable', 'Le paiement en ligne est momentanément indisponible. Réessayez plus tard.');
+    return client;
+  }
+
+  /** Ouvre la page de paiement Stripe d'une retenue. En cas d'échec, la retenue est levée. */
+  private async startCheckout(hold: HoldRow, ref: string, cancelUrl: string): Promise<BookingConfirmation> {
+    const back = `${this.publicUrl}/rdv/paiement/${ref}`;
+    try {
+      const session = await this.stripe().createCheckout({
+        amountCents: hold.amount_cents, currency: hold.currency,
+        productName: `Acompte : ${hold.type_name}`,
+        description: formatWhen(hold.start_utc, hold.end_utc, this.timezone),
+        customerEmail: hold.email, successUrl: back, cancelUrl: `${back}?abandon=1`,
+        expiresAt: Math.floor(Date.parse(hold.expires_at) / 1000),
+        paymentMethods: this.payments!.paymentMethods, reference: hold.id,
+      });
+      if (!session.url) throw new StripeError('invalid', 'Stripe n’a pas renvoyé de page de paiement');
+      this.data.updateHold(hold.id, { checkout_id: session.id });
+      return {
+        booking: this.holdToPublic(hold), cancelUrl, emailSent: false,
+        payment: { url: session.url, ref, amountCents: hold.amount_cents, currency: hold.currency, expiresAt: hold.expires_at },
+      };
+    } catch (err) {
+      const detail = err instanceof StripeError ? err.message : String(err);
+      console.error(`[alfred] paiement : la page de paiement n’a pas pu être ouverte (${detail})`);
+      // Rien n'a pu être payé : le créneau est libéré tout de suite.
+      this.data.updateHold(hold.id, { status: 'expired', cancel_token: null, last_error: detail.slice(0, 300) });
+      if (err instanceof BookingError) throw err;
+      throw new BookingError(502, 'payment_unavailable', 'Le paiement en ligne est momentanément indisponible. Rien n’a été enregistré : réessayez plus tard.');
+    }
+  }
+
+  private holdToPublic(h: HoldRow): PublicBooking {
+    return {
+      typeName: h.type_name, start: h.start_utc, end: h.end_utc, timezone: this.timezone,
+      locationLabel: locationLabel(MODES.includes(h.mode as BookingMode) ? (h.mode as BookingMode) : 'autre', h.location),
+      name: h.name, status: 'confirmed', cancellable: false, videoUrl: null,
+      deposit: { amountCents: h.amount_cents, currency: h.currency, refundOnCancel: false, refundHours: this.payments?.refundHours ?? null },
+    };
+  }
+
+  /**
+   * Fait avancer une retenue d'après Stripe : payée → réservation créée ; page de paiement
+   * expirée → créneau libéré. Sans réponse de Stripe, rien ne change (le créneau reste retenu).
+   * Une seule vérification à la fois par retenue.
+   */
+  private settle(holdId: string): Promise<void> {
+    const running = this.settling.get(holdId);
+    if (running) return running;
+    const run = this.settleOnce(holdId).catch((err) => {
+      console.error(`[alfred] paiement : suivi de la retenue ${holdId} en échec :`, err);
+    }).finally(() => this.settling.delete(holdId));
+    this.settling.set(holdId, run);
+    return run;
+  }
+
+  private async settleOnce(holdId: string): Promise<void> {
+    let hold = this.data.getHold(holdId);
+    if (!hold) return;
+    if (hold.status === 'pending') {
+      const client = this.payments?.client();
+      if (!client || !hold.checkout_id) return;
+      let session;
+      try {
+        session = await client.getCheckout(hold.checkout_id);
+      } catch (err) {
+        this.data.updateHold(hold.id, { last_error: (err instanceof Error ? err.message : String(err)).slice(0, 300) });
+        return;
+      }
+      if (session.status === 'complete' && session.payment_status === 'paid') {
+        this.data.updateHold(hold.id, { status: 'paid', payment_intent: session.payment_intent, last_error: null });
+      } else if (session.status === 'expired') {
+        this.data.updateHold(hold.id, { status: 'expired', cancel_token: null });
+        return;
+      } else {
+        // Page encore ouverte après son échéance (horloges décalées) : on la ferme nous-mêmes.
+        if (session.status === 'open' && this.now().getTime() > Date.parse(hold.expires_at) + 5 * 60_000) {
+          try {
+            const closed = await client.expireCheckout(hold.checkout_id);
+            if (closed.status === 'expired') this.data.updateHold(hold.id, { status: 'expired', cancel_token: null });
+          } catch {
+            // payée entre-temps, ou Stripe injoignable : la prochaine vérification tranchera
+          }
+        }
+        return;
+      }
+      hold = this.data.getHold(holdId)!;
+    }
+    if (hold.status === 'paid') await this.completeHold(hold.id);
+  }
+
+  /** Paiement reçu : crée la réservation (événement, salle de visio) et envoie les confirmations. */
+  private async completeHold(holdId: string): Promise<void> {
+    let token: string | null = null;
+    const row = await this.locked(async () => {
+      const hold = this.data.getHold(holdId);
+      if (!hold || hold.status !== 'paid') return null;
+      const type: TypeSnapshot = {
+        id: hold.type_id, name: hold.type_name, mode: MODES.includes(hold.mode as BookingMode) ? (hold.mode as BookingMode) : 'autre',
+        location: hold.location, bufferBeforeMin: hold.buffer_before_min, bufferAfterMin: hold.buffer_after_min,
+      };
+      // Le créneau est payé : la réservation est créée même si l'agenda s'est rempli entre-temps
+      // (le créneau était retenu dans Alfred, seul un ajout direct dans le calendrier peut le recouper).
+      let created: BookingRow;
+      try {
+        created = await this.createBookingLocked(type, hold.start_utc, hold.end_utc, hold, hold.token_hash,
+          { amountCents: hold.amount_cents, currency: hold.currency, intent: hold.payment_intent });
+      } catch (err) {
+        // Calendrier indisponible : la retenue reste payée, la prochaine vérification réessaie.
+        this.data.updateHold(hold.id, { last_error: (err instanceof Error ? err.message : String(err)).slice(0, 300) });
+        throw err;
+      }
+      token = hold.cancel_token;
+      this.data.updateHold(hold.id, { status: 'completed', booking_id: created.id, cancel_token: null, last_error: null });
+      return created;
+    });
+    if (!row) return;
+    let cancelToken: string = token ?? '';
+    if (!cancelToken) {
+      // Jeton perdu (ne devrait pas arriver) : un nouveau lien d'annulation remplace l'ancien.
+      cancelToken = randomBytes(32).toString('base64url');
+      this.data.setTokenHash(row.id, hashToken(cancelToken));
+    }
+    const ctx = this.mailContext();
+    const data = this.mailData(row);
+    await this.sendMails(row.id, [
+      ['Confirmation au client', clientConfirmation(data, ctx, cancelUrlFor(this.publicUrl, cancelToken))],
+      ['Avis de nouveau rendez-vous', ownerNotification(data, ctx, this.mailer.notifyTo)],
+    ]);
+  }
+
+  private holdByRef(ref: string): HoldRow {
+    const hold = TOKEN_RE.test(ref) ? this.data.getHoldByRefHash(hashToken(ref)) : undefined;
+    if (!hold) throw new BookingError(404, 'not_found', 'Paiement introuvable.');
+    return hold;
+  }
+
+  private paymentView(holdId: string): PublicPaymentStatus {
+    const hold = this.data.getHold(holdId)!;
+    const base = { amountCents: hold.amount_cents, currency: hold.currency };
+    if (hold.status === 'completed' && hold.booking_id) {
+      this.reconcile();
+      const row = this.data.getBooking(hold.booking_id);
+      if (row) return { ...base, status: 'confirmed', booking: this.toPublicBooking(row), emailSent: row.mail_error === null };
+    }
+    const status = hold.status === 'paid' ? 'processing' : hold.status === 'expired' ? 'expired' : 'pending';
+    return { ...base, status, booking: this.holdToPublic(hold), emailSent: false };
+  }
+
+  /** Suivi d'un paiement, pour la page de retour : vérifie auprès de Stripe s'il est encore en cours. */
+  async paymentStatus(ref: string): Promise<PublicPaymentStatus> {
+    const hold = this.holdByRef(ref);
+    if (hold.status === 'pending' || hold.status === 'paid') await this.settle(hold.id);
+    return this.paymentView(hold.id);
+  }
+
+  /** Le client a quitté la page de paiement sans payer : elle est fermée et le créneau libéré. */
+  async abandonPayment(ref: string): Promise<PublicPaymentStatus> {
+    const hold = this.holdByRef(ref);
+    if (hold.status === 'pending' && hold.checkout_id) {
+      const client = this.payments?.client();
+      if (client) {
+        try {
+          const session = await client.expireCheckout(hold.checkout_id);
+          if (session.status === 'expired') this.data.updateHold(hold.id, { status: 'expired', cancel_token: null });
+        } catch {
+          // Déjà payée, ou Stripe injoignable : la vérification ci-dessous tranche.
+        }
+      }
+    }
+    return this.paymentStatus(ref);
+  }
+
+  /** Suivi régulier des paiements en cours (le client a pu fermer la page de paiement sans revenir). */
+  async sweepPayments(): Promise<void> {
+    for (const hold of this.data.activeHolds()) await this.settle(hold.id);
+  }
+
+  /** Nombre de paiements commencés, pas encore aboutis. */
+  pendingPayments(): number {
+    return this.data.activeHolds().length;
+  }
+
+  /** Rembourse l'acompte d'une réservation. Ne lève pas : le résultat est noté sur la réservation. */
+  private async refundRow(row: BookingRow): Promise<boolean> {
+    if (row.payment_status !== 'paid' && row.payment_status !== 'refund_failed') return row.payment_status === 'refunded';
+    const client = this.payments?.client();
+    if (!client || !row.payment_intent) {
+      this.data.setPaymentStatus(row.id, 'refund_failed', 'Paiement en ligne non configuré : rembourse depuis le tableau de bord Stripe.');
+      return false;
+    }
+    try {
+      // Clé d'idempotence propre à chaque essai : un refus passager n'est pas rejoué tel quel. Un
+      // paiement déjà remboursé est refusé par Stripe (charge_already_refunded) : jamais deux remboursements.
+      await client.refund(row.payment_intent, `alfred-refund-${row.id}-${randomUUID()}`);
+    } catch (err) {
+      if (err instanceof StripeError && err.code === 'charge_already_refunded') {
+        this.data.setPaymentStatus(row.id, 'refunded', null);
+        return true;
+      }
+      const detail = err instanceof Error ? err.message : String(err);
+      console.error(`[alfred] remboursement de la réservation ${row.id} en échec : ${detail}`);
+      this.data.setPaymentStatus(row.id, 'refund_failed', `Remboursement en échec : ${detail}`.slice(0, 300));
+      return false;
+    }
+    this.data.setPaymentStatus(row.id, 'refunded', null);
+    return true;
+  }
+
+  /** Remboursement demandé depuis l'admin (réservation annulée sans remboursement, ou remboursement en échec). */
+  async refundBooking(id: string): Promise<Booking> {
+    const row = this.requireBooking(id);
+    if (!row.payment_amount_cents) throw new BookingError(409, 'no_payment', 'Cette réservation n’a pas d’acompte payé en ligne.');
+    if (row.payment_status === 'refunded') throw new BookingError(409, 'already_refunded', 'L’acompte est déjà remboursé.');
+    const ok = await this.refundRow(row);
+    if (!ok) throw new BookingError(502, 'refund_failed', this.data.getBooking(id)?.payment_error ?? 'Le remboursement a échoué.');
+    return this.toBooking(this.requireBooking(id));
+  }
+
   private mailData(b: BookingRow): BookingMailData {
     return {
       id: b.id, typeName: b.type_name, location: b.location, start: b.start_utc, end: b.end_utc,
       name: b.name, email: b.email, phone: b.phone, message: b.message,
       videoUrl: b.status === 'confirmed' ? (this.video?.urlForBooking(b.id) ?? null) : null,
+      deposit: b.payment_amount_cents ? formatAmount(b.payment_amount_cents, b.payment_currency ?? CURRENCY) : undefined,
+      depositStatus: b.payment_amount_cents ? (b.payment_status ?? 'paid') : undefined,
     };
   }
 
@@ -824,7 +1174,8 @@ export class BookingService {
     // Annulation aussitôt après la réservation : le client a le résultat sous les yeux, et un
     // aller-retour réserver/annuler ne doit pas doubler les e-mails envoyés à une adresse non vérifiée.
     const quiet = this.now().getTime() - Date.parse(row.created_at) < this.quietCancelMs;
-    const cancelled = await this.cancel(row.id, 'client', !quiet);
+    // Acompte : remboursé si l'annulation respecte le délai des Réglages (décidé avant d'annuler).
+    const cancelled = await this.cancel(row.id, 'client', !quiet, this.refundsOnClientCancel(row));
     if (!cancelled) throw new BookingError(404, 'not_found', 'Ce lien n’est plus valable : rendez-vous introuvable ou déjà annulé.');
     return { ...this.toPublicBooking(cancelled.row), emailSent: cancelled.clientSent };
   }
@@ -834,7 +1185,7 @@ export class BookingService {
    * déjà disparu), marque la réservation, puis prévient par e-mail.
    * Renvoie null si elle était déjà annulée.
    */
-  private async cancel(id: string, by: 'client' | 'admin', notifyClient: boolean): Promise<{ row: BookingRow; clientSent: boolean } | null> {
+  private async cancel(id: string, by: 'client' | 'admin', notifyClient: boolean, refund = false): Promise<{ row: BookingRow; clientSent: boolean } | null> {
     const row = await this.locked(async () => {
       this.reconcile();
       const current = this.data.getBooking(id);
@@ -850,8 +1201,10 @@ export class BookingService {
     } catch (err) {
       console.error('[alfred] annulation : la salle de visio n’a pas pu être fermée :', err);
     }
+    // Remboursement avant les e-mails : ils disent au client ce qu'il en est.
+    if (refund && row.payment_status === 'paid') await this.refundRow(row);
     const ctx = this.mailContext();
-    const data = this.mailData(row);
+    const data = this.mailData(this.data.getBooking(id)!);
     const messages: [string, MailMessage][] = [];
     if (notifyClient) messages.push(['Avis d’annulation au client', clientCancellation(data, ctx, by)]);
     // Antoine n'a pas besoin d'un avis pour ce qu'il vient d'annuler lui-même.
@@ -912,6 +1265,13 @@ export class BookingService {
       name: b.name, email: b.email, phone: b.phone, message: b.message, status: b.status, createdAt: b.created_at,
       cancelledAt: b.cancelled_at, cancelledBy: b.cancelled_by, eventId: b.event_id, calendarId: b.calendar_id,
       eventState, eventStart, eventEnd, notifiedStart, mailError: b.mail_error,
+      payment: b.payment_amount_cents ? {
+        amountCents: b.payment_amount_cents, currency: b.payment_currency ?? CURRENCY, status: b.payment_status ?? 'paid',
+        error: b.payment_error ?? null,
+        dashboardUrl: b.payment_intent
+          ? `https://dashboard.stripe.com/${this.payments?.state().mode === 'test' ? 'test/' : ''}payments/${encodeURIComponent(b.payment_intent)}`
+          : null,
+      } : null,
       videoUrl: b.status === 'confirmed' ? (this.video?.urlForBooking(b.id) ?? null) : null,
     };
   }
@@ -931,10 +1291,10 @@ export class BookingService {
   }
 
   /** Annulation par Antoine. notifyClient faux : aucun e-mail au client. */
-  async cancelByAdmin(id: string, notifyClient = true): Promise<Booking> {
+  async cancelByAdmin(id: string, notifyClient = true, refund = true): Promise<Booking> {
     const row = this.requireBooking(id);
     if (row.status !== 'confirmed') throw new BookingError(409, 'already_cancelled', 'Cette réservation est déjà annulée');
-    const cancelled = await this.cancel(id, 'admin', notifyClient);
+    const cancelled = await this.cancel(id, 'admin', notifyClient, refund);
     return this.toBooking(cancelled?.row ?? this.requireBooking(id));
   }
 

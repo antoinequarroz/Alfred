@@ -14,6 +14,8 @@ import { IcsError } from './ics.js';
 import { verifyPassword } from './password.js';
 import { ForbiddenError, NotFoundError, type CalendarService } from './service.js';
 import { toCalendarInfo, type Store } from './store.js';
+import { PaymentSettingsError, type PaymentsService } from './payments/service.js';
+import { registerPaymentRoutes } from './payments/routes.js';
 import { DEFAULT_VIDEO_LIMITS, registerAdminVideoRoutes, registerPublicVideoRoutes, type VideoLimits } from './video/routes.js';
 import { VideoError, VideoService } from './video/service.js';
 
@@ -38,6 +40,8 @@ export interface AppDeps {
   /** Visioconférence. Par défaut : un service sans serveur de visio (non configuré). */
   video?: VideoService;
   videoLimits?: Partial<VideoLimits>;
+  /** Paiement en ligne des acomptes (Stripe). Sans lui, les routes /api/payments n'existent pas. */
+  payments?: PaymentsService;
 }
 
 class BadRequest extends Error {}
@@ -127,6 +131,7 @@ export function createApp(deps: AppDeps): Hono {
   app.onError((err, c) => {
     if (err instanceof HTTPException) return c.json({ error: 'Requête refusée' }, err.status);
     if (err instanceof VideoError) return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}) }, err.status);
+    if (err instanceof PaymentSettingsError) return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}) }, err.status);
     if (err instanceof BookingError) return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}) }, err.status);
     if (err instanceof ConnectionError) {
       return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}), ...(err.reason ? { reason: err.reason } : {}) }, err.status);
@@ -237,6 +242,8 @@ export function createApp(deps: AppDeps): Hono {
   registerAdminVideoRoutes(app, video);
 
   // --- connexions (SMTP, CalDAV) --------------------------------------------
+
+  if (deps.payments) registerPaymentRoutes(app, deps.payments);
 
   if (deps.connections) registerConnectionRoutes(app, deps.connections, { ...DEFAULT_CONNECTION_LIMITS, ...deps.connectionLimits });
 

@@ -1,6 +1,7 @@
 import type {
   Booking, BookingAdminState, BookingHoursRange, BookingSettings, BookingType, BookingTypeInput,
   CalendarInfo, CaldavSaveResult, CaldavSettingsInput, ConnectionsState, ConnectionTest, EditScope, EventInput, Occurrence, PublicSlots,
+  PaymentSettingsInput, PaymentSettingsState,
   SmtpSaveResult, SmtpSettingsInput, SyncStatus, VideoAdminState, VideoRoom, VideoRoomInput, VideoSettings,
 } from '../../shared/types';
 
@@ -50,8 +51,9 @@ export const bookingApi = {
   setCalendarBlocks: (id: string, blocksBooking: boolean) =>
     request<CalendarInfo>('PATCH', `/api/booking/calendars/${encodeURIComponent(id)}`, { blocksBooking }),
   bookings: (scope: 'upcoming' | 'past') => request<Booking[]>('GET', `/api/booking/bookings?scope=${scope}&limit=200`),
-  cancelBooking: (id: string, notifyClient: boolean) =>
-    request<Booking>('POST', `/api/booking/bookings/${encodeURIComponent(id)}/cancel`, { notifyClient }),
+  cancelBooking: (id: string, notifyClient: boolean, refund = true) =>
+    request<Booking>('POST', `/api/booking/bookings/${encodeURIComponent(id)}/cancel`, { notifyClient, refund }),
+  refundBooking: (id: string) => request<Booking>('POST', `/api/booking/bookings/${encodeURIComponent(id)}/refund`, {}),
   resendConfirmation: (id: string) => request<Booking>('POST', `/api/booking/bookings/${encodeURIComponent(id)}/resend`, {}),
 };
 
@@ -64,6 +66,14 @@ export const connectionsApi = {
   saveCaldav: (input: CaldavSettingsInput) => request<CaldavSaveResult>('PUT', '/api/connections/caldav', input),
   testCaldav: (input: CaldavSettingsInput) => request<CaldavSaveResult>('POST', '/api/connections/caldav/test', input),
   clearCaldav: () => request<CaldavSaveResult>('DELETE', '/api/connections/caldav'),
+};
+
+/** Paiement en ligne des acomptes (Stripe). La clé n'est jamais renvoyée. */
+export const paymentsApi = {
+  state: () => request<PaymentSettingsState>('GET', '/api/payments'),
+  save: (input: PaymentSettingsInput) => request<{ state: PaymentSettingsState; test: ConnectionTest | null }>('PUT', '/api/payments', input),
+  test: () => request<{ state: PaymentSettingsState; test: ConnectionTest }>('POST', '/api/payments/test', {}),
+  clear: () => request<{ state: PaymentSettingsState }>('DELETE', '/api/payments'),
 };
 
 /** Visioconférence : réglages et salles (session requise). */

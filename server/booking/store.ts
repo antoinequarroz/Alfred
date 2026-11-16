@@ -1,4 +1,4 @@
-import type { BookingHoursRange, BookingMode, BookingSettings, BookingStatus, BookingStep, BookingType } from '../../shared/types.js';
+import type { BookingHoursRange, BookingMode, BookingSettings, BookingStatus, BookingStep, BookingType, PaymentStatus } from '../../shared/types.js';
 import { tx, type Db } from '../db.js';
 
 export interface BookingRow {
@@ -27,6 +27,43 @@ export interface BookingRow {
   mail_error: string | null;
   /** Début annoncé au client s'il diffère de start_utc (événement déplacé depuis), sinon null. */
   notified_start: string | null;
+  /** Acompte payé en ligne (centimes), null sans acompte. */
+  payment_amount_cents?: number | null;
+  payment_currency?: string | null;
+  payment_intent?: string | null;
+  payment_status?: PaymentStatus | null;
+  payment_error?: string | null;
+}
+
+export type HoldStatus = 'pending' | 'paid' | 'completed' | 'expired';
+
+/** Retenue d'un créneau pendant le paiement de l'acompte (voir server/db.ts, payment_holds). */
+export interface HoldRow {
+  id: string;
+  ref_hash: string;
+  status: HoldStatus;
+  type_id: string | null;
+  type_name: string;
+  mode: string;
+  location: string;
+  buffer_before_min: number;
+  buffer_after_min: number;
+  start_utc: string;
+  end_utc: string;
+  name: string;
+  email: string;
+  phone: string;
+  message: string;
+  token_hash: string;
+  cancel_token: string | null;
+  amount_cents: number;
+  currency: string;
+  checkout_id: string | null;
+  payment_intent: string | null;
+  booking_id: string | null;
+  created_at: string;
+  expires_at: string;
+  last_error: string | null;
 }
 
 interface TypeRow {
@@ -41,6 +78,7 @@ interface TypeRow {
   buffer_after_min: number;
   min_notice_hours: number;
   horizon_days: number;
+  deposit_cents: number | null;
   active: number;
   sort: number;
 }
@@ -60,6 +98,7 @@ function toType(r: TypeRow): BookingType {
     bufferAfterMin: r.buffer_after_min,
     minNoticeHours: r.min_notice_hours,
     horizonDays: r.horizon_days,
+    depositCents: r.deposit_cents ?? 0,
     active: r.active === 1,
     sort: r.sort,
   };
@@ -122,16 +161,16 @@ export class BookingStore {
     this.db
       .prepare(
         `INSERT INTO booking_types (id, slug, name, duration_min, description, mode, location, buffer_before_min,
-           buffer_after_min, min_notice_hours, horizon_days, active, sort)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           buffer_after_min, min_notice_hours, horizon_days, deposit_cents, active, sort)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET slug = excluded.slug, name = excluded.name, duration_min = excluded.duration_min,
            description = excluded.description, mode = excluded.mode, location = excluded.location,
            buffer_before_min = excluded.buffer_before_min, buffer_after_min = excluded.buffer_after_min,
            min_notice_hours = excluded.min_notice_hours, horizon_days = excluded.horizon_days,
-           active = excluded.active, sort = excluded.sort`,
+           deposit_cents = excluded.deposit_cents, active = excluded.active, sort = excluded.sort`,
       )
       .run(t.id, t.slug, t.name, t.durationMin, t.description, t.mode, t.location, t.bufferBeforeMin, t.bufferAfterMin,
-        t.minNoticeHours, t.horizonDays, t.active ? 1 : 0, t.sort);
+        t.minNoticeHours, t.horizonDays, t.depositCents, t.active ? 1 : 0, t.sort);
   }
 
   deleteType(id: string): void {
@@ -166,12 +205,13 @@ export class BookingStore {
       .prepare(
         `INSERT INTO bookings (id, type_id, type_name, location, buffer_before_min, buffer_after_min, event_id, event_uid, calendar_id,
            start_utc, end_utc, name, email, phone, message, status, token_hash, created_at, cancelled_at, cancelled_by, mail_error,
-           notified_start)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           notified_start, payment_amount_cents, payment_currency, payment_intent, payment_status, payment_error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(b.id, b.type_id, b.type_name, b.location, b.buffer_before_min, b.buffer_after_min, b.event_id, b.event_uid, b.calendar_id,
         b.start_utc, b.end_utc, b.name, b.email, b.phone, b.message, b.status, b.token_hash, b.created_at, b.cancelled_at,
-        b.cancelled_by, b.mail_error, b.notified_start);
+        b.cancelled_by, b.mail_error, b.notified_start, b.payment_amount_cents ?? null, b.payment_currency ?? null,
+        b.payment_intent ?? null, b.payment_status ?? null, b.payment_error ?? null);
   }
 
   getBooking(id: string): BookingRow | undefined {
@@ -243,5 +283,52 @@ export class BookingStore {
 
   setTokenHash(id: string, hash: string): void {
     this.db.prepare('UPDATE bookings SET token_hash = ? WHERE id = ?').run(hash, id);
+  }
+
+  setPaymentStatus(id: string, status: PaymentStatus, error: string | null): void {
+    this.db.prepare('UPDATE bookings SET payment_status = ?, payment_error = ? WHERE id = ?').run(status, error, id);
+  }
+
+  // --- retenues pendant le paiement ------------------------------------------
+
+  insertHold(h: HoldRow): void {
+    const cols = Object.keys(h) as (keyof HoldRow)[];
+    this.db
+      .prepare(`INSERT INTO payment_holds (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+      .run(...cols.map((c) => h[c]));
+  }
+
+  getHold(id: string): HoldRow | undefined {
+    return this.db.prepare('SELECT * FROM payment_holds WHERE id = ?').get(id) as unknown as HoldRow | undefined;
+  }
+
+  getHoldByRefHash(hash: string): HoldRow | undefined {
+    return this.db.prepare('SELECT * FROM payment_holds WHERE ref_hash = ?').get(hash) as unknown as HoldRow | undefined;
+  }
+
+  /** Retenues encore actives (paiement en cours, ou payé mais réservation pas encore enregistrée). */
+  activeHolds(): HoldRow[] {
+    return this.db.prepare("SELECT * FROM payment_holds WHERE status IN ('pending', 'paid') ORDER BY created_at").all() as unknown as HoldRow[];
+  }
+
+  /** Retenues actives qui recoupent [from, to) : elles bloquent le créneau comme une réservation. */
+  activeHoldsBetween(fromIso: string, toIso: string): HoldRow[] {
+    return this.db
+      .prepare("SELECT * FROM payment_holds WHERE status IN ('pending', 'paid') AND start_utc < ? AND end_utc > ?")
+      .all(toIso, fromIso) as unknown as HoldRow[];
+  }
+
+  /** Retenues sans réservation créées pour une adresse depuis un instant donné (plafond par adresse). */
+  countHoldsForEmailSince(email: string, sinceIso: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM payment_holds WHERE status <> 'completed' AND created_at > ? AND email = ? COLLATE NOCASE")
+      .get(sinceIso, email) as { n: number };
+    return row.n;
+  }
+
+  updateHold(id: string, patch: Partial<Omit<HoldRow, 'id'>>): void {
+    const cols = Object.keys(patch) as (keyof typeof patch)[];
+    if (cols.length === 0) return;
+    this.db.prepare(`UPDATE payment_holds SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`).run(...cols.map((c) => patch[c] ?? null), id);
   }
 }

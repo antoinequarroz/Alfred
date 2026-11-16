@@ -20,6 +20,8 @@ export interface BookingLimits {
   bookGlobal: [number, number];
   /** Annulations par jeton, par adresse IP. */
   cancel: [number, number];
+  /** Suivi d'un paiement (chaque appel peut interroger Stripe), par adresse IP. */
+  payment: [number, number];
 }
 
 export const DEFAULT_BOOKING_LIMITS: BookingLimits = {
@@ -30,6 +32,7 @@ export const DEFAULT_BOOKING_LIMITS: BookingLimits = {
   bookOk: [5, 3_600_000],
   bookGlobal: [60, 3_600_000],
   cancel: [10, 3_600_000],
+  payment: [60, 60_000],
 };
 
 /**
@@ -56,6 +59,7 @@ export function registerPublicBookingRoutes(app: Hono, booking: BookingService, 
   const bookOk = new RateLimiter(...limits.bookOk);
   const bookGlobal = new RateLimiter(...limits.bookGlobal, 1);
   const cancel = new RateLimiter(...limits.cancel);
+  const payment = new RateLimiter(...limits.payment);
 
   const tooMany = (c: Context, retryAfterSec?: number): Response => {
     if (retryAfterSec) c.header('Retry-After', String(retryAfterSec));
@@ -119,6 +123,15 @@ export function registerPublicBookingRoutes(app: Hono, booking: BookingService, 
     limited(c, cancel) ?? c.json(await booking.cancelByToken(c.req.param('token'))),
   );
 
+  // Retour de la page de paiement : où en est le paiement (et le rendez-vous) ?
+  app.get('/api/public/booking/payment/:ref', async (c) =>
+    limited(c, payment) ?? c.json(await booking.paymentStatus(c.req.param('ref'))),
+  );
+  // Le client a quitté la page de paiement sans payer : le créneau est libéré tout de suite.
+  app.post('/api/public/booking/payment/:ref/abandon', async (c) =>
+    limited(c, payment) ?? c.json(await booking.abandonPayment(c.req.param('ref'))),
+  );
+
   // La route « introuvable » des /api/public/* est posée par createApp, après les routes publiques de la visio.
 }
 
@@ -166,9 +179,10 @@ export function registerAdminBookingRoutes(app: Hono, booking: BookingService, s
     return c.json(booking.listBookings(scope, Math.max(1, num('limit', 100, 500)), num('offset', 0, 1_000_000)));
   });
   app.post('/api/booking/bookings/:id/cancel', async (c) => {
-    const b = (await body(c)) as { notifyClient?: unknown } | null;
-    return c.json(await booking.cancelByAdmin(c.req.param('id'), b?.notifyClient !== false));
+    const b = (await body(c)) as { notifyClient?: unknown; refund?: unknown } | null;
+    return c.json(await booking.cancelByAdmin(c.req.param('id'), b?.notifyClient !== false, b?.refund !== false));
   });
+  app.post('/api/booking/bookings/:id/refund', async (c) => c.json(await booking.refundBooking(c.req.param('id'))));
   app.post('/api/booking/bookings/:id/resend', async (c) => c.json(await booking.resendConfirmation(c.req.param('id'))));
   // L'e-mail d'essai part par POST /api/connections/smtp/test, seule route d'essai : sa limite de débit ne se contourne pas par ici.
 }

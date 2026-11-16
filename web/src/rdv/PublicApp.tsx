@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import type { BookingConfirmation, BookingMode, BookingRequest, PublicBooking, PublicBookingInfo, PublicBookingType, PublicSlots } from '../../../shared/types';
+import type {
+  BookingConfirmation, BookingMode, BookingRequest, PublicBooking, PublicBookingInfo, PublicBookingType, PublicPaymentStatus, PublicSlots,
+} from '../../../shared/types';
+import { formatAmount } from '../../../shared/money';
 import { ApiError, requestJson } from '../http';
 import { AlertIcon, ArrowLeftIcon, CalendarIcon, CheckIcon, Chevron, ClockIcon, PhoneIcon, PinIcon, UserIcon, VideoIcon } from '../icons';
 import { MoonIcon, SunIcon, useTheme } from '../theme';
@@ -18,7 +21,22 @@ const publicApi = {
   book: (body: BookingRequest) => requestJson<BookingConfirmation>('POST', `${BASE}/book`, body),
   getByToken: (token: string) => requestJson<PublicBooking>('GET', `${BASE}/cancel/${token || '-'}`),
   cancel: (token: string) => requestJson<PublicBooking>('POST', `${BASE}/cancel/${token || '-'}`),
+  payment: (ref: string) => requestJson<PublicPaymentStatus>('GET', `${BASE}/payment/${ref || '-'}`),
+  abandon: (ref: string) => requestJson<PublicPaymentStatus>('POST', `${BASE}/payment/${ref || '-'}/abandon`),
 };
+
+/** Ce que le navigateur garde pendant le paiement : le lien d'annulation et l'adresse, pour l'écran de retour. */
+const PAYMENT_KEY = (ref: string) => `alfred-paiement-${ref}`;
+interface PendingPayment { cancelUrl: string; email: string }
+
+function readPending(ref: string): PendingPayment | null {
+  try {
+    const raw = sessionStorage.getItem(PAYMENT_KEY(ref));
+    return raw ? (JSON.parse(raw) as PendingPayment) : null;
+  } catch {
+    return null;
+  }
+}
 
 /** Message d'erreur pour le client (vouvoiement), d'après le code de l'API. */
 function errorText(err: unknown): string {
@@ -26,6 +44,7 @@ function errorText(err: unknown): string {
     if (err.code === 'network') return 'Connexion impossible. Vérifiez votre réseau, puis réessayez.';
     if (err.code === 'rate_limited') return 'Trop de demandes en peu de temps. Patientez quelques minutes, puis réessayez.';
     if (err.code === 'calendar_unavailable' || err.code === 'busy') return 'Le service est momentanément indisponible. Rien n’a été enregistré : réessayez dans un instant.';
+    if (err.code === 'payment_unavailable') return 'Le paiement en ligne est momentanément indisponible. Rien n’a été enregistré : réessayez dans un instant.';
     if (err.code === 'rejected') return 'Votre demande n’a pas pu être envoyée. Rechargez la page, puis réessayez.';
     if (err.status >= 500) return 'Une erreur est survenue. Réessayez dans un instant.';
     return err.message;
@@ -37,6 +56,17 @@ function initials(name: string): string {
   const words = name.trim().split(/\s+/).filter(Boolean);
   return ((words[0]?.[0] ?? 'A') + (words.length > 1 ? words[words.length - 1][0] : '')).toUpperCase();
 }
+
+function CardIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="1.75" y="3.25" width="12.5" height="9.5" rx="1.75" />
+      <path d="M1.75 6.5h12.5M4.5 10h2.5" />
+    </svg>
+  );
+}
+
+const depositOf = (t: Pick<PublicBookingType, 'depositCents' | 'currency'>) => (t.depositCents > 0 ? formatAmount(t.depositCents, t.currency) : '');
 
 function ModeIcon({ mode }: { mode: BookingMode }) {
   if (mode === 'telephone') return <PhoneIcon />;
@@ -130,8 +160,10 @@ function Steps({ current }: { current: 1 | 2 | 3 }) {
 }
 
 /** Récapitulatif d'un rendez-vous : type, date, heure, lieu. */
-function Recap({ typeName, start, end, timezone, location, mode, name }: {
+function Recap({ typeName, start, end, timezone, location, mode, name, deposit }: {
   typeName: string; start: string; end: string; timezone: string; location: string; mode?: BookingMode; name?: string;
+  /** Ligne « Acompte » en clair (« CHF 50.00, payé en ligne »). */
+  deposit?: string;
 }) {
   return (
     <dl className="rdv-recap">
@@ -160,6 +192,12 @@ function Recap({ typeName, start, end, timezone, location, mode, name }: {
         <div>
           <dt><UserIcon /><span className="sr-only">Nom</span></dt>
           <dd>{name}</dd>
+        </div>
+      )}
+      {deposit && (
+        <div>
+          <dt><CardIcon /><span className="sr-only">Acompte</span></dt>
+          <dd>{deposit}</dd>
         </div>
       )}
     </dl>
@@ -414,6 +452,7 @@ function BookingForm({ type, start, timezone, values, onChange, onBack, onDone, 
   const [busy, setBusy] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
   const end = new Date(new Date(start).getTime() + type.durationMin * 60_000).toISOString();
+  const deposit = depositOf(type);
   const set = (patch: Partial<FormValues>) => {
     onChange({ ...values, ...patch });
     const key = Object.keys(patch)[0];
@@ -435,6 +474,17 @@ function BookingForm({ type, start, timezone, values, onChange, onBack, onDone, 
         typeSlug: type.slug, start, name: values.name.trim(), email: values.email.trim(),
         phone: values.phone.trim(), message: values.message.trim(), website: values.trap,
       });
+      if (confirmation.payment) {
+        // Acompte : le créneau est retenu, direction la page de paiement. Le lien d'annulation reste
+        // dans cet onglet pour l'écran de retour (il part aussi par e-mail une fois le paiement reçu).
+        try {
+          sessionStorage.setItem(PAYMENT_KEY(confirmation.payment.ref), JSON.stringify({ cancelUrl: confirmation.cancelUrl, email: values.email.trim() }));
+        } catch {
+          // stockage indisponible (navigation privée) : l'e-mail de confirmation suffira
+        }
+        window.location.assign(confirmation.payment.url);
+        return;
+      }
       onDone(confirmation, values.email.trim());
     } catch (err) {
       if (err instanceof ApiError && err.code === 'slot_unavailable') return onSlotLost();
@@ -452,7 +502,8 @@ function BookingForm({ type, start, timezone, values, onChange, onBack, onDone, 
 
   return (
     <form ref={formRef} className="rdv-form" onSubmit={(e) => void submit(e)} noValidate>
-      <Recap typeName={`${type.name} · ${durationLabel(type.durationMin)}`} start={start} end={end} timezone={timezone} location={type.locationLabel} mode={type.mode} />
+      <Recap typeName={`${type.name} · ${durationLabel(type.durationMin)}`} start={start} end={end} timezone={timezone} location={type.locationLabel} mode={type.mode}
+        deposit={deposit ? `Acompte de ${deposit} à payer maintenant` : undefined} />
       <button type="button" className="rdv-link" onClick={onBack}>Choisir un autre créneau</button>
 
       <Field label="Nom et prénom" error={errors.name}>
@@ -476,8 +527,13 @@ function BookingForm({ type, start, timezone, values, onChange, onBack, onDone, 
       {failure && <Notice kind="error">{failure}</Notice>}
       <button className="btn primary rdv-submit" disabled={busy} aria-busy={busy}>
         {busy && <span className="rdv-spinner light" aria-hidden="true" />}
-        {busy ? 'Réservation en cours…' : 'Confirmer le rendez-vous'}
+        {busy ? (deposit ? 'Ouverture du paiement…' : 'Réservation en cours…') : deposit ? `Payer l’acompte de ${deposit}` : 'Confirmer le rendez-vous'}
       </button>
+      {deposit && (
+        <p className="rdv-fine">
+          Paiement sécurisé par carte ou TWINT sur la page de Stripe. Le créneau vous est réservé pendant 30 minutes ; le rendez-vous est confirmé dès le paiement reçu.
+        </p>
+      )}
       <p className="rdv-fine">Vos coordonnées servent uniquement à l’organisation de ce rendez-vous.</p>
     </form>
   );
@@ -657,6 +713,7 @@ function BookingFlow() {
                       <span className="rdv-type-meta">
                         <span><ClockIcon />{durationLabel(t.durationMin)}</span>
                         {t.locationLabel && <span><ModeIcon mode={t.mode} />{t.locationLabel}</span>}
+                        {t.depositCents > 0 && <span><CardIcon />Acompte {depositOf(t)}</span>}
                       </span>
                       {t.description && <span className="rdv-type-desc">{t.description}</span>}
                     </span>
@@ -678,6 +735,7 @@ function BookingFlow() {
         <p className="rdv-type-meta">
           <span><ClockIcon />{durationLabel(type.durationMin)}</span>
           {type.locationLabel && <span><ModeIcon mode={type.mode} />{type.locationLabel}</span>}
+          {type.depositCents > 0 && <span><CardIcon />Acompte {depositOf(type)}</span>}
         </p>
       </div>
       {info.types.length > 1 && <button type="button" className="btn small" onClick={backToTypes}>Changer</button>}
@@ -795,7 +853,23 @@ function CancelPage({ token }: { token: string }) {
     }
   };
 
-  const recap = (b: PublicBooking) => <Recap typeName={b.typeName} start={b.start} end={b.end} timezone={b.timezone} location={b.locationLabel} name={b.name} />;
+  const recap = (b: PublicBooking) => (
+    <Recap typeName={b.typeName} start={b.start} end={b.end} timezone={b.timezone} location={b.locationLabel} name={b.name}
+      deposit={b.deposit ? `${formatAmount(b.deposit.amountCents, b.deposit.currency)}, ${b.deposit.refunded ? 'remboursé' : 'payé en ligne'}` : undefined} />
+  );
+  /** Ce que devient l'acompte si le client annule maintenant. */
+  const refundNote = (b: PublicBooking) => {
+    if (!b.deposit || b.deposit.refunded) return null;
+    const amount = formatAmount(b.deposit.amountCents, b.deposit.currency);
+    if (b.deposit.refundOnCancel) return <Notice kind="info">Votre acompte de {amount} vous sera remboursé automatiquement.</Notice>;
+    return (
+      <Notice kind="warn">
+        {b.deposit.refundHours === null
+          ? <>L’acompte de {amount} n’est pas remboursé en cas d’annulation.</>
+          : <>L’acompte de {amount} n’est remboursé que pour une annulation au moins {b.deposit.refundHours} heures avant le rendez-vous : il ne vous sera pas remboursé.</>}
+      </Notice>
+    );
+  };
   const again = <a className="btn" href="/rdv">Prendre un nouveau rendez-vous</a>;
 
   return (
@@ -816,6 +890,7 @@ function CancelPage({ token }: { token: string }) {
           <>
             <StepTitle sub="Vérifiez qu’il s’agit bien du rendez-vous à annuler. Cette action est définitive : le créneau sera libéré.">Annuler ce rendez-vous ?</StepTitle>
             {recap(state.booking)}
+            {refundNote(state.booking)}
             {state.failure && <Notice kind="error">{state.failure}</Notice>}
             <div className="rdv-actions">
               <button type="button" className="btn danger-solid" disabled={state.busy} aria-busy={state.busy} onClick={() => void cancel(state.booking)}>
@@ -838,6 +913,9 @@ function CancelPage({ token }: { token: string }) {
             <StepTitle sub={state.booking.emailSent ? 'Le créneau est libéré. Un e-mail vous confirme l’annulation.' : 'Le créneau est libéré. Vous n’avez plus rien à faire.'}>
               Votre rendez-vous est annulé
             </StepTitle>
+            {state.booking.deposit?.refunded && (
+              <Notice kind="info">Votre acompte de {formatAmount(state.booking.deposit.amountCents, state.booking.deposit.currency)} vous est remboursé. Selon votre banque, il apparaît sur votre compte d’ici 5 à 10 jours.</Notice>
+            )}
             <div className="rdv-struck">{recap(state.booking)}</div>
             <div className="rdv-actions">{again}</div>
           </>
@@ -849,5 +927,151 @@ function CancelPage({ token }: { token: string }) {
 
 export function PublicApp() {
   const cancel = /^\/rdv\/annulation\/([^/]*)\/?$/.exec(location.pathname);
-  return cancel ? <CancelPage token={cancel[1]} /> : <BookingFlow />;
+  if (cancel) return <CancelPage token={cancel[1]} />;
+  const payment = /^\/rdv\/paiement\/([^/]*)\/?$/.exec(location.pathname);
+  if (payment) return <PaymentPage paymentRef={payment[1]} abandoned={new URLSearchParams(location.search).has('abandon')} />;
+  return <BookingFlow />;
+}
+
+// --- retour de la page de paiement ------------------------------------------------------
+
+type PaymentView =
+  | { kind: 'loading' }
+  | { kind: 'gone' }
+  | { kind: 'error'; message: string }
+  | { kind: 'status'; status: PublicPaymentStatus };
+
+/**
+ * Retour de Stripe : le paiement est vérifié auprès de Stripe par le serveur. Tant qu'il est en
+ * cours (ou payé mais pas encore enregistré), la page revérifie toute seule.
+ */
+function PaymentPage({ paymentRef, abandoned }: { paymentRef: string; abandoned: boolean }) {
+  const [view, setView] = useState<PaymentView>({ kind: 'loading' });
+  const [name, setName] = useState('');
+  const pending = useMemo(() => readPending(paymentRef), [paymentRef]);
+  const tries = useRef(0);
+
+  useEffect(() => {
+    publicApi.info().then((info) => setName(info.publicName), () => undefined);
+    document.title = 'Paiement de l’acompte';
+  }, []);
+
+  const check = useCallback(async (abandon: boolean) => {
+    try {
+      const status = await (abandon ? publicApi.abandon(paymentRef) : publicApi.payment(paymentRef));
+      setView({ kind: 'status', status });
+    } catch (err) {
+      setView(err instanceof ApiError && err.status === 404 ? { kind: 'gone' } : { kind: 'error', message: errorText(err) });
+    }
+  }, [paymentRef]);
+
+  useEffect(() => {
+    void check(abandoned);
+    // L'adresse de retour ne garde pas « abandon » : un rechargement ne refait pas la demande.
+    if (abandoned) history.replaceState(null, '', `/rdv/paiement/${paymentRef}`);
+  }, [check, abandoned, paymentRef]);
+
+  const waiting = view.kind === 'status' && (view.status.status === 'processing' || (view.status.status === 'pending' && !abandoned));
+  useEffect(() => {
+    if (!waiting || tries.current >= 40) return;
+    const t = setTimeout(() => {
+      tries.current++;
+      void check(false);
+    }, tries.current < 10 ? 2000 : 5000);
+    return () => clearTimeout(t);
+  }, [waiting, view, check]);
+
+  let cancelPath: string | null = null;
+  if (pending?.cancelUrl) {
+    try {
+      cancelPath = new URL(pending.cancelUrl).pathname;
+    } catch {
+      cancelPath = null;
+    }
+  }
+
+  const again = <a className="btn" href="/rdv">Prendre un rendez-vous</a>;
+  const status = view.kind === 'status' ? view.status : null;
+  const b = status?.booking;
+  const amount = status ? formatAmount(status.amountCents, status.currency) : '';
+  const recap = b && (
+    <Recap typeName={b.typeName} start={b.start} end={b.end} timezone={b.timezone} location={b.locationLabel} name={b.name}
+      deposit={status?.status === 'confirmed' ? `${amount}, payé en ligne` : `${amount} à payer`} />
+  );
+
+  return (
+    <Shell name={name}>
+      <div className="rdv-panel narrow rdv-done">
+        {view.kind === 'loading' && <Loading label="Vérification du paiement…" />}
+        {view.kind === 'error' && (
+          <Notice kind="error" action={<button type="button" className="btn" onClick={() => { setView({ kind: 'loading' }); void check(false); }}>Réessayer</button>}>{view.message}</Notice>
+        )}
+        {view.kind === 'gone' && (
+          <>
+            <span className="rdv-badge muted" aria-hidden="true"><CalendarIcon /></span>
+            <StepTitle sub="Ce paiement est introuvable.">Lien non valable</StepTitle>
+            <div className="rdv-actions">{again}</div>
+          </>
+        )}
+        {status?.status === 'confirmed' && b && b.status === 'confirmed' && (
+          <>
+            <span className="rdv-badge ok" aria-hidden="true"><CheckIcon /></span>
+            <StepTitle sub={!status.emailSent
+              ? 'Acompte reçu, merci. Notez la date et l’heure ci-dessous : l’e-mail de confirmation n’a pas pu partir.'
+              : pending?.email
+              ? <>Acompte reçu, merci. Un e-mail de confirmation part à <strong>{pending.email}</strong>, avec le récapitulatif, un fichier pour votre agenda et le lien d’annulation.</>
+              : 'Acompte reçu, merci. Un e-mail de confirmation vous est envoyé, avec le récapitulatif et le lien d’annulation.'}
+            >
+              Votre rendez-vous est confirmé
+            </StepTitle>
+            {recap}
+            {b.videoUrl && (
+              <Notice kind="info" action={<a className="btn primary" href={b.videoUrl} target="_blank" rel="noopener">Ouvrir la visio</a>}>
+                À l’heure du rendez-vous, rejoignez la visio depuis ce lien (aussi dans l’e-mail). Rien à installer.
+              </Notice>
+            )}
+            <div className="rdv-actions">
+              {again}
+              {cancelPath && <a className="rdv-link danger" href={cancelPath}>Annuler ce rendez-vous</a>}
+            </div>
+          </>
+        )}
+        {status?.status === 'confirmed' && b && b.status === 'cancelled' && (
+          <>
+            <StepTitle sub="Ce rendez-vous a été annulé depuis.">Rendez-vous annulé</StepTitle>
+            <div className="rdv-struck">{recap}</div>
+            <div className="rdv-actions">{again}</div>
+          </>
+        )}
+        {(status?.status === 'processing' || (status?.status === 'pending' && !abandoned)) && (
+          <>
+            <Loading label={status.status === 'processing' ? 'Paiement reçu, enregistrement du rendez-vous…' : 'Vérification du paiement…'} />
+            {recap}
+            {tries.current >= 40 && (
+              <Notice kind="warn">
+                {status.status === 'processing'
+                  ? 'Votre paiement est bien reçu. L’enregistrement prend plus de temps que prévu : vous recevrez la confirmation par e-mail.'
+                  : 'Le paiement n’est pas encore confirmé. Si vous avez payé, la confirmation vous parviendra par e-mail ; sinon le créneau sera libéré au bout de 30 minutes.'}
+              </Notice>
+            )}
+          </>
+        )}
+        {(status?.status === 'expired' || (status?.status === 'pending' && abandoned)) && (
+          <>
+            <span className="rdv-badge muted" aria-hidden="true"><CalendarIcon /></span>
+            <StepTitle sub={status.status === 'expired'
+              ? 'Aucun montant n’a été débité et le créneau a été libéré.'
+              : 'Aucun montant n’a été débité. Le créneau reste retenu quelques minutes, puis il est libéré.'}
+            >
+              Paiement non effectué
+            </StepTitle>
+            {recap}
+            <div className="rdv-actions">
+              <a className="btn primary" href="/rdv">Choisir un créneau</a>
+            </div>
+          </>
+        )}
+      </div>
+    </Shell>
+  );
 }

@@ -7,6 +7,8 @@ import { AlertIcon, CheckIcon, Chevron, CloseIcon, CopyIcon, ExternalIcon, MenuI
 import { hoursProblems, WEEKDAYS } from './hours';
 import { SmtpCard, smtpDraftDirty, useConnections, type SmtpDraft } from '../settings/ConnectionCards';
 import { Card, Fld } from './ui';
+import { PaymentCard, usePayments } from './PaymentCard';
+import { formatAmount } from '../../../shared/money';
 import { dateTimeShortIn, dayKeyIn, dayLabel, durationLabel, timeIn } from './tz';
 import './rdv.css';
 
@@ -88,6 +90,15 @@ function Modal({ title, onClose, children, small }: { title: string; onClose: ()
 interface TypeDraft {
   name: string; durationMin: string; mode: BookingMode; location: string; description: string;
   bufferBeforeMin: string; bufferAfterMin: string; minNoticeHours: string; horizonDays: string; slug: string; active: boolean;
+  /** Acompte en francs, tel que saisi (« 50 », « 50.50 ») ; vide = aucun. */
+  deposit: string;
+}
+
+/** « 50 », « 50.5 », « 50,50 » → centimes ; '' → 0 ; NaN si illisible. */
+function depositCents(text: string): number {
+  const t = text.trim().replace(',', '.').replace(/^CHF\s*/i, '');
+  if (t === '') return 0;
+  return /^\d{1,5}(\.\d{1,2})?$/.test(t) ? Math.round(Number(t) * 100) : Number.NaN;
 }
 
 function toDraft(t: BookingType | null): TypeDraft {
@@ -95,10 +106,11 @@ function toDraft(t: BookingType | null): TypeDraft {
     name: t?.name ?? '', durationMin: String(t?.durationMin ?? 30), mode: t?.mode ?? 'cabinet', location: t?.location ?? '',
     description: t?.description ?? '', bufferBeforeMin: String(t?.bufferBeforeMin ?? 0), bufferAfterMin: String(t?.bufferAfterMin ?? 0),
     minNoticeHours: String(t?.minNoticeHours ?? 12), horizonDays: String(t?.horizonDays ?? 60), slug: t?.slug ?? '', active: t?.active ?? true,
+    deposit: t?.depositCents ? (t.depositCents / 100).toFixed(2) : '',
   };
 }
 
-function TypeDialog({ type, onSaved, onDeleted, onClose }: { type: BookingType | null; onSaved: () => void; onDeleted: () => void; onClose: () => void }) {
+function TypeDialog({ type, paymentsReady, onSaved, onDeleted, onClose }: { type: BookingType | null; paymentsReady: boolean; onSaved: () => void; onDeleted: () => void; onClose: () => void }) {
   const [d, setD] = useState(() => toDraft(type));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [failure, setFailure] = useState<string | null>(null);
@@ -117,6 +129,13 @@ function TypeDialog({ type, onSaved, onDeleted, onClose }: { type: BookingType |
       bufferBeforeMin: num(d.bufferBeforeMin), bufferAfterMin: num(d.bufferAfterMin), minNoticeHours: num(d.minNoticeHours),
       horizonDays: num(d.horizonDays), active: d.active,
     };
+    const cents = depositCents(d.deposit);
+    if (Number.isNaN(cents)) {
+      setErrors({ depositCents: 'Montant en francs, par exemple 50 ou 50.50' });
+      setBusy(false);
+      return;
+    }
+    if (cents !== (type?.depositCents ?? 0)) input.depositCents = cents;
     if (type && d.slug.trim() !== type.slug) input.slug = d.slug.trim();
     try {
       if (type) await bookingApi.updateType(type.id, input);
@@ -180,6 +199,17 @@ function TypeDialog({ type, onSaved, onDeleted, onClose }: { type: BookingType |
           <Fld label="Réservable jusqu’à (jours)" error={errors.horizonDays}>
             {(id) => <input id={id} type="number" inputMode="numeric" min={1} max={365} value={d.horizonDays} onChange={(e) => set({ horizonDays: e.target.value })} />}
           </Fld>
+          <Fld
+            label="Acompte en ligne (CHF)" error={errors.depositCents} className="span-2"
+            hint={paymentsReady || (type?.depositCents ?? 0) > 0
+              ? 'Payé par carte ou TWINT au moment de réserver ; le rendez-vous n’est confirmé qu’une fois payé. Laisse vide pour ne rien demander.'
+              : 'Pour demander un acompte, enregistre d’abord ta clé Stripe dans Réglages > Paiement en ligne.'}
+          >
+            {(id) => (
+              <input id={id} type="text" inputMode="decimal" placeholder={paymentsReady ? 'Aucun' : 'Paiement en ligne non configuré'} maxLength={9}
+                disabled={!paymentsReady && !(type?.depositCents)} value={d.deposit} onChange={(e) => set({ deposit: e.target.value })} />
+            )}
+          </Fld>
           {type && (
             <Fld label="Identifiant du lien" error={errors.slug} hint={`Lien direct : /rdv/${d.slug || '…'}. Le changer casse les liens déjà partagés.`} className="span-2">
               {(id) => <input id={id} type="text" value={d.slug} maxLength={50} spellCheck={false} autoCapitalize="none" onChange={(e) => set({ slug: e.target.value })} />}
@@ -211,7 +241,7 @@ function TypeDialog({ type, onSaved, onDeleted, onClose }: { type: BookingType |
   );
 }
 
-function TypesTab({ types, reload, notify }: { types: BookingType[]; reload: () => Promise<void>; notify: (msg: string) => void }) {
+function TypesTab({ types, paymentsReady, reload, notify }: { types: BookingType[]; paymentsReady: boolean; reload: () => Promise<void>; notify: (msg: string) => void }) {
   const [editing, setEditing] = useState<BookingType | 'new' | null>(null);
   const [local, setLocal] = useState(types);
   useEffect(() => setLocal(types), [types]);
@@ -259,6 +289,7 @@ function TypesTab({ types, reload, notify }: { types: BookingType[]; reload: () 
                     {durationLabel(t.durationMin)} · {modeLabel(t) || 'Lieu à préciser'}
                     {(t.bufferBeforeMin > 0 || t.bufferAfterMin > 0) && ` · tampons ${t.bufferBeforeMin}/${t.bufferAfterMin} min`}
                     {` · préavis ${t.minNoticeHours} h · jusqu’à ${t.horizonDays} j`}
+                    {t.depositCents > 0 && ` · acompte ${formatAmount(t.depositCents, 'CHF')}`}
                   </p>
                   <p className="bk-meta mono">/rdv/{t.slug}</p>
                 </div>
@@ -272,6 +303,7 @@ function TypesTab({ types, reload, notify }: { types: BookingType[]; reload: () 
       {editing && (
         <TypeDialog
           type={editing === 'new' ? null : editing}
+          paymentsReady={paymentsReady}
           onClose={() => setEditing(null)}
           onSaved={() => { setEditing(null); void reload(); }}
           onDeleted={() => { setEditing(null); void reload(); }}
@@ -525,9 +557,11 @@ function SettingsCard({ state, calendars, draft, setDraft, onSaved, notify }: {
 
 // --- réservations --------------------------------------------------------------
 
-function BookingRow({ b, timezone, mailConfigured, onCancel, onResend }: {
-  b: Booking; timezone: string; mailConfigured: boolean; onCancel: (b: Booking) => void; onResend: (b: Booking) => void;
+function BookingRow({ b, timezone, mailConfigured, onCancel, onResend, onRefund }: {
+  b: Booking; timezone: string; mailConfigured: boolean; onCancel: (b: Booking) => void; onResend: (b: Booking) => void; onRefund: (b: Booking) => void;
 }) {
+  const pay = b.payment;
+  const amount = pay ? formatAmount(pay.amountCents, pay.currency) : '';
   const confirmed = b.status === 'confirmed';
   const upcoming = confirmed && new Date(b.end).getTime() > Date.now();
   return (
@@ -562,7 +596,16 @@ function BookingRow({ b, timezone, mailConfigured, onCancel, onResend }: {
             </span>
           )}
           {b.mailError && <span className="tag warn"><AlertIcon />{b.mailError}</span>}
+          {pay && pay.status === 'paid' && <span className="tag ok">Acompte payé : {amount}</span>}
+          {pay && pay.status === 'refunded' && <span className="tag">Acompte remboursé : {amount}</span>}
+          {pay && pay.status === 'refund_failed' && <span className="tag danger" title={pay.error ?? undefined}><AlertIcon />Remboursement de {amount} en échec{pay.error ? ` : ${pay.error.replace(/^Remboursement en échec : /, '')}` : ''}</span>}
+          {pay?.dashboardUrl && <a className="bk-meta" href={pay.dashboardUrl} target="_blank" rel="noopener">Voir dans Stripe</a>}
         </div>
+        {pay && (pay.status === 'refund_failed' || (pay.status === 'paid' && !confirmed)) && (
+          <p className="bk-hint">
+            <button type="button" className="btn ghost small" onClick={() => onRefund(b)}>{pay.status === 'refund_failed' ? 'Réessayer le remboursement' : `Rembourser ${amount}`}</button>
+          </p>
+        )}
         {b.eventState === 'missing' && <p className="bk-hint">Le créneau reste pris. Annule la réservation pour prévenir le client et libérer le créneau.</p>}
         {b.eventState === 'moved' && (
           <p className="bk-hint">
@@ -582,13 +625,15 @@ function BookingRow({ b, timezone, mailConfigured, onCancel, onResend }: {
 
 function CancelDialog({ b, timezone, mailConfigured, onDone, onClose }: { b: Booking; timezone: string; mailConfigured: boolean; onDone: () => void; onClose: () => void }) {
   const [notifyClient, setNotifyClient] = useState(mailConfigured);
+  const paid = b.payment?.status === 'paid';
+  const [refund, setRefund] = useState(true);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const confirm = async () => {
     setBusy(true);
     setFailure(null);
     try {
-      await bookingApi.cancelBooking(b.id, notifyClient);
+      await bookingApi.cancelBooking(b.id, notifyClient, paid && refund);
       onDone();
     } catch (err) {
       setFailure(message(err));
@@ -605,6 +650,12 @@ function CancelDialog({ b, timezone, mailConfigured, onDone, onClose }: { b: Boo
         Prévenir le client par e-mail
       </label>
       {!mailConfigured && <p className="bk-hint">L’envoi d’e-mails n’est pas configuré : pense à prévenir {b.name} toi-même.</p>}
+      {paid && b.payment && (
+        <label className="check">
+          <input type="checkbox" checked={refund} onChange={(e) => setRefund(e.target.checked)} />
+          Rembourser l’acompte de {formatAmount(b.payment.amountCents, b.payment.currency)}
+        </label>
+      )}
       {failure && <p className="form-error" role="alert">{failure}</p>}
       <div className="actions">
         <span className="spacer" />
@@ -630,6 +681,7 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
    */
   const [mailFocus, setMailFocus] = useState(() => (location.hash === MAIL_HASH ? 1 : 0));
   const [smtpDraft, setSmtpDraft] = useState<SmtpDraft | null>(null);
+  const payments = usePayments();
   const [state, setState] = useState<BookingAdminState | null>(null);
   const [types, setTypes] = useState<BookingType[]>([]);
   const [hours, setHours] = useState<BookingHoursRange[]>([]);
@@ -726,6 +778,16 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
     try {
       await bookingApi.setCalendarBlocks(c.id, blocksBooking);
       onCalendarChanged();
+    } catch (err) {
+      notify(message(err));
+    }
+    void reload();
+  };
+
+  const refund = async (b: Booking) => {
+    try {
+      await bookingApi.refundBooking(b.id);
+      notify(`Acompte remboursé à ${b.name}`);
     } catch (err) {
       notify(message(err));
     }
@@ -835,13 +897,13 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
                   ) : (
                     <ul className="bk-list">
                       {list.map((b) => (
-                        <BookingRow key={b.id} b={b} timezone={state.timezone} mailConfigured={state.mail.configured} onCancel={setCancelling} onResend={(x) => void resend(x)} />
+                        <BookingRow key={b.id} b={b} timezone={state.timezone} mailConfigured={state.mail.configured} onCancel={setCancelling} onResend={(x) => void resend(x)} onRefund={(x) => void refund(x)} />
                       ))}
                     </ul>
                   )}
                 </Card>
               )}
-              {tab === 'types' && <TypesTab types={types} reload={reload} notify={notify} />}
+              {tab === 'types' && <TypesTab types={types} paymentsReady={payments.state?.configured ?? false} reload={reload} notify={notify} />}
               {tab === 'hours' && (
                 <>
                   <HoursCard hours={hours} draft={hoursDraft} setDraft={setHoursDraft} onSaved={(h) => { setHours(h); void reload(); }} notify={notify} />
@@ -877,6 +939,9 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
                   ) : connections.error ? (
                     <div className="bk-card"><p className="form-error" role="alert">{connections.error}</p><button className="btn" onClick={() => void connections.reload()}>Réessayer</button></div>
                   ) : null}
+                  {payments.state && (
+                    <PaymentCard state={payments.state} notify={notify} onState={(next) => { payments.set(next); void reload(); }} />
+                  )}
                 </>
               )}
             </>

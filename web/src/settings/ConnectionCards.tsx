@@ -68,7 +68,7 @@ function SecretState({ secret }: { secret: ConnectionSecret }) {
 }
 
 /** Résultat d'un essai : vert ou rouge, avec le diagnostic en clair. */
-function TestResult({ test, warning }: { test: Pick<ConnectionTest, 'ok' | 'message'> | null; warning?: string | null }) {
+export function TestResult({ test, warning }: { test: Pick<ConnectionTest, 'ok' | 'message'> | null; warning?: string | null }) {
   if (!test && !warning) return null;
   return (
     <div className="cx-results" role="status" aria-live="polite">

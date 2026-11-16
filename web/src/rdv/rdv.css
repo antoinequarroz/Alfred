@@ -314,6 +314,7 @@ a.btn { text-decoration: none; color: inherit; }
 .tag svg { width: 12px; height: 12px; flex: none; }
 .tag.danger { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
 .tag.warn { background: color-mix(in srgb, #d98a00 14%, transparent); color: color-mix(in srgb, #b86e00 70%, var(--text)); }
+.tag.ok { background: color-mix(in srgb, var(--ok) 14%, transparent); color: color-mix(in srgb, var(--ok) 70%, var(--text)); }
 
 /* Réservations */
 .bk-booking { display: grid; grid-template-columns: 148px minmax(0, 1fr) auto; gap: 6px 16px; align-items: start; }
