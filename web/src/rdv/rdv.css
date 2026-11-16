@@ -258,7 +258,14 @@ a.btn { text-decoration: none; color: inherit; }
 
 .bk-main { min-height: 0; }
 .bk-scroll { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 0 10px 32px; }
-.bk { max-width: 860px; display: flex; flex-direction: column; gap: 14px; }
+.bk { display: flex; flex-direction: column; gap: 14px; }
+/* Cartes indépendantes : l'une sous l'autre, côte à côte dès que l'écran est assez large. */
+.bk-pair { display: flex; flex-direction: column; gap: 14px; }
+@media (min-width: 1280px) {
+  .bk-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+  /* Une carte seule sur sa ligne prend toute la largeur plutôt que de laisser un trou. */
+  .bk-pair > :last-child:nth-child(odd) { grid-column: 1 / -1; }
+}
 
 .bk-card {
   display: flex;
