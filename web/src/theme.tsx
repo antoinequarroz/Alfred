@@ -38,7 +38,7 @@ export function useTheme() {
       // stockage indisponible : le choix vaut pour cette session
     }
     const dark = theme === 'dark' || (theme === 'auto' && sysDark);
-    document.querySelectorAll('meta[name="theme-color"]').forEach((m) => m.setAttribute('content', dark ? '#0c0c0e' : '#ffffff'));
+    document.querySelectorAll('meta[name="theme-color"]').forEach((m) => m.setAttribute('content', dark ? '#07080b' : '#f3f4f8'));
   }, [theme, sysDark]);
 
   const dark = theme === 'dark' || (theme === 'auto' && sysDark);

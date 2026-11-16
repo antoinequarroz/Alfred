@@ -248,7 +248,7 @@ export function App({ onLogout }: { onLogout: () => void }) {
           <span className="logo">A</span>
           <span>Alfred</span>
         </div>
-        <button className="btn new-btn" onClick={() => { setMenuOpen(false); openNew(); }}>
+        <button className="btn primary new-btn" onClick={() => { setMenuOpen(false); openNew(); }}>
           <PlusIcon />
           <span>Nouvel événement</span>
           <kbd>N</kbd>
