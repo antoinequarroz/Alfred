@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AlertIcon, LockIcon, MenuIcon } from '../icons';
 import { CaldavCard, SmtpCard, useConnections } from './ConnectionCards';
+import { useVideoState, VideoSettingsCard } from '../video/VideoScreen';
 
 const KEY_TEXT = {
   env: 'La clé de chiffrement vient de la variable ALFRED_SECRET_KEY du serveur.',
@@ -9,9 +10,10 @@ const KEY_TEXT = {
   none: 'La clé de chiffrement sera créée au premier mot de passe enregistré (fichier secret.key du dossier de données).',
 } as const;
 
-/** Écran « Réglages » : les connexions d'Alfred (calendrier iCloud, envoi des e-mails). */
+/** Écran « Réglages » : les connexions d'Alfred (calendrier iCloud, envoi des e-mails) et la visio. */
 export function ConnectionsScreen({ onMenu, onCalendarChanged }: { onMenu: () => void; onCalendarChanged: () => void }) {
   const { state, error, reload, set } = useConnections();
+  const video = useVideoState();
   const [toast, setToast] = useState<string | null>(null);
   const notify = useCallback((msg: string) => setToast(msg), []);
   useEffect(() => {
@@ -45,6 +47,7 @@ export function ConnectionsScreen({ onMenu, onCalendarChanged }: { onMenu: () =>
               )}
               <CaldavCard state={state} onState={set} notify={notify} onSynced={synced} />
               <SmtpCard state={state} onState={set} notify={notify} />
+              {video.state && <VideoSettingsCard state={video.state} onState={video.set} notify={notify} />}
               <p className="cx-foot">
                 <LockIcon />
                 <span>

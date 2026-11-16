@@ -198,6 +198,8 @@ export interface BookingMailData {
   email: string;
   phone: string;
   message: string;
+  /** Lien de la visio Alfred, pour un rendez-vous « En visio ». */
+  videoUrl?: string | null;
 }
 
 export interface MailContext {
@@ -240,7 +242,12 @@ export function buildBookingIcs(b: BookingMailData, ctx: MailContext): string {
   setTime('dtstart', b.start);
   setTime('dtend', b.end);
   vevent.updatePropertyWithValue('summary', ctx.publicName ? `${b.typeName} – ${ctx.publicName}` : b.typeName);
-  if (b.location) vevent.updatePropertyWithValue('location', b.location);
+  // Visio : le lien sert de lieu (cliquable dans Apple Calendar et Google Agenda) et d'URL de l'événement.
+  if (b.videoUrl) {
+    vevent.updatePropertyWithValue('location', b.videoUrl);
+    vevent.updatePropertyWithValue('url', b.videoUrl);
+    vevent.updatePropertyWithValue('description', `Rejoindre la visio : ${b.videoUrl}`);
+  } else if (b.location) vevent.updatePropertyWithValue('location', b.location);
   vevent.updatePropertyWithValue('status', 'CONFIRMED');
   vcal.addSubcomponent(vevent);
   return vcal.toString();
@@ -255,7 +262,10 @@ const STYLE = {
   th: 'text-align:left;vertical-align:top;padding:4px 16px 4px 0;color:#60646c;font-weight:normal;white-space:nowrap;',
   td: 'vertical-align:top;padding:4px 0;',
   small: 'margin:18px 0 0;font-size:13px;line-height:1.5;color:#60646c;',
+  button: 'display:inline-block;padding:11px 20px;border-radius:8px;background:#2f5bff;color:#ffffff;text-decoration:none;font-weight:600;font-size:15px;',
 };
+
+const VIDEO_HINT = 'Le lien s’ouvre dans votre navigateur, sans compte ni installation : autorisez simplement la caméra et le micro.';
 
 function layout(title: string, inner: string): string {
   return `<!doctype html>
@@ -287,6 +297,7 @@ function summaryRows(b: BookingMailData, ctx: MailContext): [string, string][] {
     ['Rendez-vous', b.typeName],
     ['Date', formatWhen(b.start, b.end, ctx.timezone)],
     ['Lieu', b.location],
+    ['Visio', b.videoUrl ?? ''],
   ];
 }
 
@@ -315,6 +326,7 @@ export function clientConfirmation(b: BookingMailData, ctx: MailContext, cancelU
     '',
     rowsText(rows),
     '',
+    ...(b.videoUrl ? ['Pour rejoindre la visio, à l’heure du rendez-vous :', b.videoUrl, VIDEO_HINT, ''] : []),
     'Un empêchement ? Vous pouvez annuler ce rendez-vous ici :',
     cancelUrl,
     '',
@@ -326,6 +338,9 @@ export function clientConfirmation(b: BookingMailData, ctx: MailContext, cancelU
     p(`Bonjour ${escapeHtml(b.name)},`),
     p('Votre rendez-vous est confirmé.'),
     rowsHtml(rows),
+    ...(b.videoUrl
+      ? [p(`<a href="${escapeHtml(b.videoUrl)}" style="${STYLE.button}">Rejoindre la visio</a>`), `<p style="${STYLE.small}">${escapeHtml(VIDEO_HINT)}</p>`]
+      : []),
     p(`Un empêchement ? <a href="${escapeHtml(cancelUrl)}">Annuler ce rendez-vous</a>.`),
     `<p style="${STYLE.small}">Le rendez-vous est joint à ce message : ouvrez la pièce jointe pour l’ajouter à votre agenda.</p>`,
     `<p style="${STYLE.small}">${escapeHtml(signature)}</p>`,

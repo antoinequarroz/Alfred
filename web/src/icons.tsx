@@ -172,3 +172,70 @@ export function CloudIcon() {
     </svg>
   );
 }
+
+export function MicIcon() {
+  return (
+    <svg {...base}>
+      <rect x="5.75" y="1.75" width="4.5" height="7.5" rx="2.25" />
+      <path d="M3.5 7.5a4.5 4.5 0 0 0 9 0M8 12v2.25" />
+    </svg>
+  );
+}
+
+export function MicOffIcon() {
+  return (
+    <svg {...base}>
+      <path d="M10.25 6.5V4a2.25 2.25 0 0 0-4.4-.66M5.75 6.25V7a2.25 2.25 0 0 0 3.7 1.72M3.5 7.5a4.5 4.5 0 0 0 7.2 3.6M12.5 7.5c0 .5-.08 1-.23 1.45M8 12v2.25M2.5 2.5l11 11" />
+    </svg>
+  );
+}
+
+export function VideoOffIcon() {
+  return (
+    <svg {...base}>
+      <path d="M6 4.25h3a1.5 1.5 0 0 1 1.5 1.5v2.5M10.5 10.25a1.5 1.5 0 0 1-1.5 1.5H3.5A1.5 1.5 0 0 1 2 10.25v-4.5c0-.5.25-.95.62-1.22M10.5 7 14 5v6l-1.6-.9M2 2l12 12" />
+    </svg>
+  );
+}
+
+export function ScreenIcon() {
+  return (
+    <svg {...base}>
+      <rect x="1.75" y="2.75" width="12.5" height="8.5" rx="1.5" />
+      <path d="M5.5 13.75h5M8 11.25v2.5M8 9V5M6.25 6.5 8 4.75 9.75 6.5" />
+    </svg>
+  );
+}
+
+export function HangupIcon() {
+  return (
+    <svg {...base}>
+      <path d="M2.1 9.6c-.4-.4-.4-1.05.03-1.43C3.9 6.6 5.9 5.75 8 5.75s4.1.85 5.87 2.42c.43.38.43 1.03.03 1.43l-1.1 1.1a1 1 0 0 1-1.25.13l-1.3-.85a1 1 0 0 1-.45-.84V7.9a7.4 7.4 0 0 0-3.6 0v1.24a1 1 0 0 1-.45.84l-1.3.85a1 1 0 0 1-1.25-.13Z" />
+    </svg>
+  );
+}
+
+export function ChatIcon() {
+  return (
+    <svg {...base}>
+      <path d="M2.75 4.25a1.5 1.5 0 0 1 1.5-1.5h7.5a1.5 1.5 0 0 1 1.5 1.5v5.5a1.5 1.5 0 0 1-1.5 1.5H7l-3 2.5v-2.5h.25a1.5 1.5 0 0 1-1.5-1.5Z" />
+    </svg>
+  );
+}
+
+export function UsersIcon() {
+  return (
+    <svg {...base}>
+      <circle cx="6" cy="5.5" r="2.25" />
+      <path d="M1.75 13c.45-2 2.2-3.25 4.25-3.25S9.8 11 10.25 13M10.25 3.4a2.25 2.25 0 0 1 0 4.2M11.5 9.9c1.4.35 2.45 1.4 2.75 3.1" />
+    </svg>
+  );
+}
+
+export function FlipIcon() {
+  return (
+    <svg {...base}>
+      <path d="M2.75 6.25A5.25 5.25 0 0 1 12.5 4.5M13.25 9.75A5.25 5.25 0 0 1 3.5 11.5M12.75 2.25V4.75H10.25M3.25 13.75v-2.5h2.5" />
+    </svg>
+  );
+}

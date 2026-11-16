@@ -1,0 +1,23 @@
+/* Rubrique « Visio » et carte de réglages. S'appuie sur rdv.css (.bk-*) et settings.css. */
+
+.vd-hero-main { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.vd-hero-main > div { flex: 1 1 240px; min-width: 0; }
+.vd-hero-main p { color: var(--muted); font-size: 13px; margin-top: 2px; line-height: 1.45; }
+.vd-hero-icon { flex: none; width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent-ink); }
+.vd-hero-icon svg { width: 20px; height: 20px; }
+.vd-hero .btn { gap: 6px; }
+
+.vd-live { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); vertical-align: 1px; }
+.vd-live svg { width: 13px; height: 13px; }
+
+.vd-room { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.vd-room-main { min-width: 0; flex: 1 1 220px; }
+.vd-room-title { font-weight: 600; font-size: 14px; overflow-wrap: anywhere; }
+.vd-room .btn, .bk-link .btn { gap: 6px; }
+
+.vd-status { display: inline-flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 550; }
+.vd-setting { display: flex; align-items: flex-start; gap: 12px; }
+.vd-setting-title { font-size: 13.5px; font-weight: 600; }
+.vd-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 16px; }
+.vd-limits { margin-top: 2px; }
+@media (max-width: 600px) { .vd-grid { grid-template-columns: minmax(0, 1fr); } }

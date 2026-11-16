@@ -33,6 +33,8 @@ Un seul processus Node.js sert l'API et l'app web. Pas de Postgres ni de Redis :
 | `server/booking/routes.ts`, `ratelimit.ts` | Prise de RDV : routes publiques et privées, limitation de débit |
 | `server/booking/mail.ts` | Prise de RDV : e-mails (SMTP), pièce jointe iCalendar |
 | `web/src/` | App web privée (React) : vues, fenêtre d'événement, glisser-déposer |
+| `server/video/` | Visio : jetons d'accès, salles, réglages, client de l'API LiveKit, routes |
+| `web/src/video/` | Visio : page de la salle (`VideoApp.tsx`), rubrique « Visio » et carte de réglages (`VideoScreen.tsx`) |
 | `web/src/settings/` | Écran « Réglages » : calendrier iCloud et envoi des e-mails (`ConnectionsScreen.tsx`, `ConnectionCards.tsx`) |
 | `web/src/rdv/` | Prise de RDV : page publique (`PublicApp.tsx`), écran « Rendez-vous » de l'admin (`BookingAdmin.tsx`), dates dans le fuseau du serveur (`tz.ts`) |
 | `shared/types.ts` | Types partagés entre serveur et app |
@@ -84,6 +86,24 @@ Une page publique laisse un client choisir un type de rendez-vous puis un créne
 - **Interface.** La même page sert deux apps, chargées à la demande (`web/src/main.tsx`) : sous `/rdv`, `/rdv/<type>` et `/rdv/annulation/<jeton>`, la page publique, qui n'appelle que `/api/public/booking/*`, ne télécharge pas l'app privée et n'enregistre pas de service worker ; partout ailleurs, l'app privée, dont l'écran « Rendez-vous » (interrupteur d'ouverture, lien public, réservations, types, horaires, réglages, e-mails) n'est chargé qu'à l'ouverture. Les heures sont toujours affichées dans le fuseau annoncé par le serveur, pas dans celui du navigateur. Le service worker ne touche ni à l'API ni aux pages `/rdv`.
 - **Données.** Tables `booking_settings`, `booking_types`, `booking_hours`, `bookings`, `connection_settings`, et les colonnes `calendars.blocks_booking` et `events.busy`, créées par une migration idempotente à l'ouverture de la base. Contrairement aux événements, ces données ne reviennent pas d'iCloud : la base est à sauvegarder (voir [DEPLOIEMENT.md](DEPLOIEMENT.md)).
 
+## La visioconférence (v2)
+
+Chaque visio est une « salle » avec un lien `https://alfred.antoinequarroz.ch/v/<slug>`. L'invité l'ouvre dans son navigateur, sans compte ni installation ; Antoine, connecté à Alfred, y entre comme hôte.
+
+```
+ Navigateur ──HTTPS──► Caddy ──► alfred (jetons, salles, réglages)
+     │                   └─ /rtc (WebSocket) ──► alfred-livekit:7880 (signalisation)
+     └── audio/vidéo : UDP 7882 (ou TCP 7881 en repli) ──► alfred-livekit
+```
+
+- **Partage des rôles.** LiveKit (conteneur `alfred-livekit`, image officielle, 256 Mo et 1 cœur au plus) transporte l'audio et la vidéo. Alfred décide qui entre : il signe un jeton d'accès (JWT HS256, `server/video/token.ts`, sans dépendance) valable pour une salle, avec les droits d'hôte ou d'invité. Les deux partagent une clé créée par `deploy/visio.sh`.
+- **Salles** (`server/video/service.ts`, table `video_rooms`). Quatre sortes : réunion instantanée, visio d'un événement (bouton « Ajouter une visio Alfred » de la fenêtre d'événement, le lien devient le lieu), visio d'un rendez-vous, salle permanente (lien fixe, renouvelable). Le slug, 12 caractères aléatoires (≈ 60 bits), sert de clé d'entrée : qui a le lien peut entrer. Une salle reste ouverte jusqu'à 6 heures après la fin prévue ; une salle de rendez-vous suit l'horaire actuel de sa réservation et ferme si elle est annulée.
+- **Rendez-vous « En visio ».** À la réservation, une salle est créée : son lien est le lieu de l'événement (cliquable dans Apple Calendar), il figure dans l'e-mail de confirmation (bouton « Rejoindre la visio ») et dans la pièce jointe `.ics`. Si la visio est désactivée ou non installée, le rendez-vous garde simplement le lieu saisi dans le type.
+- **Dans la salle** (`web/src/video/VideoApp.tsx`, chargé seulement sous `/v/…`). Salle d'attente avec aperçu de la caméra, niveau du micro et choix des appareils ; grille des participants, partage d'écran, messages (non conservés), changement de caméra sur mobile. L'hôte peut terminer la réunion pour tous.
+- **Limites.** Nombre de participants par salle réglable (2 à 8, 4 par défaut), une place toujours réservée à l'hôte ; qualité « standard » (720p) ou « économe » (360p). Entrées limitées à 20 par 10 minutes et par adresse IP. Rien n'est enregistré.
+- **Réglages dans l'app** : Réglages > Visioconférence (activer, participants, qualité, état du serveur). Rubrique « Visio » : nouvelle visio, salle permanente, visios à venir avec le nombre de personnes connectées.
+- **Ce qui manque encore.** Pas de serveur TURN sur le port 443 : un invité derrière un réseau d'entreprise qui ne laisse sortir que le web (443) ne pourra pas se connecter. Pas d'enregistrement. Sur le VPS actuel (2 cœurs partagés), viser 2 à 4 personnes.
+
 ## Sécurité
 
 - Un seul utilisateur. Mot de passe stocké sous forme d'empreinte scrypt, session par cookie `HttpOnly`, `Secure`, `SameSite=Lax`, blocage après cinq essais ratés.
@@ -107,6 +127,5 @@ Une page publique laisse un client choisir un type de rendez-vous puis un créne
 
 ## Comment la suite s'y branche
 
-- **Visio (v2).** LiveKit tourne dans son propre conteneur. Alfred ne fait que délivrer des jetons d'accès et rattacher une salle à un événement (lien dans le champ lieu ou la description, visible aussi dans Apple Calendar).
 - **Apps Mac et mobile.** L'app web est déjà une PWA. Tauri (Mac) et Capacitor (iOS, Android) emballeront le même code.
 - **Agent IA.** L'API JSON est le point d'entrée : lire l'agenda, créer et déplacer des événements.

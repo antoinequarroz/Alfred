@@ -1,7 +1,7 @@
 import type {
   Booking, BookingAdminState, BookingHoursRange, BookingSettings, BookingType, BookingTypeInput,
   CalendarInfo, CaldavSaveResult, CaldavSettingsInput, ConnectionsState, ConnectionTest, EditScope, EventInput, Occurrence, PublicSlots,
-  SmtpSaveResult, SmtpSettingsInput, SyncStatus,
+  SmtpSaveResult, SmtpSettingsInput, SyncStatus, VideoAdminState, VideoRoom, VideoRoomInput, VideoSettings,
 } from '../../shared/types';
 
 import { ApiError, requestJson } from './http';
@@ -64,4 +64,14 @@ export const connectionsApi = {
   saveCaldav: (input: CaldavSettingsInput) => request<CaldavSaveResult>('PUT', '/api/connections/caldav', input),
   testCaldav: (input: CaldavSettingsInput) => request<CaldavSaveResult>('POST', '/api/connections/caldav/test', input),
   clearCaldav: () => request<CaldavSaveResult>('DELETE', '/api/connections/caldav'),
+};
+
+/** Visioconférence : réglages et salles (session requise). */
+export const videoApi = {
+  state: () => request<VideoAdminState>('GET', '/api/video'),
+  saveSettings: (patch: Partial<VideoSettings>) => request<VideoAdminState>('PUT', '/api/video/settings', patch),
+  createRoom: (input: VideoRoomInput) => request<VideoRoom>('POST', '/api/video/rooms', input),
+  personalRoom: (renew = false) => request<VideoRoom>('POST', '/api/video/personal', { renew }),
+  endMeeting: (id: string) => request<{ ok: true }>('POST', `/api/video/rooms/${encodeURIComponent(id)}/end`, {}),
+  deleteRoom: (id: string) => request<{ ok: true }>('DELETE', `/api/video/rooms/${encodeURIComponent(id)}`),
 };

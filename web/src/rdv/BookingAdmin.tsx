@@ -162,7 +162,7 @@ function TypeDialog({ type, onSaved, onDeleted, onClose }: { type: BookingType |
               </select>
             )}
           </Fld>
-          <Fld label={locationLabel} error={errors.location} className="span-2">
+          <Fld label={locationLabel} error={errors.location} className="span-2" hint={d.mode === 'visio' ? 'Chaque rendez-vous reçoit automatiquement un lien de visio Alfred, envoyé au client dans l’e-mail de confirmation (si la visio est activée dans Réglages).' : undefined}>
             {(id) => <input id={id} type="text" value={d.location} maxLength={300} onChange={(e) => set({ location: e.target.value })} />}
           </Fld>
           <Fld label="Description (affichée au client)" error={errors.description} className="span-2">
@@ -542,6 +542,7 @@ function BookingRow({ b, timezone, mailConfigured, onCancel, onResend }: {
           <a href={`mailto:${b.email}`}>{b.email}</a>
           {b.phone && <a href={`tel:${b.phone.replace(/[^\d+]/g, '')}`}>{b.phone}</a>}
           {b.location && <span>{b.location}</span>}
+          {b.videoUrl && <a href={b.videoUrl} target="_blank" rel="noopener">Rejoindre la visio</a>}
         </p>
         {b.message && <p className="bk-message">{b.message}</p>}
         <div className="bk-flags">

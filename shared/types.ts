@@ -175,6 +175,8 @@ export interface Booking {
   eventState: BookingEventState | null;
   /** Si l'événement a été déplacé : son horaire actuel dans le calendrier (égal à start et end). */
   eventStart: string | null;
+  /** Lien de la visio Alfred, pour un rendez-vous « En visio » confirmé. */
+  videoUrl?: string | null;
   eventEnd: string | null;
   /** Si l'événement a été déplacé : le début annoncé au client dans son dernier e-mail. */
   notifiedStart: string | null;
@@ -245,6 +247,8 @@ export interface PublicBooking {
   status: BookingStatus;
   /** Faux si le rendez-vous est déjà commencé ou passé. */
   cancellable: boolean;
+  /** Lien de la visio Alfred du rendez-vous, s'il en a une. */
+  videoUrl: string | null;
   /** Réponse à une annulation seulement : vrai si un e-mail de confirmation d'annulation est parti. */
   emailSent?: boolean;
 }
@@ -365,4 +369,88 @@ export interface CaldavSaveResult {
   test: ConnectionTest;
   /** Remarque non bloquante (forme inattendue du mot de passe d'application Apple). */
   warning: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Visioconférence (v2). Voir docs/API-VISIO.md.
+
+/** Qualité d'envoi de la vidéo : « standard » jusqu'à 720p, « eco » jusqu'à 360p (petit serveur, petite connexion). */
+export type VideoQuality = 'standard' | 'eco';
+
+export type VideoRoomKind = 'instant' | 'event' | 'booking' | 'permanent';
+
+export interface VideoSettings {
+  /** Faux : aucune salle ne s'ouvre et les rendez-vous « En visio » ne reçoivent pas de lien Alfred. */
+  enabled: boolean;
+  /** Participants au plus dans une salle, toi compris (2 à 8). */
+  maxParticipants: number;
+  quality: VideoQuality;
+}
+
+export interface VideoServerStatus {
+  /** Les clés du serveur de visio sont présentes dans la configuration d'Alfred. */
+  configured: boolean;
+  /** Le serveur de visio répond. null : pas vérifié (non configuré). */
+  reachable: boolean | null;
+  /** Message en français si quelque chose manque. */
+  problem: string | null;
+}
+
+export interface VideoRoom {
+  id: string;
+  slug: string;
+  /** Lien à partager (page publique de la salle). */
+  url: string;
+  title: string;
+  kind: VideoRoomKind;
+  /** Instants ISO UTC, null pour une salle permanente. */
+  startsAt: string | null;
+  endsAt: string | null;
+  createdAt: string;
+  /** Réservation liée (salle d'un rendez-vous). */
+  bookingId: string | null;
+  /** Personnes connectées en ce moment (null : serveur de visio injoignable). */
+  live: number | null;
+}
+
+export interface VideoAdminState {
+  settings: VideoSettings;
+  server: VideoServerStatus;
+  /** La visio est utilisable : activée et serveur configuré. */
+  available: boolean;
+  /** Salle permanente (ton lien fixe), null si elle n'a pas encore été créée. */
+  personalRoom: VideoRoom | null;
+  /** Salles ouvertes ou à venir, hors salle permanente, de la plus proche à la plus lointaine. */
+  rooms: VideoRoom[];
+}
+
+export interface VideoRoomInput {
+  title?: string;
+  /** Pour une visio rattachée à un événement : son horaire (instants ISO). */
+  start?: string;
+  end?: string;
+}
+
+/** État public d'une salle, vu depuis son lien. */
+export type VideoRoomStatus = 'open' | 'ended' | 'closed' | 'unavailable';
+
+export interface PublicVideoRoom {
+  title: string;
+  /** Nom de l'hôte (nom public de la prise de rendez-vous). */
+  hostName: string;
+  status: VideoRoomStatus;
+  startsAt: string | null;
+  endsAt: string | null;
+  timezone: string;
+  /** Le visiteur est connecté à Alfred : il entre comme hôte. */
+  isHost: boolean;
+}
+
+export interface VideoJoinInfo {
+  /** Adresse WebSocket du serveur de visio. */
+  url: string;
+  token: string;
+  identity: string;
+  isHost: boolean;
+  quality: VideoQuality;
 }

@@ -558,7 +558,7 @@ describe('prise de rendez-vous : réservation', () => {
     const confirmation = (await res.json()) as BookingConfirmation;
     expect(confirmation.booking).toEqual({
       typeName: 'Consultation', start: MONDAY_9, end: '2026-11-16T08:30:00.000Z', timezone: 'Europe/Zurich',
-      locationLabel: 'Rue du Lac 1, Sion', name: 'Élodie Müller', status: 'confirmed', cancellable: true,
+      locationLabel: 'Rue du Lac 1, Sion', name: 'Élodie Müller', status: 'confirmed', cancellable: true, videoUrl: null,
     });
     expect(confirmation.emailSent).toBe(true);
     expect(confirmation.cancelUrl).toMatch(/^https:\/\/alfred\.example\.ch\/rdv\/annulation\/[A-Za-z0-9_-]{43}$/);

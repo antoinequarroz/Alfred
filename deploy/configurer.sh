@@ -155,6 +155,9 @@ else
   echo "s'il y est déjà réglé, il continue de fonctionner."
 fi
 
+# Clés du serveur de visio : créées si elles manquent, sans question.
+if [[ -f deploy/visio.sh ]]; then bash deploy/visio.sh --env-only; fi
+
 docker compose -f deploy/docker-compose.yml up -d --build
 echo -n "Démarrage"
 for _ in $(seq 1 30); do

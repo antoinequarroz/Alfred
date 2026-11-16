@@ -87,6 +87,17 @@ docker exec antoinequarroz-caddy caddy reload --config /etc/caddy/Caddyfile   # 
 
 Ouvrir https://alfred.antoinequarroz.ch et se connecter. Les calendriers iCloud apparaissent après la première synchro (quelques secondes à une minute selon le nombre d'événements).
 
+### La visio
+
+Le serveur de visio (LiveKit) est un second conteneur du même fichier compose, `alfred-livekit`, limité à 256 Mo et 1 cœur.
+
+1. **Clés et démarrage** : `bash /opt/alfred/deploy/visio.sh`. Sans question : crée les clés partagées (dans `.env` et `.env.livekit`, lisibles par toi seul), relève l'adresse publique du VPS, démarre les deux conteneurs. Relançable.
+2. **Pare-feu** : ouvrir l'audio et la vidéo, `sudo ufw allow 7882/udp` et `sudo ufw allow 7881/tcp`. Rien d'autre n'est exposé.
+3. **Caddy** : dans le bloc `alfred.antoinequarroz.ch`, envoyer `/rtc*` vers `alfred-livekit:7880` (voir [`deploy/Caddyfile.snippet`](../deploy/Caddyfile.snippet)). Sauvegarder le Caddyfile avant, valider (`caddy validate`), puis recharger.
+4. **Vérifier** : Alfred > Réglages > Visioconférence affiche « Serveur de visio en ligne ». Rubrique Visio > « Nouvelle visio », puis ouvrir le lien depuis un téléphone en 4G.
+
+Tout le reste (activer, nombre de participants, qualité) se règle dans l'app. Pour arrêter la visio sans toucher à Alfred : `docker stop alfred-livekit` (les liens répondent « indisponible »).
+
 ## 4. Installer l'app
 
 - **Mac** : dans Safari, Fichier > Ajouter au Dock.

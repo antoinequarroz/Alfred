@@ -1,0 +1,147 @@
+/* Visio : salle d'attente aux couleurs d'Alfred, salle toujours sombre (les visages ressortent mieux). */
+
+.vc { min-height: 100%; display: flex; flex-direction: column; font-size: 15px; --fld-h: 40px; --fld-font: 15px; }
+.vc-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: max(12px, env(safe-area-inset-top)) 18px 0; }
+.vc-brand { display: inline-flex; align-items: center; gap: 8px; font-weight: 650; letter-spacing: -0.01em; }
+.vc-center { flex: 1; display: grid; place-items: center; padding: 20px 16px max(28px, env(safe-area-inset-bottom)); }
+
+.vc-card {
+  background: linear-gradient(color-mix(in srgb, var(--panel) var(--veil), transparent), color-mix(in srgb, var(--panel) var(--veil), transparent)), var(--grain), var(--panel);
+  border: 1px solid var(--panel-line);
+  border-radius: 16px;
+  box-shadow: var(--panel-shadow);
+}
+
+/* Messages (lien introuvable, visio terminée…) */
+.vc-msg { width: min(440px, 100%); padding: 34px 26px; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px; }
+.vc-msg h1 { font-size: 19px; font-weight: 650; letter-spacing: -0.02em; text-wrap: balance; }
+.vc-msg p { color: var(--muted); line-height: 1.5; max-width: 40ch; text-wrap: pretty; }
+.vc-msg .btn { margin-top: 8px; }
+.vc-msg-icon { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent-ink); margin-bottom: 4px; }
+.vc-msg-icon svg { width: 22px; height: 22px; }
+
+/* Salle d'attente */
+.vc-lobby { width: min(920px, 100%); display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 22px; padding: 18px; }
+.vc-preview { position: relative; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden; background: #0b0d13; display: grid; place-items: center; }
+.vc-preview .vc-video { position: absolute; inset: 0; }
+.vc-preview-off { color: rgba(255, 255, 255, 0.6); font-size: 14px; }
+.vc-preview-bar { position: absolute; left: 0; right: 0; bottom: 14px; display: flex; justify-content: center; gap: 12px; }
+.vc-level { position: absolute; left: 14px; top: 14px; width: 54px; height: 5px; border-radius: 3px; background: rgba(255, 255, 255, 0.22); overflow: hidden; }
+.vc-level span { display: block; height: 100%; background: #3ddc84; transform-origin: left; transition: transform 0.08s linear; }
+.vc-lobby-side { display: flex; flex-direction: column; justify-content: center; gap: 14px; min-width: 0; padding: 6px 4px; }
+.vc-kicker { font-size: 12.5px; font-weight: 600; color: var(--accent-ink); letter-spacing: 0.01em; }
+.vc-lobby-side h1 { font-size: 22px; font-weight: 680; letter-spacing: -0.025em; line-height: 1.25; margin-top: 4px; text-wrap: balance; overflow-wrap: anywhere; }
+.vc-when { color: var(--muted); margin-top: 4px; font-feature-settings: 'tnum' 1; }
+.vc-hint { color: var(--muted); font-size: 14px; line-height: 1.45; }
+.vc-devices { display: grid; gap: 10px; }
+.vc-warn { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 1.45; color: var(--muted); }
+.vc-warn svg { flex: none; margin-top: 2px; color: #c98200; }
+.vc-join { height: 42px; font-size: 15px; }
+.vc-small { font-size: 12.5px; color: var(--faint); line-height: 1.45; }
+
+/* Boutons ronds (aperçu et barre de la salle) */
+.vc-round {
+  position: relative;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 0;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition: background-color 0.12s, transform 0.12s;
+}
+.vc-round svg { width: 20px; height: 20px; }
+.vc-round:hover { background: rgba(255, 255, 255, 0.24); }
+.vc-round:active { transform: scale(0.94); }
+.vc-round.off { background: #fff; color: #11131a; }
+.vc-round.on { background: var(--accent); }
+.vc-round.hang { background: #e5484d; width: 58px; border-radius: 23px; }
+.vc-round.hang:hover { background: #f2555a; }
+.vc-badge { position: absolute; top: -2px; right: -2px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: #e5484d; font-size: 11px; font-weight: 700; line-height: 18px; }
+
+/* Salle */
+.vc-call {
+  height: 100dvh;
+  min-height: 0;
+  background: #07080c;
+  color: #eceef3;
+  color-scheme: dark;
+  --text: #eceef3;
+  --muted: #9a9caa;
+  --line: #262a38;
+  --field: rgba(255, 255, 255, 0.06);
+  --btn-bg: rgba(255, 255, 255, 0.06);
+  --surface: #12141d;
+  --panel-line: rgba(170, 185, 255, 0.12);
+}
+.vc-call-main { flex: 1; min-height: 0; display: flex; }
+.vc-stage-wrap { position: relative; flex: 1; min-width: 0; display: flex; flex-direction: column; padding: max(10px, env(safe-area-inset-top)) 10px 0; }
+
+.vc-grid { flex: 1; min-height: 0; display: grid; gap: 10px; grid-template-columns: 1fr; grid-auto-rows: 1fr; }
+.vc-grid.n2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.vc-grid.n3, .vc-grid.n4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.vc-grid.n5, .vc-grid.n6 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.vc-grid.n7, .vc-grid.n8, .vc-grid.n9 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+.vc-tile { position: relative; min-height: 0; border-radius: 14px; overflow: hidden; background: #141722; display: grid; place-items: center; box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.05) inset; transition: box-shadow 0.15s; }
+.vc-tile.speaking { box-shadow: 0 0 0 2px #4d74ff inset, 0 0 24px -6px rgba(77, 116, 255, 0.7); }
+.vc-tile .vc-video { position: absolute; inset: 0; }
+.vc-avatar { width: clamp(56px, 14vmin, 96px); aspect-ratio: 1; border-radius: 50%; display: grid; place-items: center; background: linear-gradient(160deg, #3a4a8c, #1d2550); font-size: clamp(20px, 5vmin, 34px); font-weight: 650; color: #fff; }
+.vc-label { position: absolute; left: 10px; bottom: 10px; max-width: calc(100% - 20px); display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 8px; background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); font-size: 13px; font-weight: 550; }
+.vc-label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vc-label svg { flex: none; color: #ff8a8d; }
+
+.vc-video { width: 100%; height: 100%; object-fit: cover; background: #000; }
+.vc-video.contain { object-fit: contain; }
+.vc-video.mirror { transform: scaleX(-1); }
+
+.vc-screen-layout { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 220px; gap: 10px; }
+.vc-screen { position: relative; min-height: 0; border-radius: 14px; overflow: hidden; background: #000; }
+.vc-screen .vc-video { position: absolute; inset: 0; }
+.vc-strip { display: flex; flex-direction: column; gap: 10px; overflow-y: auto; min-height: 0; }
+.vc-strip .vc-tile { flex: none; aspect-ratio: 16 / 10; }
+.vc-strip .vc-avatar { width: 48px; font-size: 18px; }
+
+.vc-waiting { position: absolute; left: 50%; top: 22px; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 10px; padding: 8px 14px; border-radius: 999px; background: rgba(20, 23, 34, 0.86); backdrop-filter: blur(8px); font-size: 14px; color: #cfd2dc; white-space: nowrap; z-index: 2; }
+.vc-banner { align-self: center; margin-bottom: 10px; padding: 8px 14px; border-radius: 10px; background: #3a2f0b; color: #ffd27a; font-size: 13.5px; border: 0; }
+.vc-banner.action { cursor: pointer; background: var(--accent); color: #fff; }
+
+.vc-controls { flex: none; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 12px; padding: 12px 16px max(12px, env(safe-area-inset-bottom)); }
+.vc-controls-main { display: flex; gap: 10px; }
+.vc-controls-side { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.vc-controls-side.end { justify-content: flex-end; }
+.vc-controls-side .btn { gap: 6px; }
+.vc-room-title { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vc-count { display: inline-flex; align-items: center; gap: 5px; color: #9a9caa; font-size: 13px; font-feature-settings: 'tnum' 1; }
+
+.vc-chat { width: 300px; flex: none; display: flex; flex-direction: column; margin: max(10px, env(safe-area-inset-top)) 10px 0 0; border-radius: 14px; background: #10121a; border: 1px solid rgba(255, 255, 255, 0.06); min-height: 0; }
+.vc-chat header { display: flex; align-items: center; justify-content: space-between; padding: 10px 10px 6px 14px; }
+.vc-chat h2 { font-size: 14px; font-weight: 650; }
+.vc-chat ol { flex: 1; min-height: 0; overflow-y: auto; list-style: none; margin: 0; padding: 4px 14px 10px; display: flex; flex-direction: column; gap: 10px; }
+.vc-chat li { display: flex; flex-direction: column; gap: 2px; font-size: 13.5px; line-height: 1.45; }
+.vc-chat li.mine .vc-chat-from { color: #8aa2ff; }
+.vc-chat-from { font-size: 12px; font-weight: 600; color: #9a9caa; }
+.vc-chat-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.vc-chat-empty { color: #8a8c99; font-size: 12.5px; }
+.vc-chat form { display: flex; gap: 8px; padding: 10px; border-top: 1px solid rgba(255, 255, 255, 0.06); }
+.vc-chat input { flex: 1; min-width: 0; height: 32px; padding: 0 10px; border-radius: 8px; border: 1px solid #262a38; background: rgba(255, 255, 255, 0.05); color: inherit; font-size: 14px; }
+.vc-chat input:focus { outline: none; border-color: #8aa2ff; }
+
+@media (max-width: 760px) {
+  .vc-lobby { grid-template-columns: minmax(0, 1fr); padding: 12px; gap: 16px; }
+  .vc-lobby-side { padding: 0 4px 4px; }
+  .vc-controls { grid-template-columns: minmax(0, 1fr); justify-items: center; gap: 8px; }
+  .vc-controls-side:not(.end) { display: none; }
+  .vc-controls-side.end:empty { display: none; }
+  .vc-round { width: 44px; height: 44px; }
+  .vc-grid.n2 { grid-template-columns: minmax(0, 1fr); }
+  .vc-grid.n3, .vc-grid.n4, .vc-grid.n5, .vc-grid.n6 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .vc-screen-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 110px; }
+  .vc-strip { flex-direction: row; overflow-x: auto; overflow-y: hidden; }
+  .vc-strip .vc-tile { height: 100%; aspect-ratio: 4 / 3; }
+  .vc-chat { position: fixed; inset: 0 0 auto 0; height: 60dvh; width: auto; margin: 0; border-radius: 0 0 14px 14px; z-index: 20; }
+}

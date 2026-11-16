@@ -1,6 +1,6 @@
 // Service worker minimal : l'interface s'ouvre instantanément (et hors ligne),
 // les données passent toujours par le réseau.
-const CACHE = 'alfred-shell-v2';
+const CACHE = 'alfred-shell-v3';
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((c) => c.addAll(['/', '/manifest.webmanifest', '/icon.svg'])).then(() => self.skipWaiting()));
@@ -15,10 +15,10 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
-  // Jamais de cache pour l'API (privée comme publique) ni pour les pages publiques de rendez-vous :
+  // Jamais de cache pour l'API (privée comme publique) ni pour les pages publiques (rendez-vous, visio) :
   // ces requêtes vont toujours au réseau, sans passer par le service worker.
   if (request.method !== 'GET' || url.origin !== location.origin || url.pathname.startsWith('/api/')) return;
-  if (url.pathname === '/rdv' || url.pathname.startsWith('/rdv/')) return;
+  if (url.pathname === '/rdv' || url.pathname.startsWith('/rdv/') || url.pathname.startsWith('/v/')) return;
 
   if (url.pathname.startsWith('/assets/')) {
     // Fichiers versionnés : cache d'abord.

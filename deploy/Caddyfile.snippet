@@ -2,5 +2,11 @@
 # Caddy tourne en conteneur : il joint Alfred par son nom sur le réseau Docker partagé.
 alfred.antoinequarroz.ch {
 	encode zstd gzip
-	reverse_proxy alfred:3200
+	# Visio : la signalisation WebSocket de LiveKit (/rtc) va au serveur de visio, tout le reste à Alfred.
+	handle /rtc* {
+		reverse_proxy alfred-livekit:7880
+	}
+	handle {
+		reverse_proxy alfred:3200
+	}
 }

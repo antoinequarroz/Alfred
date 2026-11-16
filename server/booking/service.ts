@@ -26,7 +26,17 @@ export class BookingError extends Error {
   }
 }
 
+/** Ce que la prise de rendez-vous attend de la visio (voir server/video/service.ts). */
+export interface BookingVideo {
+  /** Salle préparée pour un rendez-vous « En visio », ou null si la visio Alfred n'est pas disponible. */
+  reserveForBooking(title: string, start: string, end: string): { url: string; commit: (bookingId: string) => void } | null;
+  urlForBooking(bookingId: string): string | null;
+  closeForBooking(bookingId: string): void;
+}
+
 export interface BookingOptions {
+  /** Visio : les rendez-vous « En visio » reçoivent le lien d'une salle Alfred. */
+  video?: BookingVideo;
   store: Store;
   calendar: CalendarService;
   caldav: CaldavSync | null;
@@ -150,6 +160,7 @@ export class BookingService {
   private readonly mailTimeoutMs: number;
   private readonly mailDailyLimit: number;
   private readonly quietCancelMs: number;
+  private readonly video: BookingVideo | null;
   private chain: Promise<unknown> = Promise.resolve();
   private waiting = 0;
   /** Occupation de l'agenda sur toute la période réservable, recalculée seulement quand l'agenda change. */
@@ -162,6 +173,7 @@ export class BookingService {
   constructor(opts: BookingOptions) {
     this.store = opts.store;
     this.data = new BookingStore(opts.store.db);
+    this.video = opts.video ?? null;
     this.calendar = opts.calendar;
     this.caldav = opts.caldav;
     this.timezone = opts.timezone;
@@ -572,7 +584,7 @@ export class BookingService {
   private toPublicBooking(b: BookingRow): PublicBooking {
     return {
       typeName: b.type_name, start: b.start_utc, end: b.end_utc, timezone: this.timezone, locationLabel: b.location,
-      name: b.name, status: b.status,
+      name: b.name, status: b.status, videoUrl: b.status === 'confirmed' ? (this.video?.urlForBooking(b.id) ?? null) : null,
       cancellable: b.status === 'confirmed' && Date.parse(b.start_utc) > this.now().getTime(),
     };
   }
@@ -659,8 +671,11 @@ export class BookingService {
       if (!calendarId) throw new BookingError(503, 'calendar_unavailable', 'La réservation est momentanément impossible. Réessayez plus tard.');
       const end = new Date(startMs + type.durationMin * 60_000).toISOString();
       const location = locationLabel(type.mode, type.location);
+      // Rendez-vous « En visio » : une salle Alfred, dont le lien va dans l'événement (lieu cliquable dans Apple Calendar).
+      const room = type.mode === 'visio' ? this.video?.reserveForBooking(`${type.name} : ${name}`, start, end) ?? null : null;
       const description = [
         'Rendez-vous pris en ligne.',
+        room ? `Visio : ${room.url}` : '',
         `Nom : ${name}`,
         `E-mail : ${email}`,
         phone ? `Téléphone : ${phone}` : '',
@@ -672,7 +687,7 @@ export class BookingService {
       const discard = () => this.calendar.discardCreated(calendarId, uid).catch((err) => {
         console.error('[alfred] réservation : l’événement abandonné n’a pas pu être retiré :', err);
       });
-      const creating = this.calendar.create({ calendarId, title: `${type.name} : ${name}`, start, end, allDay: false, location, description }, uid);
+      const creating = this.calendar.create({ calendarId, title: `${type.name} : ${name}`, start, end, allDay: false, location: room ? room.url : location, description }, uid);
       let eventId: string | typeof TIMED_OUT;
       try {
         eventId = await withTimeout(creating, this.calendarTimeoutMs);
@@ -702,6 +717,13 @@ export class BookingService {
         await this.calendar.remove(eventId, 'all', null).catch(() => undefined);
         throw err;
       }
+      if (room) {
+        try {
+          room.commit(booking.id);
+        } catch (err) {
+          console.error('[alfred] réservation : la salle de visio n’a pas pu être enregistrée :', err);
+        }
+      }
       return booking;
     });
 
@@ -719,7 +741,14 @@ export class BookingService {
     return {
       id: b.id, typeName: b.type_name, location: b.location, start: b.start_utc, end: b.end_utc,
       name: b.name, email: b.email, phone: b.phone, message: b.message,
+      videoUrl: b.status === 'confirmed' ? (this.video?.urlForBooking(b.id) ?? null) : null,
     };
+  }
+
+  /** État et horaire actuels d'une réservation, pour la salle de visio qui lui est liée. */
+  videoLink(id: string): { status: 'confirmed' | 'cancelled'; start: string; end: string } | null {
+    const b = this.data.getBooking(id);
+    return b ? { status: b.status, start: b.start_utc, end: b.end_utc } : null;
   }
 
   private mailsSentLast24h(): number {
@@ -810,6 +839,12 @@ export class BookingService {
       return this.data.getBooking(id)!;
     });
     if (!row) return null;
+    // Rendez-vous annulé : sa salle de visio ferme (le lien ne s'ouvre plus).
+    try {
+      this.video?.closeForBooking(row.id);
+    } catch (err) {
+      console.error('[alfred] annulation : la salle de visio n’a pas pu être fermée :', err);
+    }
     const ctx = this.mailContext();
     const data = this.mailData(row);
     const messages: [string, MailMessage][] = [];
@@ -872,6 +907,7 @@ export class BookingService {
       name: b.name, email: b.email, phone: b.phone, message: b.message, status: b.status, createdAt: b.created_at,
       cancelledAt: b.cancelled_at, cancelledBy: b.cancelled_by, eventId: b.event_id, calendarId: b.calendar_id,
       eventState, eventStart, eventEnd, notifiedStart, mailError: b.mail_error,
+      videoUrl: b.status === 'confirmed' ? (this.video?.urlForBooking(b.id) ?? null) : null,
     };
   }
 

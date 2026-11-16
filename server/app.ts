@@ -14,6 +14,8 @@ import { IcsError } from './ics.js';
 import { verifyPassword } from './password.js';
 import { ForbiddenError, NotFoundError, type CalendarService } from './service.js';
 import { toCalendarInfo, type Store } from './store.js';
+import { DEFAULT_VIDEO_LIMITS, registerAdminVideoRoutes, registerPublicVideoRoutes, type VideoLimits } from './video/routes.js';
+import { VideoError, VideoService } from './video/service.js';
 
 const COOKIE = 'alfred_session';
 const MAX_RANGE_MS = 400 * 86_400_000;
@@ -33,6 +35,9 @@ export interface AppDeps {
   /** Connexions réglables depuis l'app (SMTP, CalDAV). Sans elles, les routes /api/connections n'existent pas. */
   connections?: ConnectionsService;
   connectionLimits?: Partial<ConnectionLimits>;
+  /** Visioconférence. Par défaut : un service sans serveur de visio (non configuré). */
+  video?: VideoService;
+  videoLimits?: Partial<VideoLimits>;
 }
 
 class BadRequest extends Error {}
@@ -74,6 +79,19 @@ class LoginThrottle {
 export function createApp(deps: AppDeps): Hono {
   const { store, service, caldav } = deps;
   const booking = deps.booking ?? new BookingService({ store, calendar: service, caldav, timezone: 'Europe/Zurich' });
+  const video = deps.video ?? new VideoService({
+    db: store.db, publicUrl: 'http://localhost', timezone: 'Europe/Zurich',
+    server: { internalUrl: 'http://127.0.0.1:7880', publicUrl: 'ws://127.0.0.1:7880' },
+  });
+  // Le navigateur ouvre une WebSocket vers le serveur de visio : même hôte (derrière Caddy) ou hôte dédié.
+  const videoOrigin = (() => {
+    try {
+      const u = new URL(video.publicWsUrl);
+      return `${u.protocol}//${u.host}`;
+    } catch {
+      return null;
+    }
+  })();
   const throttle = new LoginThrottle();
   const app = new Hono();
 
@@ -84,7 +102,8 @@ export function createApp(deps: AppDeps): Hono {
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", 'data:'],
       fontSrc: ["'self'", 'data:'],
-      connectSrc: ["'self'"],
+      connectSrc: ["'self'", ...(videoOrigin ? [videoOrigin] : [])],
+      mediaSrc: ["'self'", 'blob:'],
       manifestSrc: ["'self'"],
       workerSrc: ["'self'"],
       frameAncestors: ["'none'"],
@@ -107,6 +126,7 @@ export function createApp(deps: AppDeps): Hono {
 
   app.onError((err, c) => {
     if (err instanceof HTTPException) return c.json({ error: 'Requête refusée' }, err.status);
+    if (err instanceof VideoError) return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}) }, err.status);
     if (err instanceof BookingError) return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}) }, err.status);
     if (err instanceof ConnectionError) {
       return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}), ...(err.reason ? { reason: err.reason } : {}) }, err.status);
@@ -131,6 +151,8 @@ export function createApp(deps: AppDeps): Hono {
   // --- prise de rendez-vous, partie publique (sans session) -----------------
 
   registerPublicBookingRoutes(app, booking, { ...DEFAULT_BOOKING_LIMITS, ...deps.bookingLimits });
+  registerPublicVideoRoutes(app, video, authed, { ...DEFAULT_VIDEO_LIMITS, ...deps.videoLimits });
+  app.all('/api/public/*', (c) => c.json({ error: 'Introuvable', code: 'not_found' }, 404));
 
   // --- connexion -----------------------------------------------------------
 
@@ -209,6 +231,10 @@ export function createApp(deps: AppDeps): Hono {
   // --- prise de rendez-vous, administration --------------------------------
 
   registerAdminBookingRoutes(app, booking, store);
+
+  // --- visioconférence -------------------------------------------------------
+
+  registerAdminVideoRoutes(app, video);
 
   // --- connexions (SMTP, CalDAV) --------------------------------------------
 
