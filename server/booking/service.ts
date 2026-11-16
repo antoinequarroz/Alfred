@@ -432,6 +432,7 @@ export class BookingService {
     return {
       slug: t.slug, name: t.name, durationMin: t.durationMin, description: t.description, mode: t.mode,
       locationLabel: locationLabel(t.mode, t.location), phoneRequired: t.mode === 'telephone',
+      horizonDays: t.horizonDays,
     };
   }
 

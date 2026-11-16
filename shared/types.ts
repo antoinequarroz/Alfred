@@ -176,6 +176,8 @@ export interface PublicBookingType {
   locationLabel: string;
   /** Le téléphone est obligatoire pour ce type (rendez-vous par téléphone). */
   phoneRequired: boolean;
+  /** Nombre de jours à l'avance jusqu'où des créneaux sont proposés (borne du calendrier de la page). */
+  horizonDays: number;
 }
 
 export interface PublicBookingInfo {

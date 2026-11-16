@@ -168,7 +168,7 @@ describe('prise de rendez-vous : accès', () => {
     // La session ne change rien à ce que voit la partie publique.
     const withCookie = (await (await ctx.admin('/api/public/booking')).json()) as PublicBookingInfo;
     expect(withCookie).toEqual(await (await ctx.json('/api/public/booking')).json());
-    expect(Object.keys(withCookie.types[0]).sort()).toEqual(['description', 'durationMin', 'locationLabel', 'mode', 'name', 'phoneRequired', 'slug']);
+    expect(Object.keys(withCookie.types[0]).sort()).toEqual(['description', 'durationMin', 'horizonDays', 'locationLabel', 'mode', 'name', 'phoneRequired', 'slug']);
   });
 
   it('refuse une réservation ou une annulation venue d’un autre site', async () => {
@@ -338,7 +338,7 @@ describe('prise de rendez-vous : types', () => {
     await ctx.admin('/api/booking/settings', 'PUT', { enabled: true });
     const info = (await (await ctx.json('/api/public/booking')).json()) as PublicBookingInfo;
     expect(info.types).toEqual([
-      { slug: 'premiere-seance-decouverte', name: 'Première séance (découverte)', durationMin: 45, description: '', mode: 'cabinet', locationLabel: 'Au cabinet', phoneRequired: false },
+      { slug: 'premiere-seance-decouverte', name: 'Première séance (découverte)', durationMin: 45, description: '', mode: 'cabinet', locationLabel: 'Au cabinet', phoneRequired: false, horizonDays: 60 },
     ]);
   });
 
