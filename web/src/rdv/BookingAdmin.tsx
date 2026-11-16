@@ -5,6 +5,8 @@ import type {
 import { ApiError, bookingApi } from '../api';
 import { AlertIcon, CheckIcon, Chevron, CloseIcon, CopyIcon, ExternalIcon, MenuIcon, PlusIcon } from '../icons';
 import { hoursProblems, WEEKDAYS } from './hours';
+import { SmtpCard, useConnections } from '../settings/ConnectionCards';
+import { Card, Fld } from './ui';
 import { dateTimeShortIn, dayKeyIn, dayLabel, durationLabel, timeIn } from './tz';
 import './rdv.css';
 
@@ -78,32 +80,6 @@ function Modal({ title, onClose, children, small }: { title: string; onClose: ()
         {children}
       </div>
     </div>
-  );
-}
-
-function Fld({ label, error, hint, children, className }: { label: string; error?: string; hint?: string; children: (id: string) => React.ReactNode; className?: string }) {
-  const id = useId();
-  return (
-    <div className={`fld${error ? ' invalid' : ''}${className ? ` ${className}` : ''}`}>
-      <label htmlFor={id}>{label}</label>
-      {children(id)}
-      {error ? <p className="fld-err" role="alert">{error}</p> : hint ? <p className="fld-hint">{hint}</p> : null}
-    </div>
-  );
-}
-
-function Card({ title, sub, action, children }: { title: string; sub?: React.ReactNode; action?: React.ReactNode; children: React.ReactNode }) {
-  return (
-    <section className="bk-card">
-      <header className="bk-card-head">
-        <div>
-          <h2>{title}</h2>
-          {sub && <p>{sub}</p>}
-        </div>
-        {action}
-      </header>
-      {children}
-    </section>
   );
 }
 
@@ -547,63 +523,6 @@ function SettingsCard({ state, calendars, draft, setDraft, onSaved, notify }: {
   );
 }
 
-function MailCard({ state, lastError, timezone, notify }: { state: BookingAdminState; lastError: Booking | null; timezone: string; notify: (msg: string) => void }) {
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
-  const test = async () => {
-    setBusy(true);
-    setResult(null);
-    try {
-      const res = await bookingApi.testMail();
-      setResult({ ok: true, text: `E-mail d’essai envoyé à ${res.to}.` });
-    } catch (err) {
-      setResult({ ok: false, text: `Échec de l’envoi : ${message(err)}` });
-      if (!(err instanceof ApiError)) notify(message(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <Card title="E-mails" sub="Confirmations et annulations envoyées aux clients, avis envoyés à toi.">
-      <div className={`bk-status ${state.mail.configured ? 'ok' : 'off'}`}>
-        <span className="sync-dot" />
-        <div>
-          <p className="bk-status-title">{state.mail.configured ? 'Envoi configuré' : 'Envoi non configuré'}</p>
-          <p className="bk-meta">
-            {state.mail.configured
-              ? 'Les e-mails partent par le serveur SMTP.'
-              : 'Les réservations fonctionnent, mais aucun e-mail ne part. Renseigne SMTP_USER et SMTP_PASSWORD sur le serveur (deploy/configurer.sh).'}
-          </p>
-        </div>
-      </div>
-      <dl className="bk-dl">
-        <div><dt>Expéditeur</dt><dd>{state.mail.from}</dd></div>
-        <div><dt>Avis envoyés à</dt><dd>{state.mail.notifyTo}</dd></div>
-        {state.mail.configured && (
-          <div>
-            <dt>Envois sur 24 h</dt>
-            <dd className={state.mail.sentLast24h >= state.mail.dailyLimit ? 'bk-err-text' : undefined}>
-              {state.mail.sentLast24h} sur {state.mail.dailyLimit} au plus{state.mail.sentLast24h >= state.mail.dailyLimit ? ' : plafond atteint, plus rien ne part' : ''}
-            </dd>
-          </div>
-        )}
-        <div>
-          <dt>Dernière erreur</dt>
-          <dd>
-            {lastError
-              ? <span className="bk-err-text">{lastError.mailError} <span className="bk-meta">(réservation de {lastError.name}, {dateTimeShortIn(timezone, lastError.start)})</span></span>
-              : 'Aucune'}
-          </dd>
-        </div>
-      </dl>
-      <div className="bk-savebar static">
-        {result && <span className={result.ok ? 'ok' : 'err'} role="status">{result.text}</span>}
-        <button className="btn" disabled={busy || !state.mail.configured} onClick={() => void test()}>{busy ? 'Envoi…' : 'Envoyer un e-mail d’essai'}</button>
-      </div>
-    </Card>
-  );
-}
-
 // --- réservations --------------------------------------------------------------
 
 function BookingRow({ b, timezone, mailConfigured, onCancel, onResend }: {
@@ -698,7 +617,10 @@ function CancelDialog({ b, timezone, mailConfigured, onDone, onClose }: { b: Boo
 // --- écran ---------------------------------------------------------------------
 
 export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void; onCalendarChanged: () => void }) {
-  const [tab, setTab] = useState<Tab>('bookings');
+  const [tab, setTab] = useState<Tab>(() => (location.hash === '#rendez-vous/reglages' ? 'settings' : 'bookings'));
+  const connections = useConnections();
+  /** Incrémenté pour amener le focus sur le formulaire d'envoi des e-mails. */
+  const [mailFocus, setMailFocus] = useState(() => (location.hash === '#rendez-vous/reglages' ? 1 : 0));
   const [state, setState] = useState<BookingAdminState | null>(null);
   const [types, setTypes] = useState<BookingType[]>([]);
   const [hours, setHours] = useState<BookingHoursRange[]>([]);
@@ -813,6 +735,18 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
     void reload();
   };
 
+  // L'adresse suit l'onglet Réglages : un rechargement ou un lien y ramène.
+  useEffect(() => {
+    const hash = tab === 'settings' ? '#rendez-vous/reglages' : '#rendez-vous';
+    if (location.hash.startsWith('#rendez-vous') && location.hash !== hash) history.replaceState(null, '', location.pathname + location.search + hash);
+  }, [tab]);
+
+  const openMailSettings = () => {
+    setTab('settings');
+    setMailFocus((n) => n + 1);
+  };
+  const mailWarning = (w: string) => /^L’envoi d’e-mails n’est pas configuré/.test(w);
+
   const hoursDirty = hoursDraft !== null && !sameHours(hoursDraft, hours);
   const settingsDirty = settingsDraft !== null && state !== null && (['publicName', 'welcomeText', 'calendarId', 'slotStepMin'] as const).some((k) => settingsDraft[k] !== state.settings[k]);
   const list = scope === 'upcoming' ? upcoming : past;
@@ -847,7 +781,17 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
                 </div>
                 {state.warnings.filter((w) => !/^La prise de rendez-vous est fermée/.test(w)).length > 0 && (
                   <ul className="bk-warnings">
-                    {state.warnings.filter((w) => !/^La prise de rendez-vous est fermée/.test(w)).map((w) => <li key={w}><AlertIcon /><span>{w}</span></li>)}
+                    {state.warnings.filter((w) => !/^La prise de rendez-vous est fermée/.test(w)).map((w) => (
+                      <li key={w}>
+                        <AlertIcon />
+                        {mailWarning(w) ? (
+                          <span>
+                            L’envoi d’e-mails n’est pas configuré : les réservations fonctionnent, mais aucun e-mail ne part.
+                            <button type="button" className="cx-link" onClick={openMailSettings}>Configurer l’envoi</button>
+                          </span>
+                        ) : <span>{w}</span>}
+                      </li>
+                    ))}
                   </ul>
                 )}
               </section>
@@ -896,7 +840,31 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
               {tab === 'settings' && (
                 <>
                   <SettingsCard state={state} calendars={calendars} draft={settingsDraft} setDraft={setSettingsDraft} onSaved={setState} notify={notify} />
-                  <MailCard state={state} lastError={lastMailError} timezone={state.timezone} notify={notify} />
+                  {connections.state ? (
+                    <SmtpCard
+                      id="bk-mail" state={connections.state} notify={notify} autoFocus={mailFocus}
+                      onState={(next) => { connections.set(next); void reload(); }}
+                    >
+                      {state.mail.configured && (
+                        <div>
+                          <dt>Envois sur 24 h</dt>
+                          <dd className={state.mail.sentLast24h >= state.mail.dailyLimit ? 'bk-err-text' : undefined}>
+                            {state.mail.sentLast24h} sur {state.mail.dailyLimit} au plus{state.mail.sentLast24h >= state.mail.dailyLimit ? ' : plafond atteint, plus rien ne part' : ''}
+                          </dd>
+                        </div>
+                      )}
+                      <div>
+                        <dt>Dernière erreur</dt>
+                        <dd>
+                          {lastMailError
+                            ? <span className="bk-err-text">{lastMailError.mailError} <span className="bk-meta">(réservation de {lastMailError.name}, {dateTimeShortIn(state.timezone, lastMailError.start)})</span></span>
+                            : 'Aucune'}
+                        </dd>
+                      </div>
+                    </SmtpCard>
+                  ) : connections.error ? (
+                    <div className="bk-card"><p className="form-error" role="alert">{connections.error}</p><button className="btn" onClick={() => void connections.reload()}>Réessayer</button></div>
+                  ) : null}
                 </>
               )}
             </>

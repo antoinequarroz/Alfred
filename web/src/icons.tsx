@@ -146,3 +146,29 @@ export function AlertIcon() {
     </svg>
   );
 }
+
+export function GearIcon() {
+  return (
+    <svg {...base}>
+      <circle cx="8" cy="8" r="2.1" />
+      <path d="M8 1.9v1.5M8 12.6v1.5M3.69 3.69l1.06 1.06M11.25 11.25l1.06 1.06M1.9 8h1.5M12.6 8h1.5M3.69 12.31l1.06-1.06M11.25 4.75l1.06-1.06" />
+    </svg>
+  );
+}
+
+export function LockIcon() {
+  return (
+    <svg {...base}>
+      <rect x="3.25" y="7.25" width="9.5" height="6.5" rx="1.6" />
+      <path d="M5.5 7.25V5.4a2.5 2.5 0 0 1 5 0v1.85" />
+    </svg>
+  );
+}
+
+export function CloudIcon() {
+  return (
+    <svg {...base}>
+      <path d="M4.6 12.5a2.85 2.85 0 0 1-.35-5.68 3.9 3.9 0 0 1 7.55.93 2.4 2.4 0 0 1-.3 4.75Z" />
+    </svg>
+  );
+}

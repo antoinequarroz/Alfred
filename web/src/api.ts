@@ -1,6 +1,7 @@
 import type {
   Booking, BookingAdminState, BookingHoursRange, BookingSettings, BookingType, BookingTypeInput,
-  CalendarInfo, EditScope, EventInput, Occurrence, PublicSlots, SyncStatus,
+  CalendarInfo, CaldavSaveResult, CaldavSettingsInput, ConnectionsState, ConnectionTest, EditScope, EventInput, Occurrence, PublicSlots,
+  SmtpSaveResult, SmtpSettingsInput, SyncStatus,
 } from '../../shared/types';
 
 import { ApiError, requestJson } from './http';
@@ -53,4 +54,15 @@ export const bookingApi = {
     request<Booking>('POST', `/api/booking/bookings/${encodeURIComponent(id)}/cancel`, { notifyClient }),
   resendConfirmation: (id: string) => request<Booking>('POST', `/api/booking/bookings/${encodeURIComponent(id)}/resend`, {}),
   testMail: () => request<{ ok: true; to: string }>('POST', '/api/booking/mail/test', {}),
+};
+
+/** Connexions (envoi des e-mails, calendrier iCloud). Aucune réponse ne contient de mot de passe. */
+export const connectionsApi = {
+  state: () => request<ConnectionsState>('GET', '/api/connections'),
+  saveSmtp: (input: SmtpSettingsInput) => request<SmtpSaveResult>('PUT', '/api/connections/smtp', input),
+  testSmtp: () => request<SmtpSaveResult & { test: ConnectionTest }>('POST', '/api/connections/smtp/test', {}),
+  clearSmtp: () => request<SmtpSaveResult>('DELETE', '/api/connections/smtp'),
+  saveCaldav: (input: CaldavSettingsInput) => request<CaldavSaveResult>('PUT', '/api/connections/caldav', input),
+  testCaldav: (input: CaldavSettingsInput) => request<CaldavSaveResult>('POST', '/api/connections/caldav/test', input),
+  clearCaldav: () => request<CaldavSaveResult>('DELETE', '/api/connections/caldav'),
 };

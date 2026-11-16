@@ -120,7 +120,7 @@ describe.skipIf(!url)('identifiants CalDAV réglés depuis l’app (Radicale)', 
     const test = ((await (await ctx.admin('/api/connections/caldav/test', 'POST')).json()) as { test: ConnectionTest }).test;
     expect(test.ok).toBe(true);
 
-    await fetch(cal.url!, { method: 'DELETE', headers: { authorization: auth } });
+    expect((await fetch(cal.url!, { method: 'DELETE', headers: { authorization: auth } })).status).toBeLessThan(300);
     const all = logs.join('\n');
     expect(all).not.toContain(FAUX);
     expect(all).not.toContain(Buffer.from(`${user}:${FAUX}`).toString('base64'));

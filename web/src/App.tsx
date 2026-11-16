@@ -3,7 +3,7 @@ import type { CalendarInfo, EditScope, SyncStatus } from '../../shared/types';
 import { api, ApiError } from './api';
 import { addDays, addMonths, capitalize, fmt, startOfDay, startOfWeek } from './dates';
 import { EventDialog, ScopeDialog } from './EventDialog';
-import { CalendarIcon, Chevron, ClockIcon, MenuIcon, PlusIcon } from './icons';
+import { CalendarIcon, Chevron, ClockIcon, GearIcon, MenuIcon, PlusIcon } from './icons';
 import { draftFromOcc, draftToInput, movedInput, newDraft, toOcc, type CalendarMap, type Draft, type Occ } from './model';
 import { MiniMonth, monthGrid, MonthView } from './MonthView';
 import { MoonIcon, SunIcon, ThemeSwitch, useTheme } from './theme';
@@ -12,8 +12,13 @@ import { WeekView } from './WeekView';
 // L'écran « Rendez-vous » n'est chargé que lorsqu'on l'ouvre.
 const BookingAdmin = lazy(() => import('./rdv/BookingAdmin').then((m) => ({ default: m.BookingAdmin })));
 
-type Section = 'calendar' | 'booking';
-const sectionFromHash = (): Section => (location.hash === '#rendez-vous' ? 'booking' : 'calendar');
+// L'écran « Réglages » (connexions iCloud et e-mails) aussi.
+const ConnectionsScreen = lazy(() => import('./settings/ConnectionsScreen').then((m) => ({ default: m.ConnectionsScreen })));
+
+type Section = 'calendar' | 'booking' | 'settings';
+const SECTION_HASH: Record<Section, string> = { calendar: '', booking: '#rendez-vous', settings: '#reglages' };
+// « #rendez-vous/reglages » ouvre la rubrique Rendez-vous sur son onglet Réglages.
+const sectionFromHash = (): Section => (location.hash.startsWith('#rendez-vous') ? 'booking' : location.hash === '#reglages' ? 'settings' : 'calendar');
 
 type View = 'day' | 'week' | 'month';
 const VIEW_LABELS: Record<View, string> = { day: 'Jour', week: 'Semaine', month: 'Mois' };
@@ -85,8 +90,8 @@ export function App({ onLogout }: { onLogout: () => void }) {
   const setSection = useCallback((next: Section) => {
     setSectionState(next);
     setMenuOpen(false);
-    const hash = next === 'booking' ? '#rendez-vous' : '';
-    if (location.hash !== hash) history.pushState(null, '', location.pathname + location.search + hash);
+    const hash = SECTION_HASH[next];
+    if (sectionFromHash() !== next || (next !== 'booking' && location.hash !== hash)) history.pushState(null, '', location.pathname + location.search + hash);
   }, []);
 
   const [from, to] = useMemo(() => viewRange(view, cursor), [view, cursor]);
@@ -280,6 +285,10 @@ export function App({ onLogout }: { onLogout: () => void }) {
             <ClockIcon />
             <span>Rendez-vous</span>
           </button>
+          <button className={section === 'settings' ? 'active' : ''} aria-current={section === 'settings' ? 'page' : undefined} onClick={() => setSection('settings')}>
+            <GearIcon />
+            <span>Réglages</span>
+          </button>
         </nav>
         <button className="btn primary new-btn" onClick={() => { setSection('calendar'); openNew(); }}>
           <PlusIcon />
@@ -310,6 +319,9 @@ export function App({ onLogout }: { onLogout: () => void }) {
             <span>{syncLabel(sync)}</span>
           </div>
           {sync?.lastError && <p className="sync-detail">{sync.lastError}</p>}
+          {sync && (sync.lastError || !sync.configured) && section !== 'settings' && (
+            <button className="sync-link" onClick={() => setSection('settings')}>{sync.configured ? 'Ouvrir les réglages iCloud' : 'Relier iCloud'}</button>
+          )}
           <div className="foot-actions">
             {sync?.configured && (
               <button className="btn ghost small" onClick={() => void syncNow()} disabled={sync.running}>Synchroniser</button>
@@ -323,6 +335,10 @@ export function App({ onLogout }: { onLogout: () => void }) {
       {section === 'booking' ? (
         <Suspense fallback={<main className="main" />}>
           <BookingAdmin onMenu={() => setMenuOpen(true)} onCalendarChanged={() => { void loadMeta(); void loadEventsRef.current(); }} />
+        </Suspense>
+      ) : section === 'settings' ? (
+        <Suspense fallback={<main className="main" />}>
+          <ConnectionsScreen onMenu={() => setMenuOpen(true)} onCalendarChanged={() => { void loadMeta(); void loadEventsRef.current(); }} />
         </Suspense>
       ) : (
       <main className="main">
