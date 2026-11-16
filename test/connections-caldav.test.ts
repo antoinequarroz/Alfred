@@ -143,4 +143,22 @@ describe.skipIf(!url)('identifiants CalDAV réglés depuis l’app (Radicale)', 
     expect(dev.caldav.getStatus()).toMatchObject({ configured: true, lastError: null });
     expect(dev.caldav.getStatus().lastSuccessAt).not.toBeNull();
   }, 60_000);
+
+  it('calendriers en base sans identifiant connu : le vrai essai reconnaît le compte auquel ils appartiennent', async () => {
+    const probe = await probeCaldav({ serverUrl: url!, username: user, password });
+    if (!probe.ok || !probe.urls?.length) return; // compte sans calendrier : rien à reconnaître
+    // Calendrier d'un autre compte en base : relier ce compte-ci le supprimerait, c'est refusé.
+    const other = await setup({ smtp: {}, caldav: {} }, true);
+    other.store.upsertCalendar({ id: 'caldav:ailleurs', source: 'caldav', url: `${url}/quelquun-dautre/agenda/`, name: 'Ailleurs', color: '#0a84ff', read_only: 0, sort: 0 });
+    const refused = await other.admin('/api/connections/caldav', 'PUT', { url, username: user, password });
+    expect(refused.status).toBe(409);
+    expect(other.caldav.configured).toBe(false);
+    expect(other.store.getCalendar('caldav:ailleurs')).toBeDefined();
+    // Un calendrier de ce compte en base : accepté.
+    const same = await setup({ smtp: {}, caldav: {} }, true);
+    same.store.upsertCalendar({ id: 'caldav:connu', source: 'caldav', url: probe.urls[0], name: 'Connu', color: '#0a84ff', read_only: 0, sort: 0 });
+    const ok = await same.admin('/api/connections/caldav', 'PUT', { url, username: user, password });
+    expect(ok.status).toBe(200);
+    await same.connections.pendingSync;
+  }, 60_000);
 });

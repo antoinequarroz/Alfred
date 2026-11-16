@@ -53,7 +53,6 @@ export const bookingApi = {
   cancelBooking: (id: string, notifyClient: boolean) =>
     request<Booking>('POST', `/api/booking/bookings/${encodeURIComponent(id)}/cancel`, { notifyClient }),
   resendConfirmation: (id: string) => request<Booking>('POST', `/api/booking/bookings/${encodeURIComponent(id)}/resend`, {}),
-  testMail: () => request<{ ok: true; to: string }>('POST', '/api/booking/mail/test', {}),
 };
 
 /** Connexions (envoi des e-mails, calendrier iCloud). Aucune réponse ne contient de mot de passe. */

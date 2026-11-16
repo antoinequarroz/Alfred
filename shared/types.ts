@@ -274,6 +274,11 @@ export interface ConnectionSecret {
   source: SettingSource;
   /** Enregistré dans l'app mais indéchiffrable (clé absente ou différente) : à ressaisir. */
   unreadable: boolean;
+  /**
+   * Un mot de passe existe, mais pour un autre serveur que celui réglé maintenant : il n'est
+   * pas utilisé (un mot de passe ne part jamais vers un serveur pour lequel il n'a pas été saisi).
+   */
+  otherServer: boolean;
 }
 
 /** Résultat d'un essai de connexion, en clair et sans détail sensible. */
@@ -298,7 +303,9 @@ export interface SmtpConnectionState {
   notifyTo: ConnectionField;
   /** Au moins un réglage est enregistré dans l'app (« Revenir au fichier .env » a un effet). */
   hasAppValues: boolean;
-  /** Dernier essai d'envoi depuis le démarrage, ou null. */
+  /** Le fichier .env porte un identifiant et un mot de passe : retirer les réglages de l'app ne coupe pas l'envoi. */
+  envConfigured: boolean;
+  /** Dernier essai d'envoi (gardé d'un redémarrage à l'autre), ou null. */
   lastTest: ConnectionTest | null;
 }
 
@@ -316,6 +323,7 @@ export interface CaldavConnectionState {
   /** Calendriers et événements synchronisés présents en base. */
   calendars: number;
   events: number;
+  /** Dernier essai de la configuration en place depuis le démarrage (jamais celui d'identifiants seulement essayés), ou null. */
   lastTest: ConnectionTest | null;
 }
 

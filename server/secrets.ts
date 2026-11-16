@@ -65,6 +65,15 @@ export function parseSecretKey(value: string): Buffer | null {
   return null;
 }
 
+/** Message pour un fichier de clé présent mais illisible ; le cas des droits (après une restauration) est nommé. */
+export function keyReadProblem(code: string | undefined): string {
+  if (code === 'EACCES' || code === 'EPERM') {
+    return `Le fichier de clé (${KEY_FILE}) existe, mais Alfred n’a pas le droit de le lire : ses droits ou son propriétaire ont changé, par exemple après une restauration. `
+      + 'Rends le dossier de données à l’utilisateur du conteneur (commande « chown » de la section Sauvegarde de docs/DEPLOIEMENT.md), puis redémarre Alfred.';
+  }
+  return `Le fichier de clé (${KEY_FILE}) ne peut pas être lu.`;
+}
+
 export interface SecretBoxOptions {
   /** Dossier de données ; ':memory:' : clé en mémoire seulement (tests). */
   dataDir: string;
@@ -122,7 +131,8 @@ export class SecretBox {
       }
     } catch (err) {
       // Absent : il sera créé au premier secret enregistré.
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') this.problem = `Le fichier de clé (${KEY_FILE}) ne peut pas être lu.`;
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') this.problem = keyReadProblem(code);
     }
   }
 

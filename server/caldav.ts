@@ -27,7 +27,8 @@ function newClient(opts: CaldavOptions): DAVClient {
   });
 }
 
-export type ProbeResult = { ok: true; calendars: number } | ({ ok: false } & Diagnostic);
+/** urls : adresses des calendriers trouvés (pour reconnaître le compte dont des calendriers sont déjà en base). */
+export type ProbeResult = { ok: true; calendars: number; urls?: string[] } | ({ ok: false } & Diagnostic);
 
 /**
  * Essai de connexion sans rien modifier : découverte du principal et du dossier des
@@ -39,16 +40,16 @@ export async function probeCaldav(opts: CaldavOptions, timeoutMs = 20_000): Prom
     const client = newClient(opts);
     await client.login();
     const calendars = await client.fetchCalendars();
-    return calendars.filter((c) => !c.components || c.components.length === 0 || c.components.includes('VEVENT')).length;
+    return calendars.filter((c) => !c.components || c.components.length === 0 || c.components.includes('VEVENT')).map((c) => c.url);
   })();
   try {
-    const calendars = await Promise.race([
+    const urls = await Promise.race([
       attempt,
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new DiagnosedError({ code: 'timeout', message: 'Délai dépassé : le serveur de calendrier ne répond pas.' })), timeoutMs);
       }),
     ]);
-    return { ok: true, calendars };
+    return { ok: true, calendars: urls.length, urls };
   } catch (err) {
     attempt.catch(() => undefined);
     const diagnostic = describeCaldavError(err);

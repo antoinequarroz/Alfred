@@ -170,7 +170,5 @@ export function registerAdminBookingRoutes(app: Hono, booking: BookingService, s
     return c.json(await booking.cancelByAdmin(c.req.param('id'), b?.notifyClient !== false));
   });
   app.post('/api/booking/bookings/:id/resend', async (c) => c.json(await booking.resendConfirmation(c.req.param('id'))));
-
-  // --- e-mails -------------------------------------------------------------
-  app.post('/api/booking/mail/test', async (c) => c.json(await booking.sendTestMail()));
+  // L'e-mail d'essai part par POST /api/connections/smtp/test, seule route d'essai : sa limite de débit ne se contourne pas par ici.
 }

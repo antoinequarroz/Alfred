@@ -82,7 +82,7 @@ async function setup(opts: SetupOptions = {}) {
   const sync = vi.spyOn(caldav, 'sync').mockResolvedValue();
   caldav.reconfigure(connections.caldavOptions());
   const service = new CalendarService(store, caldav, 'Europe/Zurich');
-  const booking = new BookingService({ store, calendar: service, caldav, timezone: 'Europe/Zurich', mailer: connections.mailer, publicUrl: 'https://alfred.example.ch' });
+  const booking = new BookingService({ store, calendar: service, caldav, timezone: 'Europe/Zurich', mailer: connections.mailer, mailProblem: () => connections.smtpProblem(), publicUrl: 'https://alfred.example.ch' });
   connections.mailContext = () => ({ publicName: 'Antoine Quarroz', timezone: 'Europe/Zurich', publicUrl: 'https://alfred.example.ch' });
   const app = createApp({
     store, service, caldav, passwordHash, secureCookies: false, sessionDays: 30, booking, connections,
@@ -182,8 +182,11 @@ describe('API des connexions : accès', () => {
     }
     expect(smtp.mails).toHaveLength(before);
     expect(ctx.probed).toHaveLength(1);
+    // L'ancienne route d'essai de la prise de rendez-vous n'existe plus : la limite ne se contourne pas par là.
+    for (let i = 0; i < 3; i++) expect((await ctx.admin('/api/booking/mail/test', 'POST')).status).toBe(404);
+    expect(smtp.mails).toHaveLength(before);
     // Enregistrer sans tester reste possible.
-    expect((await ctx.admin('/api/connections/smtp', 'PUT', { port: 465 })).status).toBe(200);
+    expect((await ctx.admin('/api/connections/smtp', 'PUT', { notifyTo: 'avis@exemple.ch' })).status).toBe(200);
   });
 });
 
@@ -223,15 +226,15 @@ describe('API des connexions : priorité app > .env > défaut', () => {
     expect(s.caldav).toMatchObject({ configured: true, username: { value: 'antoine@exemple.ch', source: 'env' }, password: { configured: true, source: 'env' } });
     expect(ctx.caldav.configured).toBe(true);
 
-    const saved = await ctx.admin('/api/connections/smtp', 'PUT', { host: 'Mail.App.Exemple.ch', port: '465', notifyTo: 'avis@exemple.ch' });
+    const saved = await ctx.admin('/api/connections/smtp', 'PUT', { host: 'Mail.App.Exemple.ch', port: '465', notifyTo: 'avis@exemple.ch', password: SMTP_PASS });
     expect(saved.status).toBe(200);
     s = ((await saved.json()) as SmtpSaveResult).state;
     expect(s.smtp).toMatchObject({
       configured: true, hasAppValues: true,
       host: { value: 'mail.app.exemple.ch', source: 'app' }, port: { value: '465', source: 'app' }, user: { value: 'env@exemple.ch', source: 'env' },
-      password: { configured: true, source: 'env' }, from: { value: 'Env <env@exemple.ch>', source: 'env' }, notifyTo: { value: 'avis@exemple.ch', source: 'app' },
+      password: { configured: true, source: 'app' }, from: { value: 'Env <env@exemple.ch>', source: 'env' }, notifyTo: { value: 'avis@exemple.ch', source: 'app' },
     });
-    expect(ctx.connections.smtpOptions()).toMatchObject({ host: 'mail.app.exemple.ch', port: 465, secure: true, user: 'env@exemple.ch', password: ENV_PASS, notifyTo: 'avis@exemple.ch', guard: { allowInternal: false } });
+    expect(ctx.connections.smtpOptions()).toMatchObject({ host: 'mail.app.exemple.ch', port: 465, secure: true, user: 'env@exemple.ch', password: SMTP_PASS, notifyTo: 'avis@exemple.ch', guard: { allowInternal: false } });
   });
 
   it('une valeur identique à celle du .env ou au défaut n’est pas recopiée dans l’app', async () => {
@@ -255,8 +258,12 @@ describe('API des connexions : priorité app > .env > défaut', () => {
 
     const one = await ctx.admin('/api/connections/smtp/password', 'DELETE');
     expect(one.status).toBe(200);
-    expect(((await one.json()) as SmtpSaveResult).state.smtp).toMatchObject({ password: { configured: true, source: 'env' }, user: { source: 'app' }, hasAppValues: true });
-    expect(ctx.connections.smtpOptions()).toMatchObject({ user: 'app@exemple.ch', password: ENV_PASS });
+    // Le mot de passe du .env ne va pas au serveur saisi dans l'app : l'envoi compte comme non configuré.
+    expect(((await one.json()) as SmtpSaveResult).state.smtp).toMatchObject({ configured: false, password: { configured: false, source: 'env', otherServer: true }, user: { source: 'app' }, hasAppValues: true });
+    expect(ctx.connections.smtpOptions()).toBeNull();
+    // Serveur du .env de retour : son mot de passe sert de nouveau.
+    await ctx.admin('/api/connections/smtp/host', 'DELETE');
+    expect(ctx.connections.smtpOptions()).toMatchObject({ host: 'smtp.env.exemple.ch', user: 'app@exemple.ch', password: ENV_PASS });
 
     // Un champ vidé dans le formulaire revient lui aussi au .env.
     await ctx.admin('/api/connections/smtp', 'PUT', { user: '' });
@@ -384,10 +391,6 @@ describe('les mots de passe ne sortent jamais du serveur', () => {
     expect(wrongBody.test!.message).toBe('Identifiants refusés par le serveur d’envoi : vérifie l’identifiant (l’adresse de la boîte) et le mot de passe.');
     expect(wrongBody.state.smtp).toMatchObject({ configured: true, password: { configured: true, source: 'app', unreadable: false }, lastTest: { ok: false, code: 'auth' } });
     expect(smtp.logins).toEqual([[BOX, SMTP_PASS_2]]);
-    // Le même diagnostic par l'ancienne route d'essai de la prise de rendez-vous.
-    const legacy = await ctx.admin('/api/booking/mail/test', 'POST');
-    expect(legacy.status).toBe(502);
-    expect(((await legacy.json()) as { error: string }).error).toContain('Identifiants refusés');
 
     // Bon mot de passe : enregistré et testé en une action.
     const right = await ctx.admin('/api/connections/smtp', 'PUT', { password: SMTP_PASS, test: true });
@@ -418,7 +421,7 @@ describe('les mots de passe ne sortent jamais du serveur', () => {
     await ctx.admin('/api/connections/smtp', 'PUT', { user: BOX, password: SMTP_PASS });
     await ctx.admin('/api/connections/caldav', 'PUT', { username: 'a@b.ch', password: CALDAV_PASS });
     const rows = ctx.db.prepare('SELECT key, value, secret FROM connection_settings ORDER BY key').all() as { key: string; value: string; secret: number }[];
-    expect(rows.map((r) => [r.key, r.secret])).toEqual([['caldav.password', 1], ['caldav.username', 0], ['smtp.password', 1], ['smtp.user', 0]]);
+    expect(rows.map((r) => [r.key, r.secret])).toEqual([['caldav.password', 1], ['caldav.username', 0], ['smtp.password', 1], ['smtp.passwordFor', 0], ['smtp.user', 0]]);
     const dump = JSON.stringify(rows);
     for (const secret of [SMTP_PASS, CALDAV_PASS]) for (const form of forms(secret)) expect(dump).not.toContain(form);
     for (const r of rows.filter((x) => x.secret)) expect(r.value).toMatch(/^v1:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$/);
@@ -426,8 +429,8 @@ describe('les mots de passe ne sortent jamais du serveur', () => {
     const smtpSealed = rows.find((r) => r.key === 'smtp.password')!.value;
     ctx.db.prepare("UPDATE connection_settings SET value = ? WHERE key = 'caldav.password'").run(smtpSealed);
     const s = await ctx.state();
-    expect(s.caldav.password).toEqual({ configured: false, source: 'app', unreadable: true });
-    expect(s.smtp.password).toEqual({ configured: true, source: 'app', unreadable: false });
+    expect(s.caldav.password).toEqual({ configured: false, source: 'app', unreadable: true, otherServer: false });
+    expect(s.smtp.password).toEqual({ configured: true, source: 'app', unreadable: false, otherServer: false });
   });
 
   it('ni dans une réponse ni dans un journal : CalDAV, essais réussis et ratés', async () => {
@@ -476,7 +479,6 @@ describe('SMTP réglé à chaud', () => {
     let b = await bookingState();
     expect(b.mail.configured).toBe(false);
     expect(b.warnings.some((w) => w.includes('e-mails n’est pas configuré'))).toBe(true);
-    expect((await ctx.admin('/api/booking/mail/test', 'POST')).status).toBe(400);
     const none = ((await (await ctx.admin('/api/connections/smtp/test', 'POST')).json()) as { test: ConnectionTest }).test;
     expect(none).toMatchObject({ ok: false, code: 'not_configured' });
 
@@ -496,12 +498,12 @@ describe('SMTP réglé à chaud', () => {
     b = await bookingState();
     expect(b.mail).toMatchObject({ configured: true, from: 'Cabinet Quarroz <info@antoinequarroz.ch>', notifyTo: 'avis@antoinequarroz.ch' });
     expect(b.warnings.some((w) => w.includes('e-mails'))).toBe(false);
-    expect(await (await ctx.admin('/api/booking/mail/test', 'POST')).json()).toEqual({ ok: true, to: 'avis@antoinequarroz.ch' });
+    expect(((await (await ctx.admin('/api/connections/smtp/test', 'POST')).json()) as { test: ConnectionTest }).test.ok).toBe(true);
     expect(smtp.mails).toHaveLength(2);
 
     // Changement de port à chaud : l'envoi suivant va vers le nouveau serveur.
     const second = await fakeSmtp();
-    await ctx.admin('/api/connections/smtp', 'PUT', { port: second.port });
+    expect((await ctx.admin('/api/connections/smtp', 'PUT', { port: second.port, password: SMTP_PASS })).status).toBe(200);
     expect(((await (await ctx.admin('/api/connections/smtp/test', 'POST')).json()) as { test: ConnectionTest }).test.ok).toBe(true);
     expect(second.mails).toHaveLength(1);
     expect(smtp.mails).toHaveLength(2);
@@ -722,7 +724,15 @@ describe('CalDAV réglé depuis l’app (essai de connexion simulé)', () => {
     expect(ctx.db.prepare('SELECT COUNT(*) AS n FROM connection_settings').get()).toEqual({ n: 0 });
     expect(ctx.connections.caldavOptions()).toMatchObject({ password: CALDAV_PASS });
     const s = await ctx.state();
-    expect(s.caldav).toMatchObject({ configured: true, password: { source: 'env' }, lastTest: { ok: false, code: 'auth' } });
+    // L'essai d'identifiants refusés, jamais enregistrés, ne reste pas affiché comme celui de la configuration en place.
+    expect(s.caldav).toMatchObject({ configured: true, password: { source: 'env' }, lastTest: null });
+    const candidate = (await (await ctx.admin('/api/connections/caldav/test', 'POST', { username: 'antoine@exemple.ch', password: SMTP_PASS })).json()) as CaldavSaveResult;
+    expect(candidate.test).toMatchObject({ ok: false, code: 'auth' });
+    expect(candidate.state.caldav.lastTest).toBeNull();
+    // L'essai de la configuration en place (corps vide), lui, est gardé.
+    const current = (await (await ctx.admin('/api/connections/caldav/test', 'POST', {})).json()) as CaldavSaveResult;
+    expect(current.state.caldav.lastTest).toMatchObject({ ok: false, code: 'auth' });
+    expect(ctx.probed.at(-1)).toMatchObject({ username: 'antoine@exemple.ch', password: CALDAV_PASS });
 
     result = { ok: true, calendars: 1 };
     const ok = (await (await ctx.admin('/api/connections/caldav', 'PUT', { username: 'antoine@exemple.ch', password: CALDAV_PASS_2 })).json()) as CaldavSaveResult;
@@ -761,6 +771,175 @@ describe('CalDAV réglé depuis l’app (essai de connexion simulé)', () => {
     expect((await ctx.state()).caldav).toMatchObject({ accountLocked: true, configured: false, calendars: 1 });
     expect((await ctx.admin('/api/connections/caldav', 'PUT', { username: 'autre@exemple.ch', password: CALDAV_PASS })).status).toBe(409);
     expect((await ctx.admin('/api/connections/caldav', 'PUT', { username: 'antoine@exemple.ch', password: CALDAV_PASS })).status).toBe(200);
+  });
+});
+
+describe('un mot de passe ne part que vers le serveur pour lequel il a été saisi', () => {
+  it('SMTP, mot de passe du .env : changer de serveur sans le ressaisir est refusé, et rien ne part vers le nouveau serveur', async () => {
+    const legit = await fakeSmtp();
+    const thief = await fakeSmtp();
+    const env: ConnectionEnv = { smtp: { host: '127.0.0.1', port: String(legit.port), user: BOX, password: ENV_PASS }, caldav: {} };
+    const ctx = await setup({ env, allowPrivateHosts: true });
+    for (const body of [{ host: 'localhost', port: thief.port, test: true }, { port: thief.port, test: true }, { host: 'localhost', port: thief.port, password: '' }]) {
+      const res = await ctx.admin('/api/connections/smtp', 'PUT', body);
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { fields: Record<string, string> }).fields).toEqual({ password: 'Ressaisis le mot de passe : le serveur ou le port change' });
+    }
+    expect(ctx.db.prepare('SELECT COUNT(*) AS n FROM connection_settings').get()).toEqual({ n: 0 });
+    expect(((await (await ctx.admin('/api/connections/smtp/test', 'POST')).json()) as { test: ConnectionTest }).test.ok).toBe(true);
+    expect(legit.logins).toEqual([[BOX, ENV_PASS]]);
+    expect(thief.logins).toEqual([]);
+
+    // Avec un nouveau mot de passe, le changement passe : c'est celui-là, et lui seul, qui va au nouveau serveur.
+    const moved = await ctx.admin('/api/connections/smtp', 'PUT', { host: 'localhost', port: thief.port, password: SMTP_PASS, test: true });
+    expect(moved.status).toBe(200);
+    expect(thief.logins).toEqual([[BOX, SMTP_PASS]]);
+    // Même identique à celui du .env, un mot de passe saisi pour un serveur de l'app est enregistré dans l'app, pour ce serveur.
+    await ctx.admin('/api/connections/smtp', 'PUT', { password: ENV_PASS });
+    expect((await ctx.state()).smtp.password).toMatchObject({ configured: true, source: 'app' });
+    // Le mot de passe de l'app retiré : celui du .env ne suit pas vers le serveur de l'app.
+    await ctx.admin('/api/connections/smtp/password', 'DELETE');
+    const s = await ctx.state();
+    expect(s.smtp).toMatchObject({ configured: false, password: { configured: false, source: 'env', otherServer: true } });
+    expect(s.notices.join(' ')).toContain('n’est pas utilisé avec un serveur réglé dans l’app');
+    const test = ((await (await ctx.admin('/api/connections/smtp/test', 'POST')).json()) as { test: ConnectionTest }).test;
+    expect(test).toMatchObject({ ok: false, code: 'not_configured' });
+    expect(thief.logins).toHaveLength(1);
+    for (const form of forms(ENV_PASS)) for (const body of ctx.bodies) expect(body).not.toContain(form);
+  });
+
+  it('SMTP, mot de passe de l’app : il reste lié à son serveur, même si l’hôte change par un autre chemin', async () => {
+    const legit = await fakeSmtp();
+    const thief = await fakeSmtp();
+    const ctx = await setup({ allowPrivateHosts: true });
+    expect((await ctx.admin('/api/connections/smtp', 'PUT', { host: '127.0.0.1', port: legit.port, user: BOX, password: SMTP_PASS, test: true })).status).toBe(200);
+    expect(legit.logins).toEqual([[BOX, SMTP_PASS]]);
+
+    const refused = await ctx.admin('/api/connections/smtp', 'PUT', { host: 'localhost', port: thief.port, test: true });
+    expect(refused.status).toBe(400);
+    expect(((await refused.json()) as { fields: Record<string, string> }).fields.password).toContain('Ressaisis le mot de passe');
+    expect(thief.logins).toEqual([]);
+    // Les autres réglages se changent toujours sans ressaisir le mot de passe.
+    expect((await ctx.admin('/api/connections/smtp', 'PUT', { host: '127.0.0.1', port: legit.port, notifyTo: 'avis@exemple.ch', user: BOX })).status).toBe(200);
+
+    // Hôte ou port modifié sans passer par l'enregistrement (réglage retiré, ligne changée en base) :
+    // le mot de passe, lié à sa destination, n'est plus utilisé.
+    ctx.db.prepare("UPDATE connection_settings SET value = ? WHERE key = 'smtp.port'").run(String(thief.port));
+    await ctx.admin('/api/connections/smtp', 'PUT', {}); // vide le cache de l'expéditeur
+    let s = await ctx.state();
+    expect(s.smtp).toMatchObject({ configured: false, password: { configured: false, source: 'app', unreadable: false, otherServer: true } });
+    expect(s.notices.join(' ')).toContain('enregistré pour un autre serveur');
+    expect(ctx.connections.smtpOptions()).toBeNull();
+    expect(((await (await ctx.admin('/api/connections/smtp/test', 'POST')).json()) as { test: ConnectionTest }).test).toMatchObject({ ok: false, code: 'not_configured' });
+    // Même en recopiant la destination à la main, le chiffré ne s'ouvre pas : elle fait partie des données authentifiées.
+    ctx.db.prepare("UPDATE connection_settings SET value = ? WHERE key = 'smtp.passwordFor'").run(`127.0.0.1:${thief.port}`);
+    s = await ctx.state();
+    expect(s.smtp.password).toMatchObject({ configured: false, unreadable: true });
+    expect(thief.logins).toEqual([]);
+
+    // Retirer le serveur de l'app (retour à celui par défaut) n'emmène pas non plus le mot de passe.
+    ctx.db.prepare("UPDATE connection_settings SET value = ? WHERE key = 'smtp.passwordFor'").run(`127.0.0.1:${legit.port}`);
+    ctx.db.prepare("UPDATE connection_settings SET value = ? WHERE key = 'smtp.port'").run(String(legit.port));
+    expect((await ctx.state()).smtp.configured).toBe(true);
+    await ctx.admin('/api/connections/smtp/host', 'DELETE');
+    expect((await ctx.state()).smtp).toMatchObject({ configured: false, host: { value: 'mail.infomaniak.com' }, password: { otherServer: true } });
+    // Ressaisi pour le nouveau serveur : tout repart.
+    expect((await ctx.admin('/api/connections/smtp', 'PUT', { host: 'localhost', port: thief.port, password: SMTP_PASS_2, test: true })).status).toBe(200);
+    expect(thief.logins).toEqual([[BOX, SMTP_PASS_2]]);
+  });
+
+  it('CalDAV : le mot de passe du .env n’est pas envoyé à une autre adresse ni avec un autre identifiant', async () => {
+    // .env avec un mot de passe mais sans identifiant : aucun compte n'est « en place ».
+    const ctx = await setup({ env: { smtp: {}, caldav: { password: CALDAV_PASS } }, allowPrivateHosts: true });
+    for (const body of [{ username: 'voleur@exemple.org', url: 'https://dav.exemple.org' }, { username: 'voleur@exemple.org' }]) {
+      const res = await ctx.admin('/api/connections/caldav/test', 'POST', body);
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { fields: Record<string, string> }).fields.password).toContain('Saisis le mot de passe d’application');
+    }
+    expect(ctx.probed).toHaveLength(0);
+    // Compte en place par le .env : un essai avec un autre identifiant ne reprend pas son mot de passe non plus.
+    const locked = await setup({ env: { smtp: {}, caldav: { username: 'antoine@exemple.ch', password: CALDAV_PASS } } });
+    expect((await locked.admin('/api/connections/caldav/test', 'POST', { username: 'autre@exemple.ch' })).status).toBe(400);
+    expect(locked.probed).toHaveLength(0);
+    // L'essai de la configuration en place, lui, utilise bien le mot de passe enregistré.
+    expect((await locked.admin('/api/connections/caldav/test', 'POST', {})).status).toBe(200);
+    expect(locked.probed).toHaveLength(1);
+    expect(locked.probed[0]).toMatchObject({ username: 'antoine@exemple.ch', password: CALDAV_PASS });
+  });
+});
+
+describe('calendriers déjà en base sans identifiant connu', () => {
+  const HOME = 'https://p42-caldav.icloud.com/1234/calendars/home/';
+  it('seul le compte qui retrouve ces calendriers peut être relié', async () => {
+    let urls: string[] | undefined = ['https://p07-caldav.icloud.com/9999/calendars/home/'];
+    const ctx = await setup({ probe: async () => ({ ok: true, calendars: urls?.length ?? 2, urls }) });
+    ctx.store.upsertCalendar({ id: 'caldav:x', source: 'caldav', url: HOME, name: 'Perso', color: '#0a84ff', read_only: 0, sort: 0 });
+    ctx.sync.mockClear();
+
+    // Un autre compte (ou une faute dans l'identifiant) : refusé, rien n'est enregistré, aucune synchro ne part.
+    const res = await ctx.admin('/api/connections/caldav', 'PUT', { username: 'quelquun.dautre@icloud.com', password: CALDAV_PASS });
+    expect(res.status).toBe(409);
+    const json = (await res.json()) as { code: string; error: string };
+    expect(json.code).toBe('account_change');
+    expect(json.error).toContain('aucun des calendriers déjà enregistrés');
+    const tested = (await (await ctx.admin('/api/connections/caldav/test', 'POST', { username: 'quelquun.dautre@icloud.com', password: CALDAV_PASS })).json()) as CaldavSaveResult;
+    expect(tested.test).toMatchObject({ ok: false, code: 'account_change' });
+    // Un essai qui ne dit pas quels calendriers il a trouvés ne suffit pas.
+    urls = undefined;
+    expect((await ctx.admin('/api/connections/caldav', 'PUT', { username: 'antoine@icloud.com', password: CALDAV_PASS })).status).toBe(409);
+    expect(ctx.db.prepare('SELECT COUNT(*) AS n FROM connection_settings').get()).toEqual({ n: 0 });
+    expect(ctx.caldav.configured).toBe(false);
+    expect(ctx.sync).not.toHaveBeenCalled();
+    expect(ctx.store.listCalendars().filter((c) => c.source === 'caldav')).toHaveLength(1);
+
+    // Le bon compte retrouve le calendrier (à une barre finale près) : accepté.
+    urls = [HOME.replace(/\/$/, ''), 'https://p42-caldav.icloud.com/1234/calendars/travail/'];
+    const ok = await ctx.admin('/api/connections/caldav', 'PUT', { username: 'antoine@icloud.com', password: CALDAV_PASS });
+    expect(ok.status).toBe(200);
+    expect(ctx.caldav.configured).toBe(true);
+    expect(ctx.sync).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('dernier essai d’envoi', () => {
+  it('un échec reste signalé dans la rubrique Rendez-vous, et survit à un redémarrage', async () => {
+    const smtp = await fakeSmtp({ requireAuth: [BOX, SMTP_PASS] });
+    const dataDir = tempDir();
+    let ctx = await setup({ dataDir, allowPrivateHosts: true });
+    const warnings = async () => ((await (await ctx.admin('/api/booking/settings')).json()) as BookingAdminState).warnings;
+    const wrong = await ctx.admin('/api/connections/smtp', 'PUT', { host: '127.0.0.1', port: smtp.port, user: BOX, password: SMTP_PASS_2, test: true });
+    expect(((await wrong.json()) as SmtpSaveResult).test).toMatchObject({ ok: false, code: 'auth' });
+    // Identifiant et mot de passe sont en place, mais l'essai a échoué : l'en-tête le dit.
+    let w = await warnings();
+    expect(w.some((x) => x.includes('n’est pas configuré'))).toBe(false);
+    expect(w.find((x) => x.startsWith('Le dernier essai d’envoi d’e-mails a échoué'))).toContain('Identifiants refusés par le serveur d’envoi');
+
+    // Redémarrage : même base, nouveau service.
+    ctx = await setup({ dataDir, allowPrivateHosts: true });
+    expect((await ctx.state()).smtp).toMatchObject({ configured: true, lastTest: { ok: false, code: 'auth' } });
+    w = await warnings();
+    expect(w.some((x) => x.startsWith('Le dernier essai d’envoi d’e-mails a échoué'))).toBe(true);
+    // Ce qui est gardé en base est le diagnostic, sans rien de sensible, et ne compte pas comme un réglage.
+    const row = ctx.db.prepare("SELECT value, secret FROM connection_settings WHERE key = 'status.smtp.lastTest'").get() as { value: string };
+    for (const form of [...forms(SMTP_PASS_2), ...forms(SMTP_PASS)]) expect(row.value).not.toContain(form);
+
+    // Bon mot de passe, essai réussi : l'avertissement disparaît, et le reste après un redémarrage.
+    await ctx.admin('/api/connections/smtp', 'PUT', { password: SMTP_PASS, test: true });
+    expect((await warnings()).some((x) => x.includes('e-mails'))).toBe(false);
+    ctx = await setup({ dataDir, allowPrivateHosts: true });
+    expect((await ctx.state()).smtp.lastTest).toMatchObject({ ok: true });
+    await ctx.admin('/api/connections/smtp', 'DELETE');
+    expect((await ctx.state()).smtp).toMatchObject({ lastTest: null, hasAppValues: false });
+  });
+
+  it('l’état dit si le fichier .env suffit à envoyer (pour « Revenir au fichier .env »)', async () => {
+    const none = await setup();
+    await none.admin('/api/connections/smtp', 'PUT', { user: BOX, password: SMTP_PASS });
+    expect((await none.state()).smtp).toMatchObject({ hasAppValues: true, envConfigured: false });
+    const withEnv = await setup({ env: { smtp: { user: BOX, password: ENV_PASS }, caldav: {} } });
+    expect((await withEnv.state()).smtp.envConfigured).toBe(true);
+    const half = await setup({ env: { smtp: { user: BOX }, caldav: {} } });
+    expect((await half.state()).smtp.envConfigured).toBe(false);
   });
 });
 

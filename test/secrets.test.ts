@@ -4,7 +4,8 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, w
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { KEY_FILE, openWith, parseSecretKey, sealWith, SecretBox, SecretKeyError } from '../server/secrets.js';
+import { chmodSync } from 'node:fs';
+import { KEY_FILE, keyReadProblem, openWith, parseSecretKey, sealWith, SecretBox, SecretKeyError } from '../server/secrets.js';
 
 // Valeur factice, construite pour ne ressembler à aucun vrai secret.
 const VALEUR = ['valeur', 'factice', 'à', 'chiffrer', 'éàü'].join(' ');
@@ -162,5 +163,26 @@ describe('coffre des secrets (clé)', () => {
     const box = new SecretBox({ dataDir: ':memory:' });
     expect(box.status().source).toBe('memory');
     expect(box.open('smtp.password', box.seal('smtp.password', VALEUR))).toBe(VALEUR);
+  });
+});
+
+describe('fichier de clé illisible faute de droits (restauration avec un autre propriétaire)', () => {
+  it('le message nomme les droits du fichier et la commande qui les rétablit', () => {
+    for (const code of ['EACCES', 'EPERM']) {
+      expect(keyReadProblem(code)).toContain('n’a pas le droit de le lire');
+      expect(keyReadProblem(code)).toContain('chown');
+    }
+    expect(keyReadProblem('EIO')).toBe(`Le fichier de clé (${KEY_FILE}) ne peut pas être lu.`);
+  });
+
+  // root lit tout, quels que soient les droits : le cas réel ne se joue que sous un compte ordinaire.
+  it.skipIf(process.getuid?.() === 0 || process.platform === 'win32')('sans droit de lecture : pas de clé, problème signalé, chiffrement refusé', () => {
+    const dir = tempDir();
+    new SecretBox({ dataDir: dir }).seal('champ', VALEUR);
+    chmodSync(join(dir, KEY_FILE), 0o000);
+    const box = new SecretBox({ dataDir: dir });
+    expect(box.status().problem).toContain('n’a pas le droit de le lire');
+    expect(() => box.seal('champ', VALEUR)).toThrow(SecretKeyError);
+    chmodSync(join(dir, KEY_FILE), 0o600);
   });
 });

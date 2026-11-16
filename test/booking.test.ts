@@ -127,7 +127,6 @@ describe('prise de rendez-vous : accès', () => {
       ['/api/booking/bookings', 'GET'],
       ['/api/booking/bookings/abc/cancel', 'POST'],
       ['/api/booking/bookings/abc/resend', 'POST'],
-      ['/api/booking/mail/test', 'POST'],
     ];
     for (const [path, method, body] of calls) {
       const res = await ctx.json(path, method, body);
@@ -851,9 +850,6 @@ describe('prise de rendez-vous : réservation', () => {
     expect(b.eventState).toBe('ok');
     expect(b.mailError).toContain('Confirmation au client : envoi en échec');
     expect(b.mailError).toContain('connexion SMTP refusée');
-    const test = await ctx.admin('/api/booking/mail/test', 'POST');
-    expect(test.status).toBe(502);
-    expect(((await test.json()) as { code: string }).code).toBe('mail_failed');
   });
 
   it('fonctionne sans SMTP configuré, avec un avertissement dans l’admin', async () => {
@@ -867,16 +863,15 @@ describe('prise de rendez-vous : réservation', () => {
     expect(state.warnings.some((w) => w.includes('e-mails n’est pas configuré'))).toBe(true);
     const [b] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
     expect(b.mailError).toBe('E-mails non configurés : aucun message envoyé');
-    expect((await ctx.admin('/api/booking/mail/test', 'POST')).status).toBe(400);
     expect((await ctx.admin(`/api/booking/bookings/${b.id}/resend`, 'POST')).status).toBe(400);
   });
 
-  it('envoie un message d’essai et renvoie une confirmation avec un nouveau lien', async () => {
+  it('renvoie une confirmation avec un nouveau lien ; l’ancienne route d’essai d’envoi n’existe plus', async () => {
     const ctx = await setup();
     await open(ctx);
-    const test = await ctx.admin('/api/booking/mail/test', 'POST');
-    expect(await test.json()).toEqual({ ok: true, to: 'info@antoinequarroz.ch' });
-    expect(ctx.sent[0].subject).toBe('Essai d’envoi depuis Alfred');
+    // L'essai d'envoi passe par /api/connections/smtp/test, qui est limité en débit : plus de route parallèle ici.
+    expect((await ctx.admin('/api/booking/mail/test', 'POST')).status).toBe(404);
+    expect(ctx.sent).toHaveLength(0);
 
     const confirmation = (await (await bookRequest(ctx)).json()) as BookingConfirmation;
     const [b] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];

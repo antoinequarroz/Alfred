@@ -9,7 +9,7 @@ import { ForbiddenError, NotFoundError, type CalendarService } from '../service.
 import type { Store } from '../store.js';
 import {
   cancelUrlFor, clientCancellation, clientConfirmation, createDisabledMailer, ownerCancellation, ownerNotification,
-  testMessage, type BookingMailData, type Mailer, type MailContext, type MailMessage,
+  type BookingMailData, type Mailer, type MailContext, type MailMessage,
 } from './mail.js';
 import { addDays, computeSlotDays, isDateString, localDateOf, startOfLocalDay, type BusyEvent, type SlotDay } from './slots.js';
 import { BookingStore, type BookingRow } from './store.js';
@@ -32,6 +32,8 @@ export interface BookingOptions {
   caldav: CaldavSync | null;
   timezone: string;
   mailer?: Mailer;
+  /** Diagnostic du dernier essai d'envoi s'il a échoué alors que l'envoi est configuré, sinon null. */
+  mailProblem?: () => string | null;
   /** Adresse publique d'Alfred, sans barre finale. */
   publicUrl?: string;
   /** Nom public proposé tant qu'Antoine n'en a pas choisi un. */
@@ -137,6 +139,7 @@ export class BookingService {
   private readonly caldav: CaldavSync | null;
   readonly timezone: string;
   private readonly mailer: Mailer;
+  private readonly mailProblem: () => string | null;
   private readonly publicUrl: string;
   private readonly defaultPublicName: string;
   private readonly now: () => Date;
@@ -163,6 +166,7 @@ export class BookingService {
     this.caldav = opts.caldav;
     this.timezone = opts.timezone;
     this.mailer = opts.mailer ?? createDisabledMailer();
+    this.mailProblem = opts.mailProblem ?? (() => null);
     this.publicUrl = (opts.publicUrl ?? 'http://localhost:3200').replace(/\/+$/, '');
     this.defaultPublicName = opts.defaultPublicName ?? '';
     this.now = opts.now ?? (() => new Date());
@@ -253,6 +257,9 @@ export class BookingService {
     const warnings: string[] = [];
     if (!this.mailer.configured) {
       warnings.push('L’envoi d’e-mails n’est pas configuré : les réservations fonctionnent, mais aucun e-mail ne part. Il se règle dans Rendez-vous > Réglages.');
+    } else {
+      const problem = this.mailProblem();
+      if (problem) warnings.push(`Le dernier essai d’envoi d’e-mails a échoué : les confirmations risquent de ne pas partir. ${problem}`);
     }
     if (!effectiveCalendarId) warnings.push('Aucun calendrier modifiable : les rendez-vous ne peuvent pas être créés.');
     else if (settings.calendarId && settings.calendarId !== effectiveCalendarId) {
@@ -916,17 +923,5 @@ export class BookingService {
     });
     await this.sendMails(id, messages, sending);
     return this.toBooking(this.requireBooking(id));
-  }
-
-  /** Envoie un message d'essai à l'adresse d'avis, pour vérifier la configuration SMTP. */
-  async sendTestMail(): Promise<{ ok: true; to: string }> {
-    if (!this.mailer.configured) throw new BookingError(400, 'mail_not_configured', 'L’envoi d’e-mails n’est pas configuré');
-    try {
-      await this.mailer.send(testMessage(this.mailContext(), this.mailer.notifyTo));
-    } catch (err) {
-      // Le message d'un expéditeur SMTP est déjà un diagnostic sans détail sensible (voir mail.ts).
-      throw new BookingError(502, 'mail_failed', `L’envoi a échoué. ${(err as Error).message}`.slice(0, 300));
-    }
-    return { ok: true, to: this.mailer.notifyTo };
   }
 }

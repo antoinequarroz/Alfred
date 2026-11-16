@@ -39,7 +39,7 @@ if (!caldav.configured && !connectionsState.caldav.accountLocked) store.ensureLo
 const service = new CalendarService(store, caldav, config.timezone);
 const mailer = connections.mailer;
 const booking = new BookingService({
-  store, calendar: service, caldav, timezone: config.timezone, mailer,
+  store, calendar: service, caldav, timezone: config.timezone, mailer, mailProblem: () => connections.smtpProblem(),
   publicUrl: config.publicUrl, defaultPublicName: config.mail.from.name,
 });
 connections.mailContext = () => ({ publicName: booking.getSettings().publicName, timezone: config.timezone, publicUrl: config.publicUrl });
@@ -82,6 +82,13 @@ console.log(mailer.configured
   ? `[alfred] e-mails de la prise de RDV via ${connectionsState.smtp.host.value}:${connectionsState.smtp.port.value}, expéditeur ${mailer.from} (identifiants ${SOURCES[connectionsState.smtp.password.source]})`
   : '[alfred] envoi d’e-mails non configuré : la prise de RDV fonctionne sans envoyer d’e-mails (réglable dans l’app)');
 for (const notice of connectionsState.notices) console.warn(`[alfred] ${notice}`);
+// Un réglage de l'app passe avant le .env : le dire, pour qui modifie le .env et ne voit aucun effet.
+if (connectionEnv.caldav.password && connectionsState.caldav.password.source === 'app') {
+  console.warn('[alfred] les identifiants de calendrier du fichier .env sont ignorés : ceux enregistrés dans l’app (Réglages) passent avant');
+}
+if (connectionEnv.smtp.password && connectionsState.smtp.password.source === 'app') {
+  console.warn('[alfred] le mot de passe SMTP du fichier .env est ignoré : celui enregistré dans l’app (Rendez-vous > Réglages) passe avant');
+}
 if (allowPrivateHosts) console.warn('[alfred] ALFRED_ALLOW_PRIVATE_HOSTS=1 : les serveurs internes sont acceptés dans les réglages (développement seulement)');
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
