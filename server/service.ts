@@ -43,13 +43,21 @@ export class CalendarService {
       if (scope === 'this' && occurrenceId) throw new IcsError('Une seule occurrence ne peut pas changer de calendrier');
       const to = this.writableCalendar(input.calendarId);
       let newId: string;
+      let created: { href: string; etag: string } | null = null;
       if (to.source === 'caldav') {
-        const { href, etag } = await this.caldav!.create(to.url!, ev.uid, ics);
-        newId = this.store.saveEvent({ calendarId: to.id, href, etag, ics });
+        created = await this.caldav!.create(to.url!, ev.uid, ics);
+        newId = this.store.saveEvent({ calendarId: to.id, href: created.href, etag: created.etag, ics });
       } else {
         newId = this.store.saveEvent({ calendarId: to.id, href: null, etag: null, ics });
       }
-      await this.deleteResource(ev, from);
+      try {
+        await this.deleteResource(ev, from);
+      } catch (err) {
+        // L'original n'a pas pu être supprimé : on retire la copie pour ne pas laisser de doublon.
+        if (created) await this.caldav!.remove(created.href, created.etag || null).catch(() => undefined);
+        this.store.deleteEvent(newId);
+        throw err;
+      }
       return newId;
     }
 

@@ -68,6 +68,11 @@ function layoutDay(occs: Occ[], day: Date): Segment[] {
   return segs;
 }
 
+/** Décale une date de n minutes d'horloge (un déplacement d'un jour garde la même heure, même au changement d'heure). */
+function shiftWall(date: Date, deltaMin: number): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), date.getHours(), date.getMinutes() + deltaMin);
+}
+
 type Drag =
   | { kind: 'create'; dayIndex: number; anchorMin: number; curMin: number }
   | { kind: 'move'; occ: Occ; grabDay: number; grabMin: number; deltaMin: number }
@@ -101,7 +106,11 @@ export function WeekView({ days, occs, calendars, onCreate, onOpen, onMove, onPi
     return { dayIndex, min };
   };
 
-  const at = (dayIndex: number, min: number) => addMinutes(startOfDay(days[dayIndex]), min);
+  // Heures « murales » : correct aussi les jours de changement d'heure.
+  const at = (dayIndex: number, min: number) => {
+    const d = days[dayIndex];
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, min);
+  };
 
   const startDrag = (e: React.PointerEvent, initial: Drag) => {
     if (e.pointerType !== 'mouse' || e.button !== 0) return; // au doigt : simple appui, pas de glisser
@@ -140,7 +149,10 @@ export function WeekView({ days, occs, calendars, onCreate, onOpen, onMove, onPi
         const b = Math.max(d.anchorMin, d.curMin);
         if (b > a) onCreate(at(d.dayIndex, a), at(d.dayIndex, b), false);
       } else if (d.kind === 'move') {
-        if (d.deltaMin !== 0) onMove(d.occ, addMinutes(d.occ.startDate, d.deltaMin), addMinutes(d.occ.endDate, d.deltaMin));
+        if (d.deltaMin !== 0) {
+          const start = shiftWall(d.occ.startDate, d.deltaMin);
+          onMove(d.occ, start, new Date(start.getTime() + (d.occ.endDate.getTime() - d.occ.startDate.getTime())));
+        }
       } else if (d.end.getTime() !== d.occ.endDate.getTime()) {
         onMove(d.occ, d.occ.startDate, d.end);
       }
@@ -154,7 +166,10 @@ export function WeekView({ days, occs, calendars, onCreate, onOpen, onMove, onPi
     if (!drag || drag.kind === 'create') return occs;
     return occs.map((o) => {
       if (o.key !== drag.occ.key) return o;
-      if (drag.kind === 'move') return { ...o, startDate: addMinutes(o.startDate, drag.deltaMin), endDate: addMinutes(o.endDate, drag.deltaMin) };
+      if (drag.kind === 'move') {
+        const startDate = shiftWall(o.startDate, drag.deltaMin);
+        return { ...o, startDate, endDate: new Date(startDate.getTime() + (o.endDate.getTime() - o.startDate.getTime())) };
+      }
       return { ...o, endDate: drag.end };
     });
   }, [occs, drag]);

@@ -19,7 +19,8 @@ export function EventDialog({ initial, calendars, busy, onSave, onDelete, onClos
   const titleRef = useRef<HTMLInputElement>(null);
   const editing = d.occ !== null;
   const recurring = d.occ?.recurring ?? false;
-  const writable = calendars.filter((c) => !c.readOnly);
+  const locked = editing && (calendars.find((c) => c.id === initial.calendarId)?.readOnly ?? false);
+  const writable = calendars.filter((c) => !c.readOnly || c.id === initial.calendarId);
 
   useEffect(() => {
     if (!editing) titleRef.current?.focus();
@@ -43,15 +44,16 @@ export function EventDialog({ initial, calendars, busy, onSave, onDelete, onClos
     if (!startDate || !startTime) return set({ startDate, startTime });
     if (d.allDay) {
       const span = Math.round((parseDateKey(d.endDate).getTime() - parseDateKey(d.startDate).getTime()) / 86_400_000);
-      return set({ startDate, endDate: dateKey(addDays(parseDateKey(startDate), Math.max(0, span))) });
+      return set({ startDate, endDate: dateKey(addDays(parseDateKey(startDate), Number.isFinite(span) ? Math.max(0, span) : 0)) });
     }
     const duration = combine(d.endDate, d.endTime).getTime() - combine(d.startDate, d.startTime).getTime();
-    const end = new Date(combine(startDate, startTime).getTime() + Math.max(0, duration));
+    const end = new Date(combine(startDate, startTime).getTime() + (Number.isFinite(duration) ? Math.max(0, duration) : 3_600_000));
     set({ startDate, startTime, endDate: dateKey(end), endTime: timeKey(end) });
   };
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (locked) return;
     const err = draftError(d);
     if (err) return setError(err);
     if (recurring) setAsk('save');
@@ -129,16 +131,17 @@ export function EventDialog({ initial, calendars, busy, onSave, onDelete, onClos
             <textarea rows={3} placeholder="Notes" value={d.description} onChange={(e) => set({ description: e.target.value })} />
 
             {error && <p className="form-error" role="alert">{error}</p>}
+            {locked && <p className="muted">Ce calendrier est en lecture seule : l’événement ne peut pas être modifié ici.</p>}
 
             <div className="actions">
-              {editing && (
+              {editing && !locked && (
                 <button type="button" className="btn danger ghost" disabled={busy} onClick={() => (recurring ? setAsk('delete') : onDelete(d, 'all'))}>
                   Supprimer
                 </button>
               )}
               <span className="spacer" />
-              <button type="button" className="btn ghost" onClick={onClose}>Annuler</button>
-              <button type="submit" className="btn primary" disabled={busy}>{editing ? 'Enregistrer' : 'Créer'}</button>
+              <button type="button" className="btn ghost" onClick={onClose}>{locked ? 'Fermer' : 'Annuler'}</button>
+              {!locked && <button type="submit" className="btn primary" disabled={busy}>{editing ? 'Enregistrer' : 'Créer'}</button>}
             </div>
           </>
         )}

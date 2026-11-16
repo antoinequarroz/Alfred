@@ -98,6 +98,10 @@ export function App({ onLogout }: { onLogout: () => void }) {
     }
   }, [from, to, showError]);
 
+  // Toujours la version courante : une action lancée avant un changement de semaine recharge la bonne période.
+  const loadEventsRef = useRef(loadEvents);
+  loadEventsRef.current = loadEvents;
+
   const loadMeta = useCallback(async () => {
     try {
       const [cals, status] = await Promise.all([api.calendars(), api.syncStatus()]);
@@ -183,7 +187,7 @@ export function App({ onLogout }: { onLogout: () => void }) {
       showError(err);
     } finally {
       setBusy(false);
-      void loadEvents();
+      void loadEventsRef.current();
     }
   };
 
@@ -216,7 +220,7 @@ export function App({ onLogout }: { onLogout: () => void }) {
     setCalendars((list) => list.map((c) => (c.id === cal.id ? { ...c, visible: !c.visible } : c)));
     try {
       await api.setCalendarVisible(cal.id, !cal.visible);
-      await loadEvents();
+      await loadEventsRef.current();
     } catch (err) {
       showError(err);
     }
@@ -226,7 +230,7 @@ export function App({ onLogout }: { onLogout: () => void }) {
     setSync((s) => (s ? { ...s, running: true } : s));
     try {
       setSync(await api.sync());
-      await Promise.all([loadEvents(), loadMeta()]);
+      await Promise.all([loadEventsRef.current(), loadMeta()]);
     } catch (err) {
       showError(err);
       void loadMeta();

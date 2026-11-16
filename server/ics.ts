@@ -205,6 +205,18 @@ export function expand(ics: string, rangeStart: Date, rangeEnd: Date): ExpandedO
     return out;
   }
 
+  if (!master.hasProperty('rrule')) {
+    // Répétition par dates seules (RDATE) : ical.js n'émet pas l'occurrence du DTSTART.
+    const first = event.startDate;
+    const key = timeToMs(first);
+    const listed = (name: string) =>
+      master.getAllProperties(name).some((p) => (p.getValues() as ICAL.Time[]).some((v) => typeof v?.toJSDate === 'function' && timeToMs(v) === key));
+    if (!listed('exdate') && !listed('rdate')) {
+      const details = event.getOccurrenceDetails(first);
+      push(details.item, details.startDate, endOf(details.startDate, details.endDate), occurrenceKey(details.recurrenceId), true);
+    }
+  }
+
   const it = event.iterator();
   for (let i = 0, next = it.next(); next && i < MAX_ITERATIONS; i++, next = it.next()) {
     const details = event.getOccurrenceDetails(next);
@@ -377,29 +389,8 @@ export function applyEdit(ics: string, input: EventInput, opts: EditOptions): st
   setText(master, 'description', input.description ?? '');
 
   if (recurring && opts.occurrenceId && input.repeat !== 'none') {
-    // On a déplacé une occurrence en demandant « toute la série » :
-    // on décale le début de la série d'autant, en gardant la durée choisie.
-    const occStart = occurrenceTime(opts.occurrenceId, masterEvent.startDate);
-    const newStart = parseInputTime(input.start, input.allDay, opts.tzid);
-    const newEnd = parseInputTime(input.end, input.allDay, opts.tzid);
-    const shiftMs = timeToMs(newStart) - timeToMs(occStart);
-    const durationMs = timeToMs(newEnd) - timeToMs(newStart);
-    if (shiftMs !== 0 || input.allDay !== masterEvent.startDate.isDate) {
-      const seriesStart = new Date(timeToMs(masterEvent.startDate) + shiftMs);
-      const seriesEnd = new Date(seriesStart.getTime() + durationMs);
-      const fmt = (d: Date) => (input.allDay ? toLocalDateString(d) : d.toISOString());
-      applyTimes(master, { ...input, start: fmt(seriesStart), end: fmt(seriesEnd) }, opts.tzid);
-      // Les exceptions et exclusions ne correspondent plus aux nouvelles occurrences.
-      for (const exc of exceptionsOf(vcal)) vcal.removeSubcomponent(exc);
-      master.removeAllProperties('exdate');
-    } else {
-      const s = timeToMs(masterEvent.startDate);
-      const end = new Date(s + durationMs);
-      const startStr = input.allDay ? toLocalDateString(new Date(s)) : new Date(s).toISOString();
-      const endStr = input.allDay ? toLocalDateString(end) : end.toISOString();
-      applyTimes(master, { ...input, start: startStr, end: endStr }, opts.tzid);
-    }
-  } else {
+    editSeriesTimes(vcal, master, masterEvent, input, opts.occurrenceId, opts.tzid);
+  } else if (!sameTimes(masterEvent, input)) {
     applyTimes(master, input, opts.tzid);
   }
 
@@ -411,9 +402,111 @@ export function applyEdit(ics: string, input: EventInput, opts: EditOptions): st
   return vcal.toString();
 }
 
-/** Date locale AAAA-MM-JJ (fuseau du processus). */
-function toLocalDateString(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+/** Heure « murale » en millisecondes, sans fuseau : sert aux écarts en jours et heures locales. */
+function naiveMs(t: ICAL.Time, dateOnly = t.isDate): number {
+  return Date.UTC(t.year, t.month - 1, t.day, dateOnly ? 0 : t.hour, dateOnly ? 0 : t.minute, dateOnly ? 0 : t.second);
+}
+
+function fromNaive(ms: number, like: ICAL.Time, asDate: boolean): ICAL.Time {
+  const d = new Date(ms);
+  const data = {
+      year: d.getUTCFullYear(),
+      month: d.getUTCMonth() + 1,
+      day: d.getUTCDate(),
+      hour: asDate ? 0 : d.getUTCHours(),
+      minute: asDate ? 0 : d.getUTCMinutes(),
+      second: asDate ? 0 : d.getUTCSeconds(),
+      isDate: asDate,
+  };
+  return asDate ? ICAL.Time.fromData(data) : ICAL.Time.fromData(data, like.zone);
+}
+
+/** Même instant, exprimé dans le fuseau de `like`. */
+function inZoneOf(t: ICAL.Time, like: ICAL.Time): ICAL.Time {
+  if (t.isDate) return t;
+  const zone = like.zone;
+  const d = t.toJSDate();
+  if (!zone || zone.tzid === 'floating') return ICAL.Time.fromJSDate(d, false);
+  const utc = ICAL.Time.fromJSDate(d, true);
+  return zone.tzid === 'UTC' ? utc : utc.convertToZone(zone);
+}
+
+function spanOf(start: ICAL.Time, end: ICAL.Time): number {
+  return start.isDate ? naiveMs(end) - naiveMs(start) : timeToMs(end) - timeToMs(start);
+}
+
+/** Les horaires demandés sont-ils ceux que l'événement a déjà ? */
+function sameTimes(event: ICAL.Event, input: EventInput): boolean {
+  const start = event.startDate;
+  if (!start || start.isDate !== input.allDay) return false;
+  const end = endOf(start, event.endDate);
+  if (input.allDay) return dateString(start) === input.start && dateString(end) === input.end;
+  return timeToMs(start) === new Date(input.start).getTime() && timeToMs(end) === new Date(input.end).getTime();
+}
+
+function hasByParts(master: ICAL.Component): boolean {
+  return master.getAllProperties('rrule').some((p) => Object.keys((p.getFirstValue() as ICAL.Recur).parts ?? {}).length > 0);
+}
+
+/**
+ * Modification des horaires de toute une série à partir d'une occurrence.
+ * On raisonne en heure locale du fuseau de la série : le début de la série est
+ * décalé du même écart que l'occurrence, et la série garde son fuseau d'origine.
+ * Sans changement d'horaire, rien n'est touché (exceptions et exclusions comprises).
+ */
+function editSeriesTimes(
+  vcal: ICAL.Component,
+  master: ICAL.Component,
+  masterEvent: ICAL.Event,
+  input: EventInput,
+  occurrenceId: string,
+  tzid: string,
+): void {
+  const mStart = masterEvent.startDate;
+  const masterSpan = spanOf(mStart, endOf(mStart, masterEvent.endDate));
+  const occStart = occurrenceTime(occurrenceId, mStart);
+  // Une occurrence déjà déplacée se compare à sa position actuelle, pas à sa case d'origine.
+  const exc = findException(vcal, occStart);
+  const excEvent = exc ? new ICAL.Event(exc) : null;
+  const baseStart = excEvent?.startDate ?? occStart;
+  const baseSpan = excEvent?.startDate ? spanOf(excEvent.startDate, endOf(excEvent.startDate, excEvent.endDate)) : masterSpan;
+
+  const newStart = parseInputTime(input.start, input.allDay, tzid);
+  const newEnd = parseInputTime(input.end, input.allDay, tzid);
+  if (newEnd.compare(newStart) < 0) throw new IcsError('La fin est avant le début');
+  let newSpan = spanOf(newStart, newEnd);
+  if (input.allDay && newSpan <= 0) newSpan = 86_400_000;
+
+  const kindChanged = input.allDay !== mStart.isDate;
+  let nextStart: ICAL.Time;
+  if (!kindChanged) {
+    const shift = naiveMs(inZoneOf(newStart, mStart)) - naiveMs(inZoneOf(baseStart, mStart), mStart.isDate);
+    if (shift === 0 && newSpan === baseSpan) return;
+    if (shift === 0) {
+      // Seule la durée change : le début, les exceptions et les exclusions restent en place.
+      master.removeAllProperties('duration');
+      setTimeProp(master, 'dtend', fromNaive(naiveMs(mStart) + newSpan, mStart, mStart.isDate));
+      return;
+    }
+    nextStart = fromNaive(naiveMs(mStart) + shift, mStart, mStart.isDate);
+  } else {
+    // Passage journée entière <-> horaire : on garde l'écart en jours entre l'occurrence et le début de la série.
+    const dayOffset = naiveMs(inZoneOf(baseStart, mStart), true) - naiveMs(mStart, true);
+    const target = input.allDay ? newStart : timeInZone(new Date(input.start), tzid);
+    nextStart = fromNaive(naiveMs(target) - dayOffset, target, input.allDay);
+  }
+
+  if (dateString(nextStart) !== dateString(mStart) && hasByParts(master)) {
+    throw new IcsError(
+      'Cette série suit une règle personnalisée : change de jour seulement cet événement, ou modifie la règle dans Apple Calendar.',
+    );
+  }
+  master.removeAllProperties('duration');
+  setTimeProp(master, 'dtstart', nextStart);
+  setTimeProp(master, 'dtend', fromNaive(naiveMs(nextStart) + newSpan, nextStart, nextStart.isDate));
+  // Les exceptions et exclusions ne correspondent plus aux nouvelles occurrences.
+  for (const e of exceptionsOf(vcal)) vcal.removeSubcomponent(e);
+  master.removeAllProperties('exdate');
 }
 
 /** Supprime une seule occurrence d'une série (EXDATE). Renvoie null s'il faut supprimer la ressource entière. */

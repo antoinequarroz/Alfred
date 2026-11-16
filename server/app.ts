@@ -1,5 +1,6 @@
 import { Hono, type Context } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
+import { bodyLimit } from 'hono/body-limit';
 import { csrf } from 'hono/csrf';
 import { HTTPException } from 'hono/http-exception';
 import { secureHeaders } from 'hono/secure-headers';
@@ -70,6 +71,7 @@ export function createApp(deps: AppDeps): Hono {
       scriptSrc: ["'self'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", 'data:'],
+      fontSrc: ["'self'", 'data:'],
       connectSrc: ["'self'"],
       manifestSrc: ["'self'"],
       workerSrc: ["'self'"],
@@ -87,11 +89,14 @@ export function createApp(deps: AppDeps): Hono {
     },
   }));
 
+  app.use('/api/*', bodyLimit({ maxSize: 128 * 1024 }));
+
   app.get('/healthz', (c) => c.json({ ok: true }));
 
   app.onError((err, c) => {
     if (err instanceof HTTPException) return c.json({ error: 'Requête refusée' }, err.status);
     if (err instanceof BadRequest || err instanceof IcsError) return c.json({ error: err.message }, 400);
+    if (err instanceof SyntaxError) return c.json({ error: 'Requête illisible' }, 400);
     if (err instanceof NotFoundError) return c.json({ error: err.message }, 404);
     if (err instanceof ForbiddenError) return c.json({ error: err.message }, 403);
     if (err instanceof ConflictError) return c.json({ error: `${err.message}. La dernière version a été rechargée.` }, 409);
@@ -111,11 +116,12 @@ export function createApp(deps: AppDeps): Hono {
     const wait = throttle.blockedFor();
     if (wait > 0) return c.json({ error: `Trop d’essais. Réessaie dans ${Math.ceil(wait / 60_000)} min.` }, 429);
     const body = (await c.req.json().catch(() => ({}))) as { password?: unknown };
-    const ok = typeof body.password === 'string' && (await verifyPassword(body.password, deps.passwordHash));
-    if (!ok) {
-      throttle.fail();
-      return c.json({ error: 'Mot de passe incorrect' }, 401);
-    }
+    if (typeof body.password !== 'string' || body.password.length > 1024) return c.json({ error: 'Mot de passe incorrect' }, 401);
+    // L'essai est compté avant la vérification (lente) : des requêtes simultanées ne contournent pas la limite.
+    if (throttle.blockedFor() > 0) return c.json({ error: 'Trop d’essais. Réessaie plus tard.' }, 429);
+    throttle.fail();
+    const ok = await verifyPassword(body.password, deps.passwordHash);
+    if (!ok) return c.json({ error: 'Mot de passe incorrect' }, 401);
     throttle.reset();
     store.purgeSessions();
     const session = store.createSession(deps.sessionDays);
@@ -167,7 +173,7 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.put('/api/events/:id', async (c) => {
-    const body = (await c.req.json()) as Record<string, unknown>;
+    const body = ((await c.req.json()) ?? {}) as Record<string, unknown>;
     const occurrenceId = typeof body.occurrenceId === 'string' ? body.occurrenceId : null;
     const id = await service.update(c.req.param('id'), parseInput(body.event), parseScope(body.scope), occurrenceId);
     return c.json({ id });

@@ -131,4 +131,125 @@ describe('écriture', () => {
     expect(occ.map((o) => o.start)).toEqual(['2026-10-20T16:00:00.000Z', '2026-10-27T17:00:00.000Z']);
     expect(summarize(ics).recurEndMs).toBeNull();
   });
+
+  it('renommer la série depuis une occurrence déplacée ne décale rien', () => {
+    const ics = applyEdit(ICLOUD_WEEKLY, {
+      calendarId: 'x', title: 'Cours renommé', start: '2026-11-09T13:00:00.000Z', end: '2026-11-09T14:00:00.000Z', allDay: false, repeat: 'weekly',
+    }, { scope: 'all', occurrenceId: '2026-11-09T08:00:00.000Z', tzid: TZ });
+    expect(ics).toContain('DTSTART;TZID=Europe/Zurich:20261019T090000');
+    expect(ics).toContain('RECURRENCE-ID;TZID=Europe/Zurich:20261109T090000');
+    const occ = expand(ics, new Date('2026-11-01T00:00:00Z'), new Date('2026-11-17T00:00:00Z'));
+    expect(occ.map((o) => o.start)).toEqual(['2026-11-02T08:00:00.000Z', '2026-11-09T13:00:00.000Z', '2026-11-16T08:00:00.000Z']);
+  });
+
+  it('garde le fuseau d’origine d’une série créée ailleurs', () => {
+    const NY = `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VTIMEZONE
+TZID:America/New_York
+BEGIN:DAYLIGHT
+TZOFFSETFROM:-0500
+TZOFFSETTO:-0400
+DTSTART:20070311T020000
+RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=2SU
+END:DAYLIGHT
+BEGIN:STANDARD
+TZOFFSETFROM:-0400
+TZOFFSETTO:-0500
+DTSTART:20071104T020000
+RRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU
+END:STANDARD
+END:VTIMEZONE
+BEGIN:VEVENT
+UID:ny-1
+DTSTAMP:20260101T000000Z
+DTSTART;TZID=America/New_York:20260302T090000
+DURATION:PT1H
+RRULE:FREQ=WEEKLY
+EXDATE;TZID=America/New_York:20260316T090000
+SUMMARY:Call
+END:VEVENT
+END:VCALENDAR`;
+    const renamed = applyEdit(NY, {
+      calendarId: 'x', title: 'Call US', start: '2026-03-02T14:00:00.000Z', end: '2026-03-02T15:00:00.000Z', allDay: false, repeat: 'weekly',
+    }, { scope: 'all', occurrenceId: '2026-03-02T14:00:00.000Z', tzid: TZ });
+    expect(renamed).toContain('DTSTART;TZID=America/New_York:20260302T090000');
+    expect(renamed).toContain('DURATION:PT1H');
+    expect(renamed).toContain('EXDATE;TZID=America/New_York:20260316T090000');
+    // Décalage d'une heure : la série reste à New York.
+    const moved = applyEdit(NY, {
+      calendarId: 'x', title: 'Call', start: '2026-03-09T14:00:00.000Z', end: '2026-03-09T15:00:00.000Z', allDay: false, repeat: 'weekly',
+    }, { scope: 'all', occurrenceId: '2026-03-09T13:00:00.000Z', tzid: TZ });
+    expect(moved).toContain('DTSTART;TZID=America/New_York:20260302T100000');
+    expect(moved).toContain('DTEND;TZID=America/New_York:20260302T110000');
+  });
+
+  it('décale une série de journées entières à travers le changement d’heure', () => {
+    const ALLDAY = `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:ad-1
+DTSTAMP:20260101T000000Z
+DTSTART;VALUE=DATE:20260316
+DTEND;VALUE=DATE:20260317
+RRULE:FREQ=WEEKLY
+SUMMARY:Ménage
+END:VEVENT
+END:VCALENDAR`;
+    const ics = applyEdit(ALLDAY, { calendarId: 'x', title: 'Ménage', start: '2026-03-31', end: '2026-04-02', allDay: true, repeat: 'weekly' },
+      { scope: 'all', occurrenceId: '2026-03-30', tzid: TZ });
+    expect(ics).toContain('DTSTART;VALUE=DATE:20260317');
+    expect(ics).toContain('DTEND;VALUE=DATE:20260319');
+  });
+
+  it('refuse de changer de jour une série à règle personnalisée', () => {
+    const custom = ICLOUD_WEEKLY.replace('RRULE:FREQ=WEEKLY', 'RRULE:FREQ=WEEKLY;BYDAY=MO,WE');
+    expect(() => applyEdit(custom, {
+      calendarId: 'x', title: 'Cours', start: '2026-11-03T08:00:00.000Z', end: '2026-11-03T09:00:00.000Z', allDay: false, repeat: 'custom',
+    }, { scope: 'all', occurrenceId: '2026-11-02T08:00:00.000Z', tzid: TZ })).toThrow(/règle personnalisée/);
+    // Changer seulement l'heure reste possible.
+    const ok = applyEdit(custom, {
+      calendarId: 'x', title: 'Cours', start: '2026-11-02T09:00:00.000Z', end: '2026-11-02T10:00:00.000Z', allDay: false, repeat: 'custom',
+    }, { scope: 'all', occurrenceId: '2026-11-02T08:00:00.000Z', tzid: TZ });
+    expect(ok).toContain('DTSTART;TZID=Europe/Zurich:20261019T100000');
+  });
+
+  it('affiche le premier jour d’une répétition par dates (RDATE)', () => {
+    const RD = `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:rd-1
+DTSTAMP:20260101T000000Z
+DTSTART:20260105T090000Z
+DTEND:20260105T100000Z
+RDATE:20260201T090000Z,20260301T090000Z
+SUMMARY:Atelier
+END:VEVENT
+END:VCALENDAR`;
+    const occ = expand(RD, new Date('2026-01-01T00:00:00Z'), new Date('2026-04-01T00:00:00Z'));
+    expect(occ.map((o) => o.start)).toEqual(['2026-01-05T09:00:00.000Z', '2026-02-01T09:00:00.000Z', '2026-03-01T09:00:00.000Z']);
+  });
+
+  it('ne réécrit pas les horaires d’un événement simple quand seul le titre change', () => {
+    const one = `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:one-1
+DTSTAMP:20260101T000000Z
+DTSTART:20261120T130000Z
+DURATION:PT45M
+SUMMARY:Visio
+BEGIN:VALARM
+ACTION:DISPLAY
+TRIGGER:-PT15M
+END:VALARM
+END:VEVENT
+END:VCALENDAR`;
+    const ics = applyEdit(one, { calendarId: 'x', title: 'Visio client', start: '2026-11-20T13:00:00.000Z', end: '2026-11-20T13:45:00.000Z', allDay: false, repeat: 'none' },
+      { scope: 'all', occurrenceId: null, tzid: TZ });
+    expect(ics).toContain('DTSTART:20261120T130000Z');
+    expect(ics).toContain('DURATION:PT45M');
+    expect(ics).toContain('TRIGGER:-PT15M');
+    expect(ics).toContain('SUMMARY:Visio client');
+  });
 });

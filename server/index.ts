@@ -40,9 +40,15 @@ if (existsSync(join(webRoot, 'index.html'))) {
   const indexHtml = readFileSync(join(webRoot, 'index.html'), 'utf8');
   app.use('/assets/*', async (c, next) => {
     await next();
-    c.header('Cache-Control', 'public, max-age=31536000, immutable');
+    if (c.res.status === 200) c.header('Cache-Control', 'public, max-age=31536000, immutable');
+  });
+  // La page, le service worker et le manifeste sont toujours revalidés : une mise à jour est visible tout de suite.
+  app.use('/*', async (c, next) => {
+    await next();
+    if (!c.req.path.startsWith('/assets/') && !c.req.path.startsWith('/api/')) c.header('Cache-Control', 'no-cache');
   });
   app.use('/*', serveStatic({ root: webRoot }));
+  app.get('/assets/*', (c) => c.notFound());
   app.get('*', (c) => (c.req.path.startsWith('/api/') ? c.json({ error: 'Introuvable' }, 404) : c.html(indexHtml)));
 }
 
