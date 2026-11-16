@@ -1,6 +1,7 @@
 import { DAVClient, type DAVCalendar } from 'tsdav';
 import type { SyncStatus } from '../shared/types.js';
 import { tx } from './db.js';
+import { DiagnosedError, describeCaldavError, logLine, redact, type Diagnostic } from './diagnostics.js';
 import { DEFAULT_COLORS, eventIdForHref, type Store } from './store.js';
 
 const MULTIGET_BATCH = 50;
@@ -12,6 +13,50 @@ export interface CaldavOptions {
   serverUrl: string;
   username: string;
   password: string;
+  /** fetch de remplacement (garde-fou réseau pour une adresse saisie dans l'app). */
+  fetch?: typeof fetch;
+}
+
+function newClient(opts: CaldavOptions): DAVClient {
+  return new DAVClient({
+    serverUrl: opts.serverUrl,
+    credentials: { username: opts.username, password: opts.password },
+    authMethod: 'Basic',
+    defaultAccountType: 'caldav',
+    ...(opts.fetch ? { fetch: opts.fetch } : {}),
+  });
+}
+
+export type ProbeResult = { ok: true; calendars: number } | ({ ok: false } & Diagnostic);
+
+/**
+ * Essai de connexion sans rien modifier : découverte du principal et du dossier des
+ * calendriers, puis liste des calendriers. Ne lève jamais ; l'échec est un diagnostic lisible.
+ */
+export async function probeCaldav(opts: CaldavOptions, timeoutMs = 20_000): Promise<ProbeResult> {
+  let timer: NodeJS.Timeout | undefined;
+  const attempt = (async () => {
+    const client = newClient(opts);
+    await client.login();
+    const calendars = await client.fetchCalendars();
+    return calendars.filter((c) => !c.components || c.components.length === 0 || c.components.includes('VEVENT')).length;
+  })();
+  try {
+    const calendars = await Promise.race([
+      attempt,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new DiagnosedError({ code: 'timeout', message: 'Délai dépassé : le serveur de calendrier ne répond pas.' })), timeoutMs);
+      }),
+    ]);
+    return { ok: true, calendars };
+  } catch (err) {
+    attempt.catch(() => undefined);
+    const diagnostic = describeCaldavError(err);
+    console.warn(`[alfred] essai de connexion CalDAV en échec : ${logLine(diagnostic, err)}`);
+    return { ok: false, ...diagnostic };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function absolute(href: string, base: string): string {
@@ -63,39 +108,77 @@ export class CaldavSync {
   /** Ressources écrites localement pendant une synchro : la synchro en cours ne doit pas les écraser. */
   private touched = new Set<string>();
   private status: SyncStatus = { configured: true, running: false, lastSuccessAt: null, lastError: null, lastErrorAt: null };
+  private opts: CaldavOptions | null;
+  /** Change à chaque reconfiguration : une connexion ouverte avec d'anciens identifiants n'est pas gardée. */
+  private generation = 0;
 
-  constructor(private readonly store: Store, private readonly opts: CaldavOptions) {}
+  /** opts null : pas (encore) d'identifiants ; ils peuvent arriver plus tard par reconfigure(). */
+  constructor(private readonly store: Store, opts: CaldavOptions | null) {
+    this.opts = opts;
+  }
+
+  /** Vrai quand des identifiants sont en place : la synchro et l'écriture sont possibles. */
+  get configured(): boolean {
+    return this.opts !== null;
+  }
 
   getStatus(): SyncStatus {
-    return { ...this.status, running: this.running !== null };
+    if (!this.opts) return { configured: false, running: false, lastSuccessAt: null, lastError: null, lastErrorAt: null };
+    return { ...this.status, configured: true, running: this.running !== null };
+  }
+
+  /**
+   * Remplace les identifiants à chaud (ou les retire avec null). La connexion ouverte est
+   * abandonnée : la prochaine requête se reconnecte avec les nouveaux. Une synchro en cours
+   * se termine avec l'ancienne connexion.
+   */
+  reconfigure(opts: CaldavOptions | null): void {
+    this.opts = opts;
+    this.client = null;
+    this.generation++;
+    this.status = { ...this.status, lastError: null, lastErrorAt: null };
+  }
+
+  /** Se résout quand aucune synchro n'est en cours (tout de suite s'il n'y en a pas). */
+  whenIdle(): Promise<void> {
+    return this.running ?? Promise.resolve();
+  }
+
+  /** Texte sans trace des identifiants, pour un journal. */
+  private scrub(value: string): string {
+    return redact(value, this.opts ? [this.opts.password] : []);
   }
 
   private async getClient(): Promise<DAVClient> {
     if (this.client) return this.client;
-    const client = new DAVClient({
-      serverUrl: this.opts.serverUrl,
-      credentials: { username: this.opts.username, password: this.opts.password },
-      authMethod: 'Basic',
-      defaultAccountType: 'caldav',
-    });
+    if (!this.opts) throw new RemoteError('Synchronisation CalDAV non configurée');
+    const generation = this.generation;
+    const client = newClient(this.opts);
     await client.login();
-    this.client = client;
+    if (generation === this.generation) this.client = client;
     return client;
   }
 
-  /** Lance une synchro complète (une seule à la fois). */
+  /** Lance une synchro complète (une seule à la fois). Ne rejette jamais. */
   sync(): Promise<void> {
+    if (!this.opts) return Promise.resolve();
     if (!this.running) {
+      const generation = this.generation;
       this.running = this.doSync()
         .then(() => {
+          if (generation !== this.generation) return;
           this.status.lastSuccessAt = new Date().toISOString();
           this.status.lastError = null;
         })
-        .catch((err: Error) => {
+        .catch((err: unknown) => {
+          if (generation !== this.generation) return; // identifiants remplacés entre-temps : cet échec ne compte plus
           this.client = null; // reconnexion à la prochaine tentative
-          this.status.lastError = err.message || String(err);
+          // Le texte d'une erreur de tsdav ou de fetch peut reprendre une URL ou une réponse du
+          // serveur : l'app et le journal ne reçoivent qu'un diagnostic écrit ici.
+          const diagnostic = describeCaldavError(err);
+          this.status.lastError = diagnostic.message;
           this.status.lastErrorAt = new Date().toISOString();
-          console.error('[alfred] synchro CalDAV en échec :', err);
+          console.error(`[alfred] synchro CalDAV en échec : ${logLine(diagnostic, err)}`);
         })
         .finally(() => {
           this.running = null;
@@ -153,7 +236,7 @@ export class CaldavSync {
         await this.syncCalendar(client, cal);
       } catch (err) {
         firstError ??= err;
-        console.warn(`[alfred] calendrier ${cal.url} non synchronisé : ${(err as Error).message}`);
+        console.warn(this.scrub(`[alfred] calendrier ${cal.url} non synchronisé : ${describeCaldavError(err).message}`));
       }
     }
     if (firstError) throw firstError;
@@ -197,7 +280,7 @@ export class CaldavSync {
         // on relit alors une par une, et celle qui manque sera traitée à la prochaine synchro.
         if (batch.length === 1) {
           incomplete = true;
-          console.warn(`[alfred] ressource non lue ${batch[0]} : ${(err as Error).message}`);
+          console.warn(this.scrub(`[alfred] ressource non lue ${batch[0]} : ${describeCaldavError(err).code}`));
           return;
         }
         for (const href of batch) await fetchBatch([href]);
@@ -216,7 +299,7 @@ export class CaldavSync {
         try {
           this.store.saveEvent({ calendarId: id, href: f.href, etag: f.etag, ics: f.ics });
         } catch (err) {
-          console.warn(`[alfred] ressource ignorée ${f.href} : ${(err as Error).message}`);
+          console.warn(this.scrub(`[alfred] ressource ignorée ${f.href} : ${(err as Error).message}`));
         }
       }
       for (const d of toDelete) {

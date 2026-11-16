@@ -1,5 +1,8 @@
+import { isIP } from 'node:net';
 import ICAL from 'ical.js';
 import type { Transporter } from 'nodemailer';
+import { DiagnosedError, describeSmtpError, logLine } from '../diagnostics.js';
+import { resolveGuarded } from '../netguard.js';
 import { timeInZone, vtimezoneComponent } from '../timezone.js';
 
 // ---------------------------------------------------------------------------
@@ -48,6 +51,12 @@ export interface SmtpOptions {
   password: string;
   from: MailAddress;
   notifyTo: string;
+  /**
+   * Hôte saisi dans l'app : il est résolu et vérifié à chaque envoi (pas d'adresse interne,
+   * sauf allowInternal), et la connexion se fait vers l'adresse vérifiée. Absent pour un hôte
+   * venu du fichier .env, qui est de confiance.
+   */
+  guard?: { allowInternal: boolean };
 }
 
 /** Retire tout caractère de contrôle : rien de saisi ne doit pouvoir couper un en-tête. */
@@ -64,52 +73,70 @@ function formatAddress(a: MailAddress): string {
   return a.name ? `${a.name} <${a.address}>` : a.address;
 }
 
-/** Expéditeur SMTP (nodemailer). La connexion n'est ouverte qu'au premier envoi. */
+/**
+ * Expéditeur SMTP (nodemailer). La connexion n'est ouverte qu'au premier envoi.
+ * Un échec est levé sous forme de diagnostic en français (DiagnosedError) : le texte de
+ * nodemailer, qui peut reprendre la réponse du serveur ou un identifiant, ne sort pas d'ici.
+ */
 export function createSmtpMailer(opts: SmtpOptions): Mailer {
   let transport: Transporter | null = null;
   const from = safeAddress(opts.from) as MailAddress;
+  const connect = async (): Promise<Transporter> => {
+    // Chargé au premier envoi seulement : sans SMTP configuré, nodemailer ne pèse rien en mémoire.
+    const { default: nodemailer } = await import('nodemailer');
+    const create = (host: string, servername?: string) => nodemailer.createTransport({
+      host,
+      port: opts.port,
+      secure: opts.secure,
+      requireTLS: !opts.secure && opts.requireTls,
+      auth: opts.user ? { user: opts.user, pass: opts.password } : undefined,
+      // Connexion vers une adresse vérifiée : le certificat reste contrôlé pour le nom saisi.
+      tls: servername ? { servername } : undefined,
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 20_000,
+      disableFileAccess: true,
+      disableUrlAccess: true,
+    });
+    if (!opts.guard) return (transport ??= create(opts.host));
+    const address = await resolveGuarded(opts.host, opts.guard.allowInternal);
+    return create(address, isIP(opts.host.replace(/^\[(.*)\]$/, '$1')) ? undefined : opts.host);
+  };
   return {
     configured: true,
     from: formatAddress(from),
     notifyTo: headerSafe(opts.notifyTo),
     async send(message) {
-      // Chargé au premier envoi seulement : sans SMTP configuré, nodemailer ne pèse rien en mémoire.
-      const { default: nodemailer } = await import('nodemailer');
-      transport ??= nodemailer.createTransport({
-        host: opts.host,
-        port: opts.port,
-        secure: opts.secure,
-        requireTLS: !opts.secure && opts.requireTls,
-        auth: opts.user ? { user: opts.user, pass: opts.password } : undefined,
-        connectionTimeout: 10_000,
-        greetingTimeout: 10_000,
-        socketTimeout: 20_000,
-        disableFileAccess: true,
-        disableUrlAccess: true,
-      });
-      const sending = transport.sendMail({
-        from,
-        to: safeAddress(message.to),
-        replyTo: message.replyTo ? safeAddress(message.replyTo) : undefined,
-        subject: headerSafe(message.subject),
-        text: message.text,
-        html: message.html,
-        attachments: message.attachments?.map((a) => ({ filename: headerSafe(a.filename), content: a.content, contentType: a.contentType })),
-      });
-      // Les délais de nodemailer sont des délais d'inactivité : un serveur qui répond au
-      // compte-gouttes pourrait retenir l'envoi indéfiniment. On borne donc la durée totale.
+      let sending: Promise<unknown> | undefined;
       let timer: NodeJS.Timeout | undefined;
       try {
+        const smtp = await connect();
+        sending = smtp.sendMail({
+          from,
+          to: safeAddress(message.to),
+          replyTo: message.replyTo ? safeAddress(message.replyTo) : undefined,
+          subject: headerSafe(message.subject),
+          text: message.text,
+          html: message.html,
+          attachments: message.attachments?.map((a) => ({ filename: headerSafe(a.filename), content: a.content, contentType: a.contentType })),
+        });
+        // Les délais de nodemailer sont des délais d'inactivité : un serveur qui répond au
+        // compte-gouttes pourrait retenir l'envoi indéfiniment. On borne donc la durée totale.
         await Promise.race([
           sending,
           new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new Error('le serveur d’envoi ne répond pas à temps')), opts.totalTimeoutMs ?? 45_000);
+            timer = setTimeout(
+              () => reject(new DiagnosedError({ code: 'timeout', message: 'Délai dépassé : le serveur d’envoi ne répond pas à temps.' })),
+              opts.totalTimeoutMs ?? 45_000,
+            );
           }),
         ]);
       } catch (err) {
         // Envoi abandonné : son éventuel échec tardif ne doit pas rester sans gestionnaire.
-        sending.catch(() => undefined);
-        throw err;
+        sending?.catch(() => undefined);
+        const diagnostic = describeSmtpError(err);
+        console.error(`[alfred] envoi SMTP en échec : ${logLine(diagnostic, err)}`);
+        throw new DiagnosedError(diagnostic);
       } finally {
         clearTimeout(timer);
       }
@@ -124,8 +151,18 @@ export function createDisabledMailer(from = '', notifyTo = ''): Mailer {
     from,
     notifyTo,
     async send() {
-      throw new Error('Envoi d’e-mails non configuré (SMTP_USER et SMTP_PASSWORD)');
+      throw new Error('Envoi d’e-mails non configuré');
     },
+  };
+}
+
+/** Expéditeur dont la configuration peut changer à chaud : chaque appel passe par l'expéditeur du moment. */
+export function createDynamicMailer(current: () => Mailer): Mailer {
+  return {
+    get configured() { return current().configured; },
+    get from() { return current().from; },
+    get notifyTo() { return current().notifyTo; },
+    send: (message) => current().send(message),
   };
 }
 

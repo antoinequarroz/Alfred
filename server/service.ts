@@ -18,7 +18,7 @@ export class CalendarService {
     const cal = this.store.getCalendar(id);
     if (!cal) throw new NotFoundError('Calendrier introuvable');
     if (cal.read_only) throw new ForbiddenError('Ce calendrier est en lecture seule');
-    if (cal.source === 'caldav' && (!this.caldav || !cal.url)) throw new ForbiddenError('Synchronisation CalDAV non configurée');
+    if (cal.source === 'caldav' && (!this.caldav?.configured || !cal.url)) throw new ForbiddenError('Synchronisation CalDAV non configurée');
     return cal;
   }
 
@@ -42,7 +42,7 @@ export class CalendarService {
   async discardCreated(calendarId: string, uid: string): Promise<void> {
     const cal = this.store.getCalendar(calendarId);
     if (!cal) return;
-    if (cal.source === 'caldav' && this.caldav && cal.url) {
+    if (cal.source === 'caldav' && this.caldav?.configured && cal.url) {
       await this.caldav.remove(this.caldav.hrefFor(cal.url, uid), null);
     }
     for (const id of this.store.eventIdsByUid(cal.id, uid)) this.store.deleteEvent(id);

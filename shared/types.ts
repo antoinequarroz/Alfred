@@ -256,3 +256,105 @@ export interface BookingConfirmation {
   /** Faux si l'e-mail de confirmation n'a pas pu partir : afficher le récapitulatif et le lien. */
   emailSent: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Connexions (SMTP et CalDAV) réglables depuis l'app. Voir docs/API-RDV.md.
+
+/** D'où vient un réglage : enregistré dans l'app, lu dans le fichier .env, valeur par défaut, ou absent. */
+export type SettingSource = 'app' | 'env' | 'default' | 'none';
+
+export interface ConnectionField {
+  value: string;
+  source: SettingSource;
+}
+
+/** État d'un mot de passe : jamais sa valeur, même en partie. */
+export interface ConnectionSecret {
+  configured: boolean;
+  source: SettingSource;
+  /** Enregistré dans l'app mais indéchiffrable (clé absente ou différente) : à ressaisir. */
+  unreadable: boolean;
+}
+
+/** Résultat d'un essai de connexion, en clair et sans détail sensible. */
+export interface ConnectionTest {
+  ok: boolean;
+  /** Code stable : « ok », « auth », « host_not_found », « timeout », « tls »… */
+  code: string;
+  message: string;
+  /** Instant de l'essai (ISO UTC). */
+  at: string;
+}
+
+export interface SmtpConnectionState {
+  /** Vrai quand un identifiant et un mot de passe sont en place : les e-mails peuvent partir. */
+  configured: boolean;
+  host: ConnectionField;
+  port: ConnectionField;
+  user: ConnectionField;
+  password: ConnectionSecret;
+  /** « Nom <adresse> ». */
+  from: ConnectionField;
+  notifyTo: ConnectionField;
+  /** Au moins un réglage est enregistré dans l'app (« Revenir au fichier .env » a un effet). */
+  hasAppValues: boolean;
+  /** Dernier essai d'envoi depuis le démarrage, ou null. */
+  lastTest: ConnectionTest | null;
+}
+
+export interface CaldavConnectionState {
+  configured: boolean;
+  url: ConnectionField;
+  username: ConnectionField;
+  password: ConnectionSecret;
+  hasAppValues: boolean;
+  /** Un compte est en place : seul son mot de passe peut changer (pas l'identifiant ni le serveur). */
+  accountLocked: boolean;
+  /** Le fichier .env porte des identifiants pour le même compte : « Revenir au fichier .env » est possible. */
+  canRevertToEnv: boolean;
+  sync: SyncStatus;
+  /** Calendriers et événements synchronisés présents en base. */
+  calendars: number;
+  events: number;
+  lastTest: ConnectionTest | null;
+}
+
+export interface ConnectionsState {
+  smtp: SmtpConnectionState;
+  caldav: CaldavConnectionState;
+  /** Clé de chiffrement des mots de passe : où elle vit, et un éventuel problème à corriger. */
+  secretKey: { source: 'env' | 'file' | 'memory' | 'none'; problem: string | null };
+  /** Messages à afficher en tête (secret à ressaisir, clé invalide…). */
+  notices: string[];
+}
+
+export interface SmtpSettingsInput {
+  host?: string;
+  port?: number | string;
+  user?: string;
+  /** Vide ou absent : le mot de passe actuel est gardé. */
+  password?: string;
+  from?: string;
+  notifyTo?: string;
+  /** Envoyer un e-mail d'essai juste après l'enregistrement. */
+  test?: boolean;
+}
+
+export interface SmtpSaveResult {
+  state: ConnectionsState;
+  /** Résultat de l'essai demandé, sinon null. */
+  test: ConnectionTest | null;
+}
+
+export interface CaldavSettingsInput {
+  url?: string;
+  username?: string;
+  password?: string;
+}
+
+export interface CaldavSaveResult {
+  state: ConnectionsState;
+  test: ConnectionTest;
+  /** Remarque non bloquante (forme inattendue du mot de passe d'application Apple). */
+  warning: string | null;
+}

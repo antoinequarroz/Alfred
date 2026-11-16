@@ -4,11 +4,12 @@ import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { createApp } from './app.js';
-import { createDisabledMailer, createSmtpMailer } from './booking/mail.js';
 import { BookingService } from './booking/service.js';
 import { CaldavSync } from './caldav.js';
-import { caldavConfigured, config, mailConfigured } from './config.js';
+import { allowPrivateHosts, config, connectionEnv, secretKeyEnv } from './config.js';
+import { ConnectionsService } from './connections.js';
 import { openDb } from './db.js';
+import { SecretBox } from './secrets.js';
 import { hashPassword } from './password.js';
 import { CalendarService } from './service.js';
 import { Store } from './store.js';
@@ -24,20 +25,26 @@ if (!passwordHash) {
 }
 
 const store = new Store(openDb(config.dataDir));
-const caldav = caldavConfigured
-  ? new CaldavSync(store, { serverUrl: config.caldav.url, username: config.caldav.username, password: config.caldav.password })
-  : null;
-if (!caldav) store.ensureLocalCalendar();
+const secrets = new SecretBox({ dataDir: config.dataDir, envKey: secretKeyEnv });
+// Le client de synchro existe toujours : sans identifiants il reste inactif, et il peut en recevoir à chaud.
+const caldav = new CaldavSync(store, null);
+const connections = new ConnectionsService({
+  store, secrets, caldav, env: connectionEnv, allowPrivateHosts, smtpRequireTls: config.mail.requireTls,
+});
+caldav.reconfigure(connections.caldavOptions());
+const connectionsState = connections.state();
+// Calendrier local seulement quand aucun compte n'est en place (un mot de passe à ressaisir ne crée pas de calendrier local).
+if (!caldav.configured && !connectionsState.caldav.accountLocked) store.ensureLocalCalendar();
 
 const service = new CalendarService(store, caldav, config.timezone);
-const fromLabel = config.mail.from.name ? `${config.mail.from.name} <${config.mail.from.address}>` : config.mail.from.address;
-const mailer = mailConfigured ? createSmtpMailer(config.mail) : createDisabledMailer(fromLabel, config.mail.notifyTo);
+const mailer = connections.mailer;
 const booking = new BookingService({
   store, calendar: service, caldav, timezone: config.timezone, mailer,
   publicUrl: config.publicUrl, defaultPublicName: config.mail.from.name,
 });
+connections.mailContext = () => ({ publicName: booking.getSettings().publicName, timezone: config.timezone, publicUrl: config.publicUrl });
 const app = createApp({
-  store, service, caldav, passwordHash, booking,
+  store, service, caldav, passwordHash, booking, connections,
   secureCookies: config.production,
   sessionDays: config.sessionDays,
 });
@@ -64,17 +71,18 @@ serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => 
   console.log(`[alfred] prêt sur http://${info.address}:${info.port} (fuseau ${config.timezone})`);
 });
 
-if (caldav) {
-  const run = () => void caldav.sync();
-  run();
-  setInterval(run, config.caldav.syncIntervalSeconds * 1000).unref();
-  console.log(`[alfred] synchro CalDAV toutes les ${config.caldav.syncIntervalSeconds} s avec ${config.caldav.url}`);
-} else {
-  console.log('[alfred] pas de CalDAV configuré : calendrier local uniquement');
-}
+// La synchro régulière tourne toujours : elle ne fait rien tant qu'aucun identifiant n'est en place.
+void caldav.sync();
+setInterval(() => void caldav.sync(), config.caldav.syncIntervalSeconds * 1000).unref();
+const SOURCES = { app: 'réglés dans l’app', env: 'du fichier .env', default: 'par défaut', none: 'absents' } as const;
+console.log(caldav.configured
+  ? `[alfred] synchro CalDAV toutes les ${config.caldav.syncIntervalSeconds} s avec ${connectionsState.caldav.url.value} (identifiants ${SOURCES[connectionsState.caldav.password.source]})`
+  : '[alfred] pas de CalDAV configuré : calendrier local uniquement');
 console.log(mailer.configured
-  ? `[alfred] e-mails de la prise de RDV via ${config.mail.host}:${config.mail.port}, expéditeur ${mailer.from}`
-  : '[alfred] SMTP non configuré : la prise de RDV fonctionne sans envoyer d’e-mails');
+  ? `[alfred] e-mails de la prise de RDV via ${connectionsState.smtp.host.value}:${connectionsState.smtp.port.value}, expéditeur ${mailer.from} (identifiants ${SOURCES[connectionsState.smtp.password.source]})`
+  : '[alfred] envoi d’e-mails non configuré : la prise de RDV fonctionne sans envoyer d’e-mails (réglable dans l’app)');
+for (const notice of connectionsState.notices) console.warn(`[alfred] ${notice}`);
+if (allowPrivateHosts) console.warn('[alfred] ALFRED_ALLOW_PRIVATE_HOSTS=1 : les serveurs internes sont acceptés dans les réglages (développement seulement)');
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {

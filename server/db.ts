@@ -95,6 +95,15 @@ CREATE TABLE IF NOT EXISTS bookings (
 );
 CREATE INDEX IF NOT EXISTS bookings_start ON bookings(start_utc);
 CREATE INDEX IF NOT EXISTS bookings_status ON bookings(status, end_utc);
+
+-- Connexions réglées depuis l'app (SMTP, CalDAV). Une ligne par réglage : « smtp.host »,
+-- « caldav.password »… Les secrets (secret = 1) sont chiffrés, voir server/secrets.ts.
+CREATE TABLE IF NOT EXISTS connection_settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  secret     INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
 `;
 
 /** Horaires proposés à la première ouverture : lundi à vendredi, 09:00-12:00 et 13:30-17:30. */

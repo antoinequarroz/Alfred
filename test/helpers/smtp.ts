@@ -19,6 +19,11 @@ export interface FakeSmtp {
 export interface FakeSmtpOptions {
   /** Refuse les destinataires qui contiennent ce texte (réponse 550). */
   rejectRecipient?: string;
+  /**
+   * Seuls ces identifiants sont acceptés. Le refus (535) reprend exprès l'identifiant et le
+   * mot de passe reçus, comme le ferait un serveur bavard : rien de cela ne doit ressortir d'Alfred.
+   */
+  requireAuth?: [user: string, password: string];
 }
 
 export async function startFakeSmtp(opts: FakeSmtpOptions = {}): Promise<FakeSmtp> {
@@ -58,7 +63,8 @@ export async function startFakeSmtp(opts: FakeSmtpOptions = {}): Promise<FakeSmt
         else if (cmd.startsWith('AUTH PLAIN')) {
           const [, user, pass] = Buffer.from(line.slice(11), 'base64').toString('utf8').split('\u0000');
           logins.push([user, pass]);
-          say('235 OK');
+          if (opts.requireAuth && (user !== opts.requireAuth[0] || pass !== opts.requireAuth[1])) say(`535 5.7.8 Authentification refusée pour ${user} avec ${pass}`);
+          else say('235 OK');
         } else if (cmd.startsWith('MAIL FROM:')) {
           current.from = /<([^>]*)>/.exec(line)?.[1] ?? '';
           say('250 OK');

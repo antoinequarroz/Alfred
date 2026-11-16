@@ -794,6 +794,7 @@ describe('prise de rendez-vous : réservation', () => {
   it('tient le plafond par adresse face à des demandes simultanées, même pendant l’attente d’iCloud', async () => {
     const slow = {
       sync: () => new Promise<void>((resolve) => setTimeout(resolve, 20)),
+      configured: true,
       getStatus: () => ({ configured: true, running: true, lastSuccessAt: null, lastError: null, lastErrorAt: null }),
     } as unknown as CaldavSync;
     const ctx = await setup({ caldav: slow, service: { maxPerEmailPerDay: 3 } });
@@ -809,6 +810,7 @@ describe('prise de rendez-vous : réservation', () => {
     let during: () => Promise<unknown> = async () => undefined;
     const caldav = {
       sync: async () => { await during(); },
+      configured: true,
       getStatus: () => ({ configured: true, running: false, lastSuccessAt: null, lastError: null, lastErrorAt: null }),
     } as unknown as CaldavSync;
     const ctx = await setup({ caldav });
@@ -972,6 +974,7 @@ describe('prise de rendez-vous : réservation', () => {
         syncs++;
         return new Promise<void>(() => undefined); // ne répond jamais
       },
+      configured: true,
       getStatus: () => ({ configured: true, running: true, lastSuccessAt: null, lastError: null, lastErrorAt: null }),
     } as unknown as CaldavSync;
     const ctx = await setup({ caldav: slow, syncTimeoutMs: 30 });

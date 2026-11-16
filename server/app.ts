@@ -8,6 +8,8 @@ import type { EditScope, EventInput, RepeatRule } from '../shared/types.js';
 import { DEFAULT_BOOKING_LIMITS, registerAdminBookingRoutes, registerPublicBookingRoutes, type BookingLimits } from './booking/routes.js';
 import { BookingError, BookingService } from './booking/service.js';
 import { ConflictError, RemoteError, type CaldavSync } from './caldav.js';
+import { ConnectionError, type ConnectionsService } from './connections.js';
+import { DEFAULT_CONNECTION_LIMITS, registerConnectionRoutes, type ConnectionLimits } from './connections-routes.js';
 import { IcsError } from './ics.js';
 import { verifyPassword } from './password.js';
 import { ForbiddenError, NotFoundError, type CalendarService } from './service.js';
@@ -28,6 +30,9 @@ export interface AppDeps {
   booking?: BookingService;
   /** Limites de débit de la partie publique (valeurs par défaut sinon). */
   bookingLimits?: Partial<BookingLimits>;
+  /** Connexions réglables depuis l'app (SMTP, CalDAV). Sans elles, les routes /api/connections n'existent pas. */
+  connections?: ConnectionsService;
+  connectionLimits?: Partial<ConnectionLimits>;
 }
 
 class BadRequest extends Error {}
@@ -103,13 +108,18 @@ export function createApp(deps: AppDeps): Hono {
   app.onError((err, c) => {
     if (err instanceof HTTPException) return c.json({ error: 'Requête refusée' }, err.status);
     if (err instanceof BookingError) return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}) }, err.status);
+    if (err instanceof ConnectionError) {
+      return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}), ...(err.reason ? { reason: err.reason } : {}) }, err.status);
+    }
     if (err instanceof BadRequest || err instanceof IcsError) return c.json({ error: err.message }, 400);
     if (err instanceof SyntaxError) return c.json({ error: 'Requête illisible' }, 400);
     if (err instanceof NotFoundError) return c.json({ error: err.message }, 404);
     if (err instanceof ForbiddenError) return c.json({ error: err.message }, 403);
     if (err instanceof ConflictError) return c.json({ error: `${err.message}. La dernière version a été rechargée.` }, 409);
     if (err instanceof RemoteError) return c.json({ error: err.message }, 502);
-    console.error('[alfred]', err);
+    // Une erreur imprévue est journalisée sans ses éventuels secrets (mots de passe de connexion, identifiants dans une URL).
+    const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    console.error('[alfred]', deps.connections ? deps.connections.redact(detail) : detail);
     return c.json({ error: 'Erreur interne' }, 500);
   });
 
@@ -200,6 +210,10 @@ export function createApp(deps: AppDeps): Hono {
 
   registerAdminBookingRoutes(app, booking, store);
 
+  // --- connexions (SMTP, CalDAV) --------------------------------------------
+
+  if (deps.connections) registerConnectionRoutes(app, deps.connections, { ...DEFAULT_CONNECTION_LIMITS, ...deps.connectionLimits });
+
   // --- synchro -------------------------------------------------------------
 
   app.get('/api/sync', (c) =>
@@ -207,7 +221,7 @@ export function createApp(deps: AppDeps): Hono {
   );
 
   app.post('/api/sync', async (c) => {
-    if (!caldav) return c.json({ error: 'Synchronisation non configurée' }, 400);
+    if (!caldav?.configured) return c.json({ error: 'Synchronisation non configurée' }, 400);
     await caldav.sync();
     return c.json(caldav.getStatus());
   });

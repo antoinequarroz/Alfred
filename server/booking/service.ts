@@ -242,7 +242,7 @@ export class BookingService {
   private targetCalendarId(settings = this.getSettings()): string | null {
     const usable = (id: string | null) => {
       const cal = id ? this.store.getCalendar(id) : undefined;
-      return cal && !cal.read_only && (cal.source === 'local' || (this.caldav !== null && cal.url)) ? cal.id : null;
+      return cal && !cal.read_only && (cal.source === 'local' || (this.caldav?.configured && cal.url)) ? cal.id : null;
     };
     return usable(settings.calendarId) ?? this.store.listCalendars().map((c) => usable(c.id)).find((id) => id !== null) ?? null;
   }
@@ -252,7 +252,7 @@ export class BookingService {
     const effectiveCalendarId = this.targetCalendarId(settings);
     const warnings: string[] = [];
     if (!this.mailer.configured) {
-      warnings.push('L’envoi d’e-mails n’est pas configuré (SMTP_USER et SMTP_PASSWORD) : les réservations fonctionnent, mais aucun e-mail ne part.');
+      warnings.push('L’envoi d’e-mails n’est pas configuré : les réservations fonctionnent, mais aucun e-mail ne part. Il se règle dans Rendez-vous > Réglages.');
     }
     if (!effectiveCalendarId) warnings.push('Aucun calendrier modifiable : les rendez-vous ne peuvent pas être créés.');
     else if (settings.calendarId && settings.calendarId !== effectiveCalendarId) {
@@ -260,7 +260,7 @@ export class BookingService {
     }
     if (!this.data.listTypes().some((t) => t.active)) warnings.push('Aucun type de rendez-vous actif.');
     if (this.data.getHours().length === 0) warnings.push('Aucun horaire d’ouverture : aucun créneau n’est proposé.');
-    const sync = this.caldav?.getStatus();
+    const sync = this.caldav?.configured ? this.caldav.getStatus() : undefined;
     if (sync?.lastError) warnings.push('La synchro iCloud est en échec : les créneaux sont calculés sur la dernière copie connue.');
     if (!settings.enabled) warnings.push('La prise de rendez-vous est fermée : la page publique n’accepte aucune réservation.');
     const sentLast24h = this.mailsSentLast24h();
@@ -578,7 +578,7 @@ export class BookingService {
 
   /** Synchro fraîche avant de confirmer, au mieux : on n'attend pas iCloud au-delà du délai. */
   private async freshSync(): Promise<void> {
-    if (!this.caldav) return;
+    if (!this.caldav?.configured) return;
     // sync() ne rejette jamais : elle journalise ses erreurs et les expose dans son état.
     await withTimeout(this.caldav.sync(), this.syncTimeoutMs);
   }
@@ -924,7 +924,8 @@ export class BookingService {
     try {
       await this.mailer.send(testMessage(this.mailContext(), this.mailer.notifyTo));
     } catch (err) {
-      throw new BookingError(502, 'mail_failed', `L’envoi a échoué : ${(err as Error).message}`.slice(0, 300));
+      // Le message d'un expéditeur SMTP est déjà un diagnostic sans détail sensible (voir mail.ts).
+      throw new BookingError(502, 'mail_failed', `L’envoi a échoué. ${(err as Error).message}`.slice(0, 300));
     }
     return { ok: true, to: this.mailer.notifyTo };
   }
