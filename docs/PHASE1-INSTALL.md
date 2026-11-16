@@ -58,7 +58,7 @@ Colle-les dans `.env` (`nano .env`), puis remplace partout `rdv.example.ch` par 
 bash scripts/preflight.sh
 ```
 
-Le script ne modifie rien. Il vérifie la mémoire, le disque, le port, et te dit si ton Caddy tourne sur l'hôte ou dans Docker.
+Le script ne modifie rien. Il vérifie la mémoire, le disque (compte 12 Go libres avant le premier téléchargement), le port, et te dit si ton Caddy tourne sur l'hôte ou dans Docker.
 
 ### 4. Démarrer
 
@@ -74,7 +74,7 @@ Caddy dans Docker : renseigne `CADDY_NETWORK` dans `.env`, puis
 docker compose -f docker-compose.yml -f docker-compose.caddy-network.yml up -d
 ```
 
-Le premier démarrage prend 3 à 5 minutes (téléchargement d'environ 1,7 Go, création des tables). Suis-le avec `docker compose logs -f calcom` jusqu'à voir `Ready`. Teste en local :
+Le premier démarrage prend 3 à 5 minutes (téléchargement d'environ 1,7 Go, soit environ 8 Go sur le disque une fois décompressé, puis création des tables). Suis-le avec `docker compose logs -f calcom` jusqu'à voir `Ready`. Teste en local :
 
 ```bash
 curl -sI http://127.0.0.1:3100 | head -1
@@ -82,11 +82,20 @@ curl -sI http://127.0.0.1:3100 | head -1
 
 ### 5. Brancher Caddy
 
-Ajoute le bloc de `Caddyfile.snippet` à la fin de ton Caddyfile, avec ton sous-domaine. Ne modifie aucun autre bloc.
+Ajoute le bloc de `Caddyfile.snippet` à la fin de ton Caddyfile, avec ton sous-domaine. Ne modifie aucun autre bloc. Fais une copie du fichier avant.
+
+Caddy sur l'hôte :
 
 ```bash
 caddy validate --config /etc/caddy/Caddyfile   # doit dire "Valid configuration"
 sudo systemctl reload caddy                    # rechargement sans coupure des autres sites
+```
+
+Caddy dans Docker (cas de `vps-antoine` : conteneur `antoinequarroz-caddy`, réseau `antoinequarroz-vitrine_appnet`), avec `reverse_proxy alfred-calcom:3000` dans le bloc :
+
+```bash
+docker exec antoinequarroz-caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+docker exec antoinequarroz-caddy caddy reload   --config /etc/caddy/Caddyfile --adapter caddyfile
 ```
 
 Valide toujours avant de recharger : un Caddyfile invalide est refusé au rechargement et tes sites continuent de tourner avec l'ancienne config.

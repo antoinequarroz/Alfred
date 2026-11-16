@@ -19,7 +19,8 @@ else ko "Moins de 1,2 Go dispo : agrandir le VPS ou baisser CALCOM_MEM_LIMIT ava
 echo "== Disque"
 free_gb=$(df -BG --output=avail /var/lib/docker 2>/dev/null | tail -1 | tr -dc '0-9')
 [ -z "$free_gb" ] && free_gb=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
-if [ "${free_gb:-0}" -ge 5 ]; then ok "${free_gb} Go libres (l'image Cal.com fait ~1,7 Go)"; else ko "Seulement ${free_gb} Go libres"; fi
+if docker image inspect "calcom/cal.com:${CALCOM_VERSION:-v6.2.0}" >/dev/null 2>&1; then need=3; else need=12; fi
+if [ "${free_gb:-0}" -ge "$need" ]; then ok "${free_gb} Go libres (l'image Cal.com occupe ~8 Go une fois décompressée)"; else ko "Seulement ${free_gb} Go libres, il en faut ${need} (image Cal.com : ~8 Go décompressée)"; fi
 
 echo "== Port local ${PORT}"
 if ss -ltn "( sport = :${PORT} )" 2>/dev/null | grep -q LISTEN; then ko "Port ${PORT} déjà pris : choisis un autre CALCOM_PORT dans .env"
@@ -33,7 +34,14 @@ done
 echo "== Caddy"
 if systemctl is-active --quiet caddy 2>/dev/null; then ok "Caddy tourne sur l'hôte (systemd) : utilise reverse_proxy 127.0.0.1:${PORT}"
 elif docker ps --format '{{.Image}} {{.Names}}' | grep -qi caddy; then
-  warn "Caddy tourne dans Docker : utilise docker-compose.caddy-network.yml (réseau(x) : $(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' $(docker ps -q --filter ancestor=caddy | head -1) 2>/dev/null))"
+  # Le Caddy qui publie le port 443 est le reverse proxy (les autres ne servent que des fichiers)
+  proxy=$(docker ps --filter publish=443 --format '{{.Names}} {{.Image}}' | grep -i caddy | awk '{print $1}' | head -1)
+  if [ -n "$proxy" ]; then
+    nets=$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$proxy" 2>/dev/null)
+    warn "Caddy tourne dans Docker (conteneur ${proxy}) : utilise docker-compose.caddy-network.yml avec CADDY_NETWORK parmi : ${nets}"
+  else
+    warn "Caddy tourne dans Docker : utilise docker-compose.caddy-network.yml (réseau à trouver avec docker network ls)"
+  fi
 else warn "Caddy introuvable automatiquement : vérifie comment il est lancé"; fi
 
 echo "== Fichier .env"
