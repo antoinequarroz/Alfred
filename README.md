@@ -11,7 +11,7 @@ Assistant personnel tout-en-un, auto-hébergé sur VPS. Premier chantier : **le 
 | Étape | Contenu | État |
 |---|---|---|
 | **v1 : mon calendrier** | Vues jour, semaine et mois, création, modification, suppression, événements récurrents, synchro iCloud dans les deux sens, app installable (PWA) | ✅ Développé, à déployer |
-| v1.1 : prise de RDV | Page publique, types de RDV, créneaux calculés sur les vrais événements, e-mails de confirmation | Moteur et API développés, interface à venir |
+| v1.1 : prise de RDV | Page publique, types de RDV, créneaux calculés sur les vrais événements, e-mails de confirmation | Développée : page publique `/rdv`, rubrique « Rendez-vous » dans l'app |
 | v2 : visio intégrée | Salles LiveKit liées aux événements (après agrandissement du VPS) | À venir |
 | Ensuite | Apps Mac (Tauri) et mobile (Capacitor), agent IA | À venir |
 
@@ -25,6 +25,17 @@ Assistant personnel tout-en-un, auto-hébergé sur VPS. Premier chantier : **le 
 - **Léger** : un seul conteneur, environ 110 Mo de RAM, base SQLite dans un fichier.
 
 Raccourcis : `n` nouvel événement, `t` aujourd'hui, `j` jour, `s` semaine, `m` mois, `←` `→` naviguer.
+
+## La prise de rendez-vous (v1.1)
+
+![Page publique : choix du créneau](docs/images/rdv-creneaux.png)
+
+- **Page publique** `/rdv` : le client choisit un type de rendez-vous, un jour dans le calendrier (les jours sans créneau sont grisés), une heure, puis laisse ses coordonnées. Les créneaux sont calculés sur les vrais événements, en heure de Suisse.
+- **Réservation** : l'événement est créé dans le calendrier (donc dans iCloud), le client reçoit un e-mail de confirmation avec un fichier pour son agenda et un lien d'annulation.
+- **Rubrique « Rendez-vous »** dans l'app : ouvrir ou fermer la prise de rendez-vous, copier le lien public, gérer les types, les horaires hebdomadaires, les calendriers qui bloquent, voir et annuler les réservations, vérifier l'envoi d'e-mails.
+- **Fermée par défaut** : rien n'est réservable tant que l'interrupteur n'est pas activé.
+
+![Rubrique « Rendez-vous » de l'app](docs/images/rdv-admin.png)
 
 ## Démarrer en local
 
@@ -43,6 +54,6 @@ npm run build && npm start
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md) : comment c'est construit et comment la suite (RDV, visio) s'y branche
-- [API de la prise de rendez-vous](docs/API-RDV.md) : routes, formes JSON et codes d'erreur, pour construire l'interface
+- [API de la prise de rendez-vous](docs/API-RDV.md) : routes, formes JSON et codes d'erreur
 - [Déploiement sur le VPS](docs/DEPLOIEMENT.md) : pas à pas, avec le mot de passe d'application iCloud
 - [Audit de faisabilité](docs/AUDIT.md) : l'étude de départ

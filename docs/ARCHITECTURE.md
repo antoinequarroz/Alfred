@@ -29,7 +29,8 @@ Un seul processus Node.js sert l'API et l'app web. Pas de Postgres ni de Redis :
 | `server/booking/service.ts`, `store.ts` | Prise de RDV : réglages, types, horaires, réservation, annulation |
 | `server/booking/routes.ts`, `ratelimit.ts` | Prise de RDV : routes publiques et privées, limitation de débit |
 | `server/booking/mail.ts` | Prise de RDV : e-mails (SMTP), pièce jointe iCalendar |
-| `web/src/` | App web (React) : vues, fenêtre d'événement, glisser-déposer |
+| `web/src/` | App web privée (React) : vues, fenêtre d'événement, glisser-déposer |
+| `web/src/rdv/` | Prise de RDV : page publique (`PublicApp.tsx`), écran « Rendez-vous » de l'admin (`BookingAdmin.tsx`), dates dans le fuseau du serveur (`tz.ts`) |
 | `shared/types.ts` | Types partagés entre serveur et app |
 | `test/` | Tests du moteur, de l'API et de la synchro (contre Radicale) |
 
@@ -54,6 +55,7 @@ Une page publique laisse un client choisir un type de rendez-vous puis un créne
 - **Annulation.** Lien `/rdv/annulation/<jeton>` (32 octets aléatoires ; seule l'empreinte SHA-256 est en base), ou depuis l'admin. L'événement est retiré par `CalendarService.remove`, en tolérant qu'il ait déjà disparu.
 - **E-mails.** SMTP (Infomaniak par défaut) avec nodemailer, chargé au premier envoi seulement. Confirmation au client avec pièce jointe `.ics` (`METHOD:PUBLISH`, pas une invitation), avis à Antoine. Un échec d'envoi ne remet jamais en cause la réservation : il est journalisé et affiché dans l'admin. Sans SMTP configuré, tout fonctionne sauf l'envoi.
 - **Événement supprimé dans Apple Calendar.** Après la synchro, la réservation apparaît comme « événement supprimé » dans l'admin et reste confirmée (le créneau reste pris). Pas d'e-mail automatique en v1.1 : Antoine annule la réservation depuis l'admin pour prévenir le client et libérer le créneau. De même, un événement déplacé est signalé « déplacé » sans prévenir le client.
+- **Interface.** La même page sert deux apps, chargées à la demande (`web/src/main.tsx`) : sous `/rdv`, `/rdv/<type>` et `/rdv/annulation/<jeton>`, la page publique, qui n'appelle que `/api/public/booking/*`, ne télécharge pas l'app privée et n'enregistre pas de service worker ; partout ailleurs, l'app privée, dont l'écran « Rendez-vous » (interrupteur d'ouverture, lien public, réservations, types, horaires, réglages, e-mails) n'est chargé qu'à l'ouverture. Les heures sont toujours affichées dans le fuseau annoncé par le serveur, pas dans celui du navigateur. Le service worker ne touche ni à l'API ni aux pages `/rdv`.
 - **Données.** Tables `booking_settings`, `booking_types`, `booking_hours`, `bookings`, et une colonne `blocks_booking` sur `calendars`, créées par une migration idempotente à l'ouverture de la base.
 
 ## Sécurité
@@ -73,7 +75,6 @@ Une page publique laisse un client choisir un type de rendez-vous puis un créne
 
 ## Comment la suite s'y branche
 
-- **Interface de la prise de RDV.** Le moteur et l'API sont en place ; il reste la page publique et l'écran d'administration, décrits dans [API-RDV.md](API-RDV.md).
 - **Visio (v2).** LiveKit tourne dans son propre conteneur. Alfred ne fait que délivrer des jetons d'accès et rattacher une salle à un événement (lien dans le champ lieu ou la description, visible aussi dans Apple Calendar).
 - **Apps Mac et mobile.** L'app web est déjà une PWA. Tauri (Mac) et Capacitor (iOS, Android) emballeront le même code.
 - **Agent IA.** L'API JSON est le point d'entrée : lire l'agenda, créer et déplacer des événements.

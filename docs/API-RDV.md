@@ -1,13 +1,13 @@
 # API de la prise de rendez-vous (v1.1)
 
-Ce document décrit tout ce qu'il faut pour construire l'interface : la page publique (`/rdv`, `/rdv/annulation/<jeton>`) et la partie « Rendez-vous » de l'admin. Les types TypeScript correspondants sont dans `shared/types.ts` (noms indiqués entre parenthèses).
+Ce document décrit l'API utilisée par l'interface : la page publique (`/rdv`, `/rdv/<type>`, `/rdv/annulation/<jeton>`, code dans `web/src/rdv/PublicApp.tsx`) et la rubrique « Rendez-vous » de l'admin (`web/src/rdv/BookingAdmin.tsx`). Les types TypeScript correspondants sont dans `shared/types.ts` (noms indiqués entre parenthèses).
 
 - [Principes communs](#principes-communs)
 - [API publique](#api-publique) : `/api/public/booking/*`, sans session
 - [API privée](#api-privée) : `/api/booking/*`, session requise
 - [Codes d'erreur](#codes-derreur)
 - [Comportement du moteur](#comportement-du-moteur) : ce que l'interface peut supposer
-- [À faire côté interface](#à-faire-côté-interface)
+- [À faire côté interface](#à-faire-côté-interface) : consignes appliquées par l'interface
 
 ## Principes communs
 
@@ -52,14 +52,15 @@ Infos de la page (`PublicBookingInfo`). Toujours `200`.
       "description": "",
       "mode": "cabinet",
       "locationLabel": "Rue du Lac 1, Sion",
-      "phoneRequired": false
+      "phoneRequired": false,
+      "horizonDays": 60
     }
   ]
 }
 ```
 
 - `enabled: false` : la prise de rendez-vous n'est pas ouverte. `types` est vide, `welcomeText` est vide : afficher « La prise de rendez-vous n'est pas ouverte ». Les autres routes publiques (sauf l'annulation par jeton) répondent alors `403 closed`.
-- `types` : seuls les types actifs, dans l'ordre choisi par Antoine. `mode` vaut `cabinet`, `telephone`, `visio` ou `autre` ; `locationLabel` est le texte prêt à afficher. `phoneRequired` : rendre le champ téléphone obligatoire.
+- `types` : seuls les types actifs, dans l'ordre choisi par Antoine. `mode` vaut `cabinet`, `telephone`, `visio` ou `autre` ; `locationLabel` est le texte prêt à afficher. `phoneRequired` : rendre le champ téléphone obligatoire. `horizonDays` : nombre de jours à l'avance jusqu'où des créneaux existent (pour borner le calendrier affiché).
 - `welcomeText` et `description` sont du **texte brut** (retours à la ligne possibles) : les afficher comme du texte, jamais comme du HTML.
 
 ### `GET /api/public/booking/types/:slug/slots?from=AAAA-MM-JJ&to=AAAA-MM-JJ`
@@ -385,6 +386,8 @@ Envoie un message d'essai à l'adresse d'avis (`mail.notifyTo`). Réponse : `{ "
 - **Événement supprimé dans Apple Calendar.** La réservation passe à `eventState: "missing"` dans l'admin après la synchro. **Aucun e-mail automatique en v1.1** : c'est à Antoine d'annuler la réservation depuis l'admin s'il veut prévenir le client et libérer le créneau.
 
 ## À faire côté interface
+
+Ces consignes sont appliquées par l'interface livrée ; elles restent la référence pour toute évolution.
 
 - **Pages publiques.** `/rdv` et `/rdv/annulation/<jeton>` sont servies par le repli vers `index.html`. Elles ne doivent appeler que `/api/public/booking/*` : surtout pas `/api/me`, `/api/calendars` ni rien de privé, et ne pas afficher l'écran de connexion.
 - **Champ piège.** Ajouter au formulaire un champ texte invisible pour un humain (hors écran en CSS, `tabindex="-1"`, `autocomplete="off"`, `aria-hidden="true"`), et envoyer sa valeur dans `website`. Lui donner un `name` qu'un gestionnaire de mots de passe ne remplit pas (éviter `email`, `url`, `phone`).
