@@ -22,19 +22,20 @@ while :; do
   break
 done
 
-hash=$(printf '%s' "$pw1" | docker run --rm -i --entrypoint node alfred:latest dist/server/scripts/hash-password.js | head -1)
+hash=$(printf '%s' "$pw1" | docker run --rm -i --entrypoint node alfred:latest dist/server/scripts/hash-password.js)
 hash=${hash#ALFRED_PASSWORD_HASH=}
-[[ "$hash" == scrypt* ]] || { echo "Échec du calcul de l'empreinte."; exit 1; }
+[[ "$hash" =~ ^scrypt:[0-9]+:[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$ ]] || { echo "Échec du calcul de l'empreinte."; exit 1; }
 unset pw1 pw2
 
-esc() { printf '%s' "${1//\$/\$\$}"; }   # docker compose : chaque $ doit être doublé
+# Les valeurs iCloud sont écrites entre apostrophes : docker compose les lit telles quelles.
+if [[ "$apple_id$app_pw" == *"'"* ]]; then echo "Les identifiants iCloud ne peuvent pas contenir d'apostrophe."; exit 1; fi
 
 umask 077
 cat > .env <<EOF
-ALFRED_PASSWORD_HASH=$(esc "$hash")
+ALFRED_PASSWORD_HASH=$hash
 CALDAV_URL=https://caldav.icloud.com
-CALDAV_USERNAME=$(esc "$apple_id")
-CALDAV_PASSWORD=$(esc "$app_pw")
+CALDAV_USERNAME='$apple_id'
+CALDAV_PASSWORD='$app_pw'
 CALDAV_SYNC_INTERVAL=120
 ALFRED_TIMEZONE=Europe/Zurich
 EOF

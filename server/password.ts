@@ -6,15 +6,15 @@ const scrypt = (pw: string, salt: Buffer, len: number, opts: ScryptOptions) =>
 const N = 16384;
 const KEYLEN = 32;
 
-/** Format : scrypt$N$sel_base64$empreinte_base64 */
+/** Format : scrypt:N:sel_base64:empreinte_base64 (sans dollar, pour passer tel quel dans un .env). */
 export async function hashPassword(password: string): Promise<string> {
   const salt = randomBytes(16);
   const key = await scrypt(password, salt, KEYLEN, { N, r: 8, p: 1 });
-  return `scrypt$${N}$${salt.toString('base64')}$${key.toString('base64')}`;
+  return ['scrypt', N, salt.toString('base64'), key.toString('base64')].join(':');
 }
 
 export async function verifyPassword(password: string, stored: string): Promise<boolean> {
-  const [algo, n, salt, hash] = stored.split('$');
+  const [algo, n, salt, hash] = stored.split(/[:$]/); // l'ancien format séparait par des dollars
   if (algo !== 'scrypt' || !n || !salt || !hash) return false;
   const expected = Buffer.from(hash, 'base64');
   const key = await scrypt(password, Buffer.from(salt, 'base64'), expected.length, { N: Number(n), r: 8, p: 1 });

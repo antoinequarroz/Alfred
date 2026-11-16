@@ -12,7 +12,7 @@ Alfred tourne dans un seul conteneur, limité à 256 Mo de RAM, derrière le Cad
    npm run hash-password -- "mon mot de passe très long"
    ```
 
-   La commande affiche deux lignes. Pour le `.env` du VPS, prendre la seconde (celle où les `$` sont doublés).
+   La commande affiche une ligne `ALFRED_PASSWORD_HASH=scrypt:…` à copier telle quelle dans le `.env`.
 
 ## 2. Installation
 
@@ -65,5 +65,5 @@ La base ne contient qu'une copie des calendriers (la référence reste iCloud) e
 ## Dépannage
 
 - **« Synchro iCloud en échec »** dans la barre latérale : le détail de l'erreur est affiché dessous. Le plus souvent, c'est l'identifiant Apple ou le mot de passe d'application (une erreur 401).
-- **Connexion refusée en boucle** : vérifier que les `$` de `ALFRED_PASSWORD_HASH` sont bien doublés dans le `.env`.
+- **Connexion refusée en boucle** : vérifier que `ALFRED_PASSWORD_HASH` commence par `scrypt:` et tient sur une seule ligne dans le `.env`.
 - **Trop d'essais** : le blocage se lève après 15 minutes, ou tout de suite avec `docker restart alfred`.

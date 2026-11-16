@@ -13,7 +13,4 @@ if (!pw || pw.length < 10) {
   console.error('Choisis un mot de passe d’au moins 10 caractères.');
   process.exit(1);
 }
-// Les $ doivent être doublés dans un fichier .env lu par docker compose.
-const hash = await hashPassword(pw);
-console.log(`ALFRED_PASSWORD_HASH=${hash}`);
-console.log(`\nDans un .env utilisé par docker compose, double les $ :\nALFRED_PASSWORD_HASH=${hash.replaceAll('$', '$$$$')}`);
+console.log(`ALFRED_PASSWORD_HASH=${await hashPassword(pw)}`);
