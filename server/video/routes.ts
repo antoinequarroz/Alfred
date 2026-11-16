@@ -9,11 +9,14 @@ export interface VideoLimits {
   read: [number, number];
   /** Demandes d'entrée (jetons), par adresse IP. */
   join: [number, number];
+  /** Suivi d'une demande en salle d'attente (une toutes les 3 secondes par invité), par adresse IP. */
+  wait: [number, number];
 }
 
 export const DEFAULT_VIDEO_LIMITS: VideoLimits = {
   read: [60, 60_000],
   join: [20, 600_000],
+  wait: [150, 60_000],
 };
 
 /**
@@ -24,6 +27,7 @@ export const DEFAULT_VIDEO_LIMITS: VideoLimits = {
 export function registerPublicVideoRoutes(app: Hono, video: VideoService, isHost: (c: Context) => boolean, limits: VideoLimits = DEFAULT_VIDEO_LIMITS): void {
   const read = new RateLimiter(...limits.read);
   const join = new RateLimiter(...limits.join);
+  const wait = new RateLimiter(...limits.wait);
   const limited = (c: Context, limiter: RateLimiter): Response | null => {
     const res = limiter.take(clientIp(c));
     if (res.ok) return null;
@@ -38,6 +42,19 @@ export function registerPublicVideoRoutes(app: Hono, video: VideoService, isHost
     if (blocked) return blocked;
     const body = await c.req.json().catch(() => ({}));
     return c.json(await video.join(c.req.param('slug'), body, isHost(c)));
+  });
+
+  // Salle d'attente : l'invité suit sa demande avec son ticket, ou y renonce.
+  app.post('/api/public/video/rooms/:slug/wait', async (c) => {
+    const blocked = limited(c, wait);
+    if (blocked) return blocked;
+    return c.json(await video.waitStatus(c.req.param('slug'), await c.req.json().catch(() => ({}))));
+  });
+  app.post('/api/public/video/rooms/:slug/wait/leave', async (c) => {
+    const blocked = limited(c, wait);
+    if (blocked) return blocked;
+    video.leaveWait(c.req.param('slug'), await c.req.json().catch(() => ({})));
+    return c.json({ ok: true });
   });
 }
 
@@ -64,6 +81,10 @@ export function registerAdminVideoRoutes(app: Hono, video: VideoService): void {
     await video.endMeetingBySlug(c.req.param('slug'));
     return c.json({ ok: true });
   });
+  // Salle d'attente : qui patiente, faire entrer, refuser.
+  app.get('/api/video/by-slug/:slug/waiting', (c) => c.json({ waiting: video.waitingList(c.req.param('slug')) }));
+  app.post('/api/video/by-slug/:slug/admit', async (c) => c.json({ waiting: await video.admit(c.req.param('slug'), await body(c)) }));
+  app.post('/api/video/by-slug/:slug/deny', async (c) => c.json({ waiting: video.deny(c.req.param('slug'), await body(c)) }));
   app.delete('/api/video/rooms/:id', (c) => {
     video.deleteRoom(c.req.param('id'));
     return c.json({ ok: true });

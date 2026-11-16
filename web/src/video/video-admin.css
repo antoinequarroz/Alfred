@@ -8,6 +8,7 @@
 .vd-hero .btn { gap: 6px; }
 
 .vd-live { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); vertical-align: 1px; }
+.vd-live.vd-waiting { color: var(--accent-ink); background: var(--accent-soft); margin-left: 4px; }
 .vd-live svg { width: 13px; height: 13px; }
 
 .vd-room { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }

@@ -70,9 +70,13 @@ function whenLabel(room: VideoRoom): string {
 
 const KIND_LABEL: Record<VideoRoom['kind'], string> = { instant: 'Réunion instantanée', event: 'Événement', booking: 'Rendez-vous', permanent: 'Salle permanente' };
 
-function Live({ n }: { n: number | null }) {
-  if (!n) return null;
-  return <span className="vd-live"><UsersIcon />{n} en ligne</span>;
+function Live({ n, waiting }: { n: number | null; waiting?: number }) {
+  return (
+    <>
+      {n ? <span className="vd-live"><UsersIcon />{n} en ligne</span> : null}
+      {waiting ? <span className="vd-live vd-waiting">{waiting} en salle d’attente</span> : null}
+    </>
+  );
 }
 
 /** Carte des réglages de la visio (écran Réglages, et rappel dans la rubrique Visio). */
@@ -104,6 +108,13 @@ export function VideoSettingsCard({ state, onState, notify }: { state: VideoAdmi
         <div>
           <p className="vd-setting-title">Activer la visio</p>
           <p className="bk-hint">Désactivée, aucun lien ne s’ouvre et les rendez-vous « En visio » ne reçoivent plus de lien Alfred.</p>
+        </div>
+      </div>
+      <div className="vd-setting">
+        <Switch checked={settings.waitingRoom} disabled={busy} onChange={(v) => void save({ waitingRoom: v })} label="Salle d’attente" />
+        <div>
+          <p className="vd-setting-title">Salle d’attente</p>
+          <p className="bk-hint">Tes invités patientent sans rien voir ni entendre, et n’entrent que lorsque tu les fais entrer depuis la visio. Désactivée, le lien suffit pour entrer.</p>
         </div>
       </div>
       <div className="vd-grid">
@@ -218,7 +229,7 @@ export function VideoScreen({ onMenu, onSettings }: { onMenu: () => void; onSett
               <Card
                 title="Ma salle permanente"
                 sub="Un lien fixe, toujours le même, à donner à tes contacts ou à mettre dans ta signature."
-                action={personal ? <Live n={personal.live} /> : undefined}
+                action={personal ? <Live n={personal.live} waiting={personal.waiting} /> : undefined}
               >
                 {personal ? (
                   <>
@@ -247,7 +258,7 @@ export function VideoScreen({ onMenu, onSettings }: { onMenu: () => void; onSett
                     {state.rooms.map((r) => (
                       <li key={r.id} className="vd-room">
                         <div className="vd-room-main">
-                          <p className="vd-room-title">{r.title} <Live n={r.live} /></p>
+                          <p className="vd-room-title">{r.title} <Live n={r.live} waiting={r.waiting} /></p>
                           <p className="bk-meta">{KIND_LABEL[r.kind]}{whenLabel(r) ? ` · ${whenLabel(r)}` : ''}</p>
                         </div>
                         <div className="bk-row-actions">

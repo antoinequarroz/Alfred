@@ -3,13 +3,14 @@ import {
   ConnectionState, DisconnectReason, LocalAudioTrack, LocalVideoTrack, Room, RoomEvent, Track, VideoPresets,
   createLocalAudioTrack, createLocalVideoTrack, type Participant, type RemoteParticipant, type TrackPublication,
 } from 'livekit-client';
-import type { PublicVideoRoom, VideoJoinInfo } from '../../../shared/types';
+import type { PublicVideoRoom, VideoJoinInfo, VideoJoinResult, VideoWaiter, VideoWaitStatus } from '../../../shared/types';
 import { ApiError, requestJson } from '../http';
 import {
-  AlertIcon, ChatIcon, CloseIcon, CopyIcon, FlipIcon, HangupIcon, MicIcon, MicOffIcon, ScreenIcon,
+  AlertIcon, BlurIcon, ChatIcon, CheckIcon, CloseIcon, CopyIcon, FlipIcon, HangupIcon, MicIcon, MicOffIcon, ScreenIcon,
   UsersIcon, VideoIcon, VideoOffIcon,
 } from '../icons';
 import { MoonIcon, SunIcon, useTheme } from '../theme';
+import { blurSupported, blurWanted, createBlur, rememberBlur, setBlur } from './blur';
 import '../rdv/rdv.css';
 import './video.css';
 
@@ -47,6 +48,33 @@ function mediaErrorText(err: unknown): string | null {
   if (/notfound|devicesnotfound|overconstrained/i.test(kind)) return 'Aucune caméra ou aucun micro détecté. Vous pouvez tout de même rejoindre la visio.';
   if (/notreadable|trackstart|abort/i.test(kind)) return 'La caméra ou le micro est déjà utilisé par une autre application. Vous pouvez tout de même rejoindre la visio.';
   return null;
+}
+
+const BLUR_FAILED = 'Le flou d’arrière-plan n’a pas pu démarrer sur cet appareil.';
+
+/** Deux notes brèves : quelqu'un attend d'entrer. Sans effet si le navigateur bloque le son. */
+function chime(): void {
+  try {
+    const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    const gain = ctx.createGain();
+    gain.connect(ctx.destination);
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    [660, 880].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const at = ctx.currentTime + i * 0.16;
+      osc.frequency.value = freq;
+      osc.connect(gain);
+      gain.gain.exponentialRampToValueAtTime(0.12, at + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.15);
+      osc.start(at);
+      osc.stop(at + 0.16);
+    });
+    setTimeout(() => void ctx.close().catch(() => undefined), 800);
+  } catch {
+    // pas de son : le panneau reste visible
+  }
 }
 
 function initials(name: string): string {
@@ -159,9 +187,25 @@ interface Prefs {
   microphone: boolean;
   cameraId?: string;
   microphoneId?: string;
+  /** Flou d'arrière-plan demandé. */
+  blur: boolean;
 }
 
-function Lobby({ room, onJoin, busy, error }: { room: PublicVideoRoom; onJoin: (prefs: Prefs) => void; busy: boolean; error: string | null }) {
+/** L'invité patiente : l'hôte est-il déjà dans la salle (null : on ne sait pas). */
+interface Waiting {
+  hostPresent: boolean | null;
+}
+
+function Lobby({ room, onJoin, onPrefs, onCancel, waiting, busy, error }: {
+  room: PublicVideoRoom;
+  onJoin: (prefs: Prefs) => void;
+  /** Les choix (micro, caméra, flou) peuvent encore changer pendant l'attente. */
+  onPrefs: (prefs: Prefs) => void;
+  onCancel: () => void;
+  waiting: Waiting | null;
+  busy: boolean;
+  error: string | null;
+}) {
   const [name, setName] = useState(() => {
     try {
       return localStorage.getItem(NAME_KEY) ?? '';
@@ -178,6 +222,7 @@ function Lobby({ room, onJoin, busy, error }: { room: PublicVideoRoom; onJoin: (
   const [microphoneId, setMicrophoneId] = useState<string | undefined>();
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [level, setLevel] = useState(0);
+  const [blur, setBlurOn] = useState(blurWanted);
 
   // Aperçu de la caméra : refait à chaque changement d'appareil ou de choix.
   useEffect(() => {
@@ -260,6 +305,31 @@ function Lobby({ room, onJoin, busy, error }: { room: PublicVideoRoom; onJoin: (
     }, () => undefined);
   }, [videoTrack, audioTrack]);
 
+  // Flou sur l'aperçu : on voit ce que verront les autres avant d'entrer.
+  useEffect(() => {
+    if (!videoTrack || !blur) return;
+    let cancelled = false;
+    const started = setBlur(videoTrack, true).catch(() => {
+      if (cancelled) return;
+      setBlurOn(false);
+      setMediaError(BLUR_FAILED);
+    });
+    return () => {
+      cancelled = true;
+      // Retiré seulement une fois posé : un clic rapide ne laisse pas le flou actif à tort.
+      void started.then(() => setBlur(videoTrack, false)).catch(() => undefined);
+    };
+  }, [videoTrack, blur]);
+
+  const prefs = (): Prefs => ({
+    name: name.trim(), camera, microphone, blur,
+    cameraId: cameraId ?? videoTrack?.mediaStreamTrack.getSettings().deviceId,
+    microphoneId: microphoneId ?? audioTrack?.mediaStreamTrack.getSettings().deviceId,
+  });
+  const prefsRef = useRef(prefs);
+  prefsRef.current = prefs;
+  useEffect(() => onPrefs(prefsRef.current()), [onPrefs, camera, microphone, blur, cameraId, microphoneId, videoTrack, audioTrack]);
+
   const when = whenLabel(room);
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -271,8 +341,9 @@ function Lobby({ room, onJoin, busy, error }: { room: PublicVideoRoom; onJoin: (
       // stockage indisponible (navigation privée) : rien de grave
     }
     // L'aperçu reste affiché pendant la connexion ; ses pistes sont libérées quand la salle s'ouvre.
-    onJoin({ name: clean, camera, microphone, cameraId: cameraId ?? videoTrack?.mediaStreamTrack.getSettings().deviceId, microphoneId: microphoneId ?? audioTrack?.mediaStreamTrack.getSettings().deviceId });
+    onJoin(prefs());
   };
+  const host = room.hostName || 'votre hôte';
 
   return (
     <Frame>
@@ -289,6 +360,11 @@ function Lobby({ room, onJoin, busy, error }: { room: PublicVideoRoom; onJoin: (
               <button type="button" className={`vc-round${camera ? '' : ' off'}`} onClick={() => setCamera((v) => !v)} aria-pressed={!camera} aria-label={camera ? 'Couper la caméra' : 'Activer la caméra'}>
                 {camera ? <VideoIcon /> : <VideoOffIcon />}
               </button>
+              {blurSupported && camera && (
+                <button type="button" className={`vc-round${blur ? ' on' : ''}`} onClick={() => { rememberBlur(!blur); setBlurOn(!blur); }} aria-pressed={blur} aria-label={blur ? 'Retirer le flou d’arrière-plan' : 'Flouter l’arrière-plan'} title={blur ? 'Retirer le flou' : 'Flouter l’arrière-plan'}>
+                  <BlurIcon />
+                </button>
+              )}
             </div>
             {microphone && <span className="vc-level" aria-hidden="true"><span style={{ transform: `scaleX(${level})` }} /></span>}
           </div>
@@ -303,7 +379,7 @@ function Lobby({ room, onJoin, busy, error }: { room: PublicVideoRoom; onJoin: (
             ) : (
               <div className="fld">
                 <label htmlFor="vc-name">Votre nom</label>
-                <input id="vc-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={50} autoComplete="name" required autoFocus placeholder="Prénom Nom" />
+                <input id="vc-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={50} autoComplete="name" required autoFocus placeholder="Prénom Nom" disabled={Boolean(waiting)} />
               </div>
             )}
             {(devices.cams.length > 1 || devices.mics.length > 1) && (
@@ -328,10 +404,28 @@ function Lobby({ room, onJoin, busy, error }: { room: PublicVideoRoom; onJoin: (
             )}
             {mediaError && <p className="vc-warn" role="status"><AlertIcon /><span>{mediaError}</span></p>}
             {error && <p className="form-error" role="alert">{error}</p>}
-            <button className="btn primary vc-join" disabled={busy || (!room.isHost && !name.trim())}>
-              {busy ? 'Connexion…' : 'Rejoindre la visio'}
-            </button>
-            <p className="vc-small">Rien à installer. La vidéo passe par le serveur privé d’Alfred, en Suisse, et n’est pas enregistrée.</p>
+            {waiting ? (
+              <div className="vc-wait" role="status">
+                <span className="rdv-spinner" aria-hidden="true" />
+                <div>
+                  <strong>{waiting.hostPresent === false ? `${host.charAt(0).toUpperCase()}${host.slice(1)} n’est pas encore là` : 'Vous êtes en salle d’attente'}</strong>
+                  <span>
+                    {waiting.hostPresent === false
+                      ? 'Vous entrerez dès qu’il vous aura fait entrer. Gardez cette page ouverte.'
+                      : `${host.charAt(0).toUpperCase()}${host.slice(1)} a été prévenu et vous fera entrer dans un instant. Gardez cette page ouverte.`}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <button className="btn primary vc-join" disabled={busy || (!room.isHost && !name.trim())}>
+                {busy ? 'Connexion…' : room.waitingRoom ? 'Demander à entrer' : 'Rejoindre la visio'}
+              </button>
+            )}
+            {waiting && <button type="button" className="btn ghost vc-join" onClick={onCancel}>Annuler</button>}
+            <p className="vc-small">
+              {room.waitingRoom && !waiting ? `${host.charAt(0).toUpperCase()}${host.slice(1)} vous fera entrer : personne ne vous voit ni ne vous entend d’ici là. ` : ''}
+              Rien à installer. La vidéo passe par le serveur privé d’Alfred, en Suisse, et n’est pas enregistrée.
+            </p>
           </div>
         </form>
       </main>
@@ -348,7 +442,7 @@ interface ChatLine {
   mine: boolean;
 }
 
-function Call({ room, info, publicRoom, onLeave }: { room: Room; info: VideoJoinInfo; publicRoom: PublicVideoRoom; onLeave: (reason: 'left' | 'ended' | 'replaced' | 'lost') => void }) {
+function Call({ room, info, publicRoom, initialBlur, onLeave }: { room: Room; info: VideoJoinInfo; publicRoom: PublicVideoRoom; initialBlur: boolean; onLeave: (reason: 'left' | 'ended' | 'replaced' | 'lost') => void }) {
   const [, setVersion] = useState(0);
   const refresh = useCallback(() => setVersion((v) => v + 1), []);
   const [speakers, setSpeakers] = useState<Set<string>>(new Set());
@@ -361,9 +455,60 @@ function Call({ room, info, publicRoom, onLeave }: { room: Room; info: VideoJoin
   const [confirmEnd, setConfirmEnd] = useState(false);
   // Caméra demandée en dernier : certains navigateurs ne disent pas laquelle est active.
   const [facing, setFacing] = useState<'user' | 'environment'>('user');
+  const [blur, setBlurOn] = useState(initialBlur);
+  const [waiters, setWaiters] = useState<VideoWaiter[]>([]);
+  const [admitting, setAdmitting] = useState<string | null>(null);
   const chatId = useRef(0);
   const chatOpenRef = useRef(chatOpen);
   chatOpenRef.current = chatOpen;
+
+  // Salle d'attente : l'hôte voit qui demande à entrer, avec un signal sonore à chaque nouvelle personne.
+  useEffect(() => {
+    if (!info.isHost) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const known = new Set<string>();
+    const tick = async () => {
+      try {
+        const res = await requestJson<{ waiting: VideoWaiter[] }>('GET', `/api/video/by-slug/${encodeURIComponent(slug)}/waiting`);
+        if (stopped) return;
+        if (res.waiting.some((w) => !known.has(w.id))) chime();
+        known.clear();
+        for (const w of res.waiting) known.add(w.id);
+        setWaiters(res.waiting);
+      } catch (err) {
+        // Session expirée : la file n'est plus lisible, inutile d'insister.
+        if (err instanceof ApiError && err.status === 401) return;
+      }
+      if (!stopped) timer = setTimeout(() => void tick(), 3000);
+    };
+    void tick();
+    // Un onglet en arrière-plan est ralenti par le navigateur : au retour, la file est relue tout de suite.
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible' || stopped) return;
+      clearTimeout(timer);
+      void tick();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [info.isHost]);
+
+  const decide = async (id: string, action: 'admit' | 'deny') => {
+    setAdmitting(id);
+    try {
+      const res = await requestJson<{ waiting: VideoWaiter[] }>('POST', `/api/video/by-slug/${encodeURIComponent(slug)}/${action}`, { id });
+      setWaiters(res.waiting);
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'wait_gone') setWaiters((list) => list.filter((w) => w.id !== id));
+      setToast(errorText(err));
+    } finally {
+      setAdmitting(null);
+    }
+  };
 
   useEffect(() => {
     const events = [
@@ -449,6 +594,36 @@ function Call({ room, info, publicRoom, onLeave }: { room: Room; info: VideoJoin
     }
   };
 
+  // Caméra : si le flou est demandé, il est posé avant que l'image parte vers les autres.
+  const toggleCamera = () => run('cam', async () => {
+    if (camOn) return local.setCameraEnabled(false);
+    const existing = local.getTrackPublication(Track.Source.Camera)?.track as LocalVideoTrack | undefined;
+    if (!blur || existing) return local.setCameraEnabled(true);
+    try {
+      await local.setCameraEnabled(true, { processor: await createBlur() });
+    } catch (err) {
+      if (mediaErrorText(err)) throw err;
+      setBlurOn(false);
+      await local.setCameraEnabled(true);
+      setToast(BLUR_FAILED);
+    }
+  });
+
+  const toggleBlur = () => run('blur', async () => {
+    const track = local.getTrackPublication(Track.Source.Camera)?.track as LocalVideoTrack | undefined;
+    const next = !blur;
+    rememberBlur(next);
+    setBlurOn(next);
+    if (!track) return;
+    try {
+      await setBlur(track, next);
+    } catch {
+      setBlurOn(false);
+      await setBlur(track, false).catch(() => undefined);
+      setToast(BLUR_FAILED);
+    }
+  });
+
   const flip = () => run('flip', async () => {
     const pub = local.getTrackPublication(Track.Source.Camera);
     const track = pub?.track as LocalVideoTrack | undefined;
@@ -514,7 +689,21 @@ function Call({ room, info, publicRoom, onLeave }: { room: Room; info: VideoJoin
               {everyone.map((p) => <Tile key={p.identity} participant={p} local={p === local} speaking={speakers.has(p.identity)} hostName={publicRoom.hostName} mirror={facing === 'user'} />)}
             </div>
           )}
-          {alone && !screen && (
+          {waiters.length > 0 && (
+            <section className="vc-admit" aria-label="Salle d’attente">
+              <h2>Salle d’attente <span>{waiters.length}</span></h2>
+              <ul>
+                {waiters.map((w) => (
+                  <li key={w.id}>
+                    <span className="vc-admit-name">{w.name}</span>
+                    <button className="btn small primary" disabled={admitting === w.id} onClick={() => void decide(w.id, 'admit')}><CheckIcon />Faire entrer</button>
+                    <button className="btn small" disabled={admitting === w.id} onClick={() => void decide(w.id, 'deny')} aria-label={`Refuser ${w.name}`} title="Refuser"><CloseIcon /></button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+          {alone && !screen && waiters.length === 0 && (
             <p className="vc-waiting" role="status">
               <span className="rdv-spinner" aria-hidden="true" />
               En attente de {waitingFor}…
@@ -553,11 +742,16 @@ function Call({ room, info, publicRoom, onLeave }: { room: Room; info: VideoJoin
           <button className={`vc-round${micOn ? '' : ' off'}`} onClick={() => void run('mic', () => local.setMicrophoneEnabled(!micOn))} aria-pressed={!micOn} aria-label={micOn ? 'Couper le micro' : 'Activer le micro'} title={micOn ? 'Couper le micro' : 'Activer le micro'}>
             {micOn ? <MicIcon /> : <MicOffIcon />}
           </button>
-          <button className={`vc-round${camOn ? '' : ' off'}`} onClick={() => void run('cam', () => local.setCameraEnabled(!camOn))} aria-pressed={!camOn} aria-label={camOn ? 'Couper la caméra' : 'Activer la caméra'} title={camOn ? 'Couper la caméra' : 'Activer la caméra'}>
+          <button className={`vc-round${camOn ? '' : ' off'}`} onClick={() => void toggleCamera()} aria-pressed={!camOn} aria-label={camOn ? 'Couper la caméra' : 'Activer la caméra'} title={camOn ? 'Couper la caméra' : 'Activer la caméra'}>
             {camOn ? <VideoIcon /> : <VideoOffIcon />}
           </button>
           {isTouch && camOn && (
             <button className="vc-round" onClick={() => void flip()} aria-label="Changer de caméra" title="Changer de caméra"><FlipIcon /></button>
+          )}
+          {blurSupported && camOn && (
+            <button className={`vc-round${blur ? ' on' : ''}`} onClick={() => void toggleBlur()} aria-pressed={blur} aria-label={blur ? 'Retirer le flou d’arrière-plan' : 'Flouter l’arrière-plan'} title={blur ? 'Retirer le flou' : 'Flouter l’arrière-plan'}>
+              <BlurIcon />
+            </button>
           )}
           {canShareScreen && (
             <button className={`vc-round${sharing ? ' on' : ''}`} onClick={() => void run('screen', () => local.setScreenShareEnabled(!sharing, { audio: true }))} aria-pressed={sharing} aria-label={sharing ? 'Arrêter le partage d’écran' : 'Partager l’écran'} title={sharing ? 'Arrêter le partage' : 'Partager l’écran'}>
@@ -600,19 +794,32 @@ function Call({ room, info, publicRoom, onLeave }: { room: Room; info: VideoJoin
 
 // --- page ---------------------------------------------------------------------
 
+/** Renonce à une demande d'entrée (bouton Annuler, page fermée) ; l'envoi survit à la fermeture de la page. */
+function leaveWait(ticket: string): void {
+  void fetch(`${BASE}/${encodeURIComponent(slug)}/wait/leave`, {
+    method: 'POST', keepalive: true, credentials: 'same-origin',
+    headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ticket }),
+  }).catch(() => undefined);
+}
+
 type Phase =
   | { kind: 'loading' }
   | { kind: 'error'; title: string; text: string }
   | { kind: 'lobby' }
-  | { kind: 'call'; room: Room; info: VideoJoinInfo }
-  | { kind: 'left'; reason: 'left' | 'ended' | 'replaced' | 'lost' };
+  | { kind: 'call'; room: Room; info: VideoJoinInfo; blur: boolean }
+  | { kind: 'left'; reason: 'left' | 'ended' | 'replaced' | 'lost' | 'refused' };
 
 export function VideoApp() {
   const [publicRoom, setPublicRoom] = useState<PublicVideoRoom | null>(null);
   const [phase, setPhase] = useState<Phase>({ kind: 'loading' });
   const [busy, setBusy] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
+  const [wait, setWait] = useState<({ ticket: string } & Waiting) | null>(null);
   const roomRef = useRef<Room | null>(null);
+  const prefsRef = useRef<Prefs>({ name: '', camera: true, microphone: true, blur: false });
+  const waitRef = useRef(wait);
+  waitRef.current = wait;
+  const onPrefs = useCallback((p: Prefs) => { prefsRef.current = p; }, []);
 
   const load = useCallback(async () => {
     try {
@@ -633,18 +840,21 @@ export function VideoApp() {
 
   // En quittant la page, la connexion est fermée proprement (les autres le voient tout de suite).
   useEffect(() => {
-    const onUnload = () => void roomRef.current?.disconnect();
+    const onUnload = () => {
+      void roomRef.current?.disconnect();
+      // Page fermée pendant l'attente : l'hôte ne voit plus la demande.
+      if (waitRef.current) leaveWait(waitRef.current.ticket);
+    };
     window.addEventListener('pagehide', onUnload);
     return () => window.removeEventListener('pagehide', onUnload);
   }, []);
 
-  const join = async (prefs: Prefs) => {
-    if (!publicRoom) return;
-    setBusy(true);
-    setJoinError(null);
+  const waitUrl = `${BASE}/${encodeURIComponent(slug)}/wait`;
+
+  // Ouvre la salle avec un jeton d'entrée, puis la caméra et le micro selon les choix faits avant d'entrer.
+  const connect = async (info: VideoJoinInfo, prefs: Prefs) => {
     let room: Room | null = null;
     try {
-      const info = await requestJson<VideoJoinInfo>('POST', `${BASE}/${encodeURIComponent(slug)}/join`, { name: prefs.name });
       const eco = info.quality === 'eco';
       room = new Room({
         adaptiveStream: true,
@@ -668,8 +878,22 @@ export function VideoApp() {
       roomRef.current = room;
       // Caméra et micro : un refus n'empêche pas d'entrer (on peut écouter et parler par messages).
       const problems: string[] = [];
-      if (prefs.microphone) await room.localParticipant.setMicrophoneEnabled(true, { deviceId: prefs.microphoneId }).catch(() => problems.push('micro'));
-      if (prefs.camera) await room.localParticipant.setCameraEnabled(true, { deviceId: prefs.cameraId }).catch(() => problems.push('caméra'));
+      let blur = prefs.blur && blurSupported;
+      const local = room.localParticipant;
+      if (prefs.microphone) await local.setMicrophoneEnabled(true, { deviceId: prefs.microphoneId }).catch(() => problems.push('micro'));
+      if (prefs.camera) {
+        // Flou demandé : il est posé avant la publication, aucune image nette ne part vers les autres.
+        // S'il ne démarre pas, la caméra reste coupée : à la personne de décider si elle l'ouvre sans flou.
+        const processor = blur ? await createBlur().catch(() => null) : null;
+        if (blur && !processor) {
+          blur = false;
+          problems.push('flou d’arrière-plan (caméra laissée coupée)');
+        } else {
+          await local.setCameraEnabled(true, { deviceId: prefs.cameraId, ...(processor ? { processor } : {}) }).catch(() => {
+            problems.push(processor ? 'caméra avec flou' : 'caméra');
+          });
+        }
+      }
       room.off(RoomEvent.Disconnected, onEarly);
       if (early !== undefined || room.state === ConnectionState.Disconnected) {
         roomRef.current = null;
@@ -679,14 +903,109 @@ export function VideoApp() {
         });
         return;
       }
-      setPhase({ kind: 'call', room, info });
+      setPhase({ kind: 'call', room, info, blur });
       if (problems.length > 0) setJoinError(`Impossible d’ouvrir : ${problems.join(' et ')}.`);
     } catch (err) {
       await room?.disconnect().catch(() => undefined);
+      roomRef.current = null;
+      setJoinError(errorText(err));
+    }
+  };
+
+  const join = async (prefs: Prefs) => {
+    if (!publicRoom) return;
+    setBusy(true);
+    setJoinError(null);
+    prefsRef.current = prefs;
+    try {
+      const result = await requestJson<VideoJoinResult>('POST', `${BASE}/${encodeURIComponent(slug)}/join`, { name: prefs.name });
+      if ('waiting' in result) setWait({ ticket: result.ticket, hostPresent: result.hostPresent });
+      else await connect(result, prefs);
+    } catch (err) {
       setJoinError(errorText(err));
     } finally {
       setBusy(false);
     }
+  };
+
+  // Salle d'attente : la demande est suivie toutes les 3 secondes, jusqu'à l'admission ou au refus.
+  const ticket = wait?.ticket;
+  useEffect(() => {
+    if (!ticket) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      let delay = 3000;
+      try {
+        const status = await requestJson<VideoWaitStatus>('POST', waitUrl, { ticket });
+        if (stopped) return;
+        if (status.state === 'waiting') {
+          setWait((w) => (w && w.ticket === ticket ? { ...w, hostPresent: status.hostPresent } : w));
+        } else if (status.state === 'denied') {
+          setWait(null);
+          setPhase({ kind: 'left', reason: 'refused' });
+          return;
+        } else {
+          stopped = true;
+          setBusy(true);
+          setWait(null);
+          await connect(status.join, prefsRef.current);
+          setBusy(false);
+          return;
+        }
+      } catch (err) {
+        if (stopped) return;
+        if (err instanceof ApiError && err.code === 'wait_expired') {
+          // Page restée longtemps en arrière-plan : la demande est refaite sans rien redemander.
+          try {
+            const again = await requestJson<VideoJoinResult>('POST', `${BASE}/${encodeURIComponent(slug)}/join`, { name: prefsRef.current.name });
+            if (stopped) {
+              if ('waiting' in again) leaveWait(again.ticket);
+              return;
+            }
+            if ('waiting' in again) {
+              setWait({ ticket: again.ticket, hostPresent: again.hostPresent });
+            } else {
+              setWait(null);
+              setBusy(true);
+              await connect(again, prefsRef.current);
+              setBusy(false);
+            }
+          } catch (inner) {
+            if (stopped) return;
+            setWait(null);
+            setJoinError(errorText(inner));
+          }
+          return;
+        }
+        if (err instanceof ApiError && (err.status === 410 || err.status === 404 || err.status === 403)) {
+          setWait(null);
+          void load();
+          return;
+        }
+        // Coupure passagère, serveur occupé : on réessaie, moins souvent.
+        delay = 6000;
+      }
+      if (!stopped) timer = setTimeout(() => void tick(), delay);
+    };
+    timer = setTimeout(() => void tick(), 1500);
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible' || stopped) return;
+      clearTimeout(timer);
+      void tick();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ticket]);
+
+  const cancelWait = () => {
+    if (wait) leaveWait(wait.ticket);
+    setWait(null);
   };
 
   const onLeave = useCallback((reason: 'left' | 'ended' | 'replaced' | 'lost') => {
@@ -709,24 +1028,25 @@ export function VideoApp() {
         ended: ['La visio est terminée', 'L’hôte a terminé la réunion pour tout le monde.'],
         replaced: ['Visio ouverte ailleurs', 'Vous avez rejoint cette visio depuis un autre appareil ou un autre onglet.'],
         lost: ['Connexion perdue', 'La connexion à la visio a été interrompue. Vérifiez votre réseau, puis rejoignez-la à nouveau.'],
+        refused: ['Votre demande n’a pas été acceptée', 'Votre hôte ne vous a pas fait entrer. S’il s’agit d’une erreur, contactez-le, puis demandez à nouveau à entrer.'],
       } as const;
       const [title, text] = texts[phase.reason];
       return (
-        <Message title={title} action={<button className="btn primary" onClick={() => { setJoinError(null); void load(); }}>Rejoindre à nouveau</button>}>
+        <Message title={title} action={<button className="btn primary" onClick={() => { setJoinError(null); void load(); }}>{phase.reason === 'refused' ? 'Demander à nouveau' : 'Rejoindre à nouveau'}</button>}>
           {text}
         </Message>
       );
     }
     if (!publicRoom) return null;
-    if (phase.kind === 'lobby') return <Lobby room={publicRoom} onJoin={(p) => void join(p)} busy={busy} error={joinError} />;
+    if (phase.kind === 'lobby') return <Lobby room={publicRoom} onJoin={(p) => void join(p)} onPrefs={onPrefs} onCancel={cancelWait} waiting={wait} busy={busy} error={joinError} />;
     return null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, publicRoom, busy, joinError, load]);
+  }, [phase, publicRoom, busy, joinError, load, wait, onPrefs]);
 
   if (phase.kind === 'call' && publicRoom) {
     return (
       <>
-        <Call room={phase.room} info={phase.info} publicRoom={publicRoom} onLeave={onLeave} />
+        <Call room={phase.room} info={phase.info} publicRoom={publicRoom} initialBlur={phase.blur} onLeave={onLeave} />
         {joinError && <div className="toast" role="alert" onClick={() => setJoinError(null)}><AlertIcon />{joinError}</div>}
       </>
     );
