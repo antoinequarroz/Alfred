@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { CalendarInfo, CalendarSource, Occurrence } from '../shared/types.js';
 import type { Db } from './db.js';
-import { expand, summarize } from './ics.js';
+import { expand, expandBusy, summarize, type BusyOccurrence } from './ics.js';
 
 export interface CalendarRow {
   id: string;
@@ -13,6 +13,8 @@ export interface CalendarRow {
   visible: number;
   read_only: number;
   sort: number;
+  /** 1 = les événements de ce calendrier occupent l'agenda pour la prise de rendez-vous. */
+  blocks_booking: number;
 }
 
 export interface EventRow {
@@ -38,6 +40,7 @@ export function toCalendarInfo(row: CalendarRow): CalendarInfo {
     source: row.source,
     visible: row.visible === 1,
     readOnly: row.read_only === 1,
+    blocksBooking: row.blocks_booking === 1,
   };
 }
 
@@ -54,7 +57,7 @@ export class Store {
     return this.db.prepare('SELECT * FROM calendars WHERE id = ?').get(id) as unknown as CalendarRow | undefined;
   }
 
-  upsertCalendar(cal: Omit<CalendarRow, 'visible' | 'ctag'> & { ctag?: string | null }): void {
+  upsertCalendar(cal: Omit<CalendarRow, 'visible' | 'ctag' | 'blocks_booking'> & { ctag?: string | null }): void {
     this.db
       .prepare(
         `INSERT INTO calendars (id, source, url, name, color, read_only, sort)
@@ -71,6 +74,10 @@ export class Store {
 
   setCalendarVisible(id: string, visible: boolean): void {
     this.db.prepare('UPDATE calendars SET visible = ? WHERE id = ?').run(visible ? 1 : 0, id);
+  }
+
+  setCalendarBlocksBooking(id: string, blocks: boolean): void {
+    this.db.prepare('UPDATE calendars SET blocks_booking = ? WHERE id = ?').run(blocks ? 1 : 0, id);
   }
 
   deleteCalendar(id: string): void {
@@ -144,6 +151,39 @@ export class Store {
     }
     out.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
     return out;
+  }
+
+  /**
+   * Occupation de l'agenda sur une période, pour la prise de rendez-vous : toutes les
+   * occurrences des calendriers « bloquants », qu'ils soient affichés ou non.
+   * Ne renvoie que des horaires et des drapeaux, jamais de titre ni de détail.
+   */
+  busyOccurrences(from: Date, to: Date): BusyOccurrence[] {
+    const margin = 86_400_000;
+    const rows = this.db
+      .prepare(
+        `SELECT e.id, e.ics FROM events e JOIN calendars c ON c.id = e.calendar_id
+         WHERE c.blocks_booking = 1
+           AND e.start_ms < ?
+           AND ((e.recurring = 0 AND e.end_ms > ?)
+             OR (e.recurring = 1 AND (e.recur_end_ms IS NULL OR e.recur_end_ms > ?)))`,
+      )
+      .all(to.getTime() + margin, from.getTime() - margin, from.getTime() - margin) as unknown as { id: string; ics: string }[];
+    const out: BusyOccurrence[] = [];
+    for (const row of rows) {
+      try {
+        for (const o of expandBusy(row.ics, from, to)) out.push(o);
+      } catch (err) {
+        console.warn(`[alfred] événement ${row.id} ignoré : ${(err as Error).message}`);
+      }
+    }
+    return out;
+  }
+
+  /** Début et fin (ms) de l'événement tel qu'il est en base, ou undefined s'il n'existe plus. */
+  eventTimes(id: string): { startMs: number; endMs: number } | undefined {
+    const row = this.db.prepare('SELECT start_ms, end_ms FROM events WHERE id = ?').get(id) as { start_ms: number; end_ms: number } | undefined;
+    return row ? { startMs: row.start_ms, endMs: row.end_ms } : undefined;
   }
 
   // --- sessions ----------------------------------------------------------

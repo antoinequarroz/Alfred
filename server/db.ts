@@ -40,7 +40,89 @@ CREATE TABLE IF NOT EXISTS sessions (
   id         TEXT PRIMARY KEY,
   expires_ms INTEGER NOT NULL
 );
+
+-- Prise de rendez-vous (v1.1)
+CREATE TABLE IF NOT EXISTS booking_settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS booking_types (
+  id                TEXT PRIMARY KEY,
+  slug              TEXT NOT NULL UNIQUE,
+  name              TEXT NOT NULL,
+  duration_min      INTEGER NOT NULL,
+  description       TEXT NOT NULL DEFAULT '',
+  mode              TEXT NOT NULL DEFAULT 'cabinet',  -- 'cabinet' | 'telephone' | 'visio' | 'autre'
+  location          TEXT NOT NULL DEFAULT '',         -- précision libre : adresse, lien, consigne
+  buffer_before_min INTEGER NOT NULL DEFAULT 0,
+  buffer_after_min  INTEGER NOT NULL DEFAULT 0,
+  min_notice_hours  INTEGER NOT NULL DEFAULT 12,
+  horizon_days      INTEGER NOT NULL DEFAULT 60,
+  active            INTEGER NOT NULL DEFAULT 1,
+  sort              INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS booking_hours (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  weekday   INTEGER NOT NULL,          -- 1 = lundi … 7 = dimanche
+  start_min INTEGER NOT NULL,          -- minutes depuis minuit, heure locale
+  end_min   INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bookings (
+  id            TEXT PRIMARY KEY,
+  type_id       TEXT REFERENCES booking_types(id) ON DELETE SET NULL,
+  type_name     TEXT NOT NULL,         -- copie : le type peut être renommé ou supprimé ensuite
+  location      TEXT NOT NULL DEFAULT '',
+  buffer_before_min INTEGER NOT NULL DEFAULT 0,
+  buffer_after_min  INTEGER NOT NULL DEFAULT 0,
+  event_id      TEXT,                  -- événement créé dans le calendrier
+  calendar_id   TEXT,
+  start_utc     TEXT NOT NULL,         -- instant ISO UTC
+  end_utc       TEXT NOT NULL,
+  name          TEXT NOT NULL,
+  email         TEXT NOT NULL,
+  phone         TEXT NOT NULL DEFAULT '',
+  message       TEXT NOT NULL DEFAULT '',
+  status        TEXT NOT NULL DEFAULT 'confirmed',   -- 'confirmed' | 'cancelled'
+  token_hash    TEXT NOT NULL UNIQUE,  -- SHA-256 du jeton d'annulation, jamais le jeton
+  created_at    TEXT NOT NULL,
+  cancelled_at  TEXT,
+  cancelled_by  TEXT,                  -- 'client' | 'admin'
+  mail_error    TEXT                   -- dernier échec d'envoi d'e-mail, NULL si tout est parti
+);
+CREATE INDEX IF NOT EXISTS bookings_start ON bookings(start_utc);
+CREATE INDEX IF NOT EXISTS bookings_status ON bookings(status, end_utc);
 `;
+
+/** Horaires proposés à la première ouverture : lundi à vendredi, 09:00-12:00 et 13:30-17:30. */
+const DEFAULT_HOURS: [number, number][] = [[9 * 60, 12 * 60], [13 * 60 + 30, 17 * 60 + 30]];
+
+/** Migrations idempotentes : colonnes ajoutées après coup et valeurs initiales. */
+function migrate(db: DatabaseSync): void {
+  const columns = db.prepare('PRAGMA table_info(calendars)').all() as unknown as { name: string }[];
+  if (!columns.some((c) => c.name === 'blocks_booking')) {
+    // Par défaut, tout calendrier occupe l'agenda pour la prise de rendez-vous.
+    db.exec('ALTER TABLE calendars ADD COLUMN blocks_booking INTEGER NOT NULL DEFAULT 1');
+  }
+  // Les horaires ne sont posés qu'une fois : si Antoine les vide ensuite, ils restent vides.
+  const seeded = db.prepare("SELECT 1 FROM booking_settings WHERE key = 'hours_seeded'").get();
+  if (!seeded) {
+    db.exec('BEGIN');
+    try {
+      const insert = db.prepare('INSERT INTO booking_hours (weekday, start_min, end_min) VALUES (?, ?, ?)');
+      for (let weekday = 1; weekday <= 5; weekday++) {
+        for (const [start, end] of DEFAULT_HOURS) insert.run(weekday, start, end);
+      }
+      db.prepare("INSERT INTO booking_settings (key, value) VALUES ('hours_seeded', '1')").run();
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+}
 
 export type Db = DatabaseSync;
 
@@ -52,6 +134,7 @@ export function openDb(dataDir: string): Db {
   }
   const db = new DatabaseSync(path);
   db.exec(SCHEMA);
+  migrate(db);
   return db;
 }
 

@@ -164,15 +164,37 @@ function text(comp: ICAL.Component, name: string): string {
   return v == null ? '' : String(v);
 }
 
+/** Ce que la prise de rendez-vous a besoin de savoir d'une occurrence : quand, et si elle occupe l'agenda. */
+export interface BusyOccurrence {
+  start: string;
+  end: string;
+  allDay: boolean;
+  /** TRANSP:TRANSPARENT : l'événement laisse le temps « disponible ». */
+  transparent: boolean;
+  /** STATUS:CANCELLED. */
+  cancelled: boolean;
+}
+
 /** Développe la ressource en occurrences qui chevauchent [rangeStart, rangeEnd). */
 export function expand(ics: string, rangeStart: Date, rangeEnd: Date): ExpandedOccurrence[] {
+  return expandDetailed(ics, rangeStart, rangeEnd).map(({ transparent: _t, cancelled: _c, ...o }) => o);
+}
+
+/** Comme expand, réduit à l'occupation (aucun titre ni détail). */
+export function expandBusy(ics: string, rangeStart: Date, rangeEnd: Date): BusyOccurrence[] {
+  return expandDetailed(ics, rangeStart, rangeEnd).map((o) => ({
+    start: o.start, end: o.end, allDay: o.allDay, transparent: o.transparent, cancelled: o.cancelled,
+  }));
+}
+
+function expandDetailed(ics: string, rangeStart: Date, rangeEnd: Date): (ExpandedOccurrence & { transparent: boolean; cancelled: boolean })[] {
   const vcal = parseCalendar(ics);
   const master = masterOf(vcal);
   const event = buildEvent(vcal);
   const repeat = repeatOf(master);
   const fromMs = rangeStart.getTime();
   const toMs = rangeEnd.getTime();
-  const out: ExpandedOccurrence[] = [];
+  const out: (ExpandedOccurrence & { transparent: boolean; cancelled: boolean })[] = [];
 
   const push = (item: ICAL.Event, start: ICAL.Time, end: ICAL.Time, occurrenceId: string | null, recurring: boolean) => {
     const s = timeToMs(start);
@@ -190,6 +212,8 @@ export function expand(ics: string, rangeStart: Date, rangeEnd: Date): ExpandedO
       description: text(item.component, 'description'),
       recurring,
       repeat,
+      transparent: text(item.component, 'transp').trim().toUpperCase() === 'TRANSPARENT',
+      cancelled: text(item.component, 'status').trim().toUpperCase() === 'CANCELLED',
     });
   };
 
