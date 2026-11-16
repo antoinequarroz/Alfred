@@ -229,7 +229,7 @@ export function WeekView({ days, occs, calendars, onCreate, onOpen, onMove, onPi
         <div className="tg-body" style={{ height: 24 * HOUR }}>
           <div className="gutter hours">
             {Array.from({ length: 23 }, (_, i) => (
-              <span key={i} className={nowMin !== null && Math.abs((i + 1) * 60 - nowMin) < 14 ? 'hidden' : undefined} style={{ top: (i + 1) * HOUR }}>
+              <span key={i} className={nowMin !== null && Math.abs((i + 1) * 60 - nowMin) < 20 ? 'hidden' : undefined} style={{ top: (i + 1) * HOUR }}>
                 {String(i + 1).padStart(2, '0')}:00
               </span>
             ))}
