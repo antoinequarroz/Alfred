@@ -175,7 +175,7 @@ body {
 }
 
 /* Fond d'ambiance : grain de pellicule (tuile statique) posé sur deux ou trois halos froids très doux. */
-.app, .login {
+.app, .login, .rdv {
   background:
     var(--grain),
     radial-gradient(880px 560px at 0% 0%, var(--halo-1), transparent 72%),
@@ -356,6 +356,12 @@ kbd {
   overflow-y: auto;
 }
 .brand { display: flex; align-items: center; gap: 9px; height: 28px; padding: 0 6px; font-size: 14px; font-weight: 650; letter-spacing: -0.01em; }
+
+.side-nav { display: flex; flex-direction: column; gap: 1px; margin-bottom: -6px; font-feature-settings: 'calt' 1, 'cv11' 1; }
+.side-nav button { display: flex; align-items: center; gap: 9px; height: 30px; padding: 0 8px; border: 0; border-radius: var(--r); background: transparent; color: var(--muted); font-size: 13.5px; font-weight: 500; text-align: left; transition: background-color 0.1s, color 0.1s; }
+.side-nav button:hover { background: var(--bg-hover); color: var(--text); }
+.side-nav button.active { background: var(--bg-active); color: var(--text); font-weight: 600; }
+.side-nav button.active svg { color: var(--accent-ink); }
 
 .new-btn { width: 100%; height: 34px; justify-content: flex-start; padding: 0 8px 0 10px; gap: 8px; border-radius: 8px; }
 .new-btn svg { opacity: 0.92; }
@@ -817,6 +823,7 @@ kbd {
   .menu-btn { display: inline-grid; margin-left: -6px; }
   .toolbar { padding: 0 12px 0 14px; padding-top: env(safe-area-inset-top); }
   .new-btn { height: 38px; font-size: 14px; }
+  .side-nav button { height: 38px; font-size: 14.5px; }
   .new-btn kbd { display: none; }
   .mini-grid { row-gap: 4px; }
   .mini-day { width: 32px; height: 32px; font-size: 13.5px; }

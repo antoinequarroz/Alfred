@@ -1,24 +1,14 @@
-import type { CalendarInfo, EditScope, EventInput, Occurrence, SyncStatus } from '../../shared/types';
+import type {
+  Booking, BookingAdminState, BookingHoursRange, BookingSettings, BookingType, BookingTypeInput,
+  CalendarInfo, EditScope, EventInput, Occurrence, PublicSlots, SyncStatus,
+} from '../../shared/types';
 
-export class ApiError extends Error {
-  constructor(message: string, readonly status: number) {
-    super(message);
-  }
-}
+import { ApiError, requestJson } from './http';
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(path, {
-    method,
-    credentials: 'same-origin',
-    headers: body !== undefined ? { 'content-type': 'application/json' } : undefined,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    if (res.status === 401 && path !== '/api/login') window.dispatchEvent(new Event('alfred:logout'));
-    throw new ApiError((data as { error?: string }).error ?? `Erreur ${res.status}`, res.status);
-  }
-  return data as T;
+export { ApiError };
+
+function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  return requestJson<T>(method, path, body, path === '/api/login' ? undefined : () => window.dispatchEvent(new Event('alfred:logout')));
 }
 
 export const api = {
@@ -40,4 +30,27 @@ export const api = {
   },
   syncStatus: () => request<SyncStatus>('GET', '/api/sync'),
   sync: () => request<SyncStatus>('POST', '/api/sync'),
+};
+
+/** Administration de la prise de rendez-vous (session requise). */
+export const bookingApi = {
+  state: () => request<BookingAdminState>('GET', '/api/booking/settings'),
+  saveSettings: (patch: Partial<BookingSettings>) => request<BookingAdminState>('PUT', '/api/booking/settings', patch),
+  types: () => request<BookingType[]>('GET', '/api/booking/types'),
+  createType: (input: BookingTypeInput) => request<BookingType>('POST', '/api/booking/types', input),
+  updateType: (id: string, input: BookingTypeInput) => request<BookingType>('PUT', `/api/booking/types/${encodeURIComponent(id)}`, input),
+  deleteType: (id: string) => request<{ ok: true }>('DELETE', `/api/booking/types/${encodeURIComponent(id)}`),
+  reorderTypes: (ids: string[]) => request<BookingType[]>('PUT', '/api/booking/types/order', { ids }),
+  typeSlots: (id: string, from: string, to: string) =>
+    request<PublicSlots>('GET', `/api/booking/types/${encodeURIComponent(id)}/slots?from=${from}&to=${to}`),
+  hours: () => request<BookingHoursRange[]>('GET', '/api/booking/hours'),
+  saveHours: (hours: BookingHoursRange[]) => request<BookingHoursRange[]>('PUT', '/api/booking/hours', hours),
+  calendars: () => request<CalendarInfo[]>('GET', '/api/booking/calendars'),
+  setCalendarBlocks: (id: string, blocksBooking: boolean) =>
+    request<CalendarInfo>('PATCH', `/api/booking/calendars/${encodeURIComponent(id)}`, { blocksBooking }),
+  bookings: (scope: 'upcoming' | 'past') => request<Booking[]>('GET', `/api/booking/bookings?scope=${scope}&limit=200`),
+  cancelBooking: (id: string, notifyClient: boolean) =>
+    request<Booking>('POST', `/api/booking/bookings/${encodeURIComponent(id)}/cancel`, { notifyClient }),
+  resendConfirmation: (id: string) => request<Booking>('POST', `/api/booking/bookings/${encodeURIComponent(id)}/resend`, {}),
+  testMail: () => request<{ ok: true; to: string }>('POST', '/api/booking/mail/test', {}),
 };
