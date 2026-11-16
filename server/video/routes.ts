@@ -41,7 +41,7 @@ export function registerPublicVideoRoutes(app: Hono, video: VideoService, isHost
     const blocked = limited(c, join);
     if (blocked) return blocked;
     const body = await c.req.json().catch(() => ({}));
-    return c.json(await video.join(c.req.param('slug'), body, isHost(c)));
+    return c.json(await video.join(c.req.param('slug'), body, isHost(c), clientIp(c)));
   });
 
   // Salle d'attente : l'invité suit sa demande avec son ticket, ou y renonce.

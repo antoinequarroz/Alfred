@@ -256,10 +256,15 @@ describe('salle d’attente', () => {
     const room = (await (await ctx.admin('/api/video/rooms', 'POST', {})).json()) as VideoRoom;
     const slug = slugOf(room);
     const base = `/api/public/video/rooms/${slug}`;
-    const ask = async (name: string) => (await (await ctx.json(`${base}/join`, 'POST', { name })).json()) as VideoWaitInfo;
+    // Chaque invité vient de sa propre adresse, sauf mention contraire.
+    let n = 0;
+    const askRaw = (name: string, ip = `203.0.113.${++n}`) => ctx.app.request(`${base}/join`, {
+      method: 'POST', headers: { 'sec-fetch-site': 'same-origin', 'content-type': 'application/json', 'x-forwarded-for': ip }, body: JSON.stringify({ name }),
+    });
+    const ask = async (name: string, ip?: string) => (await (await askRaw(name, ip)).json()) as VideoWaitInfo;
     const poll = (ticket: string) => ctx.json(`${base}/wait`, 'POST', { ticket });
     const list = async () => ((await (await ctx.admin(`/api/video/by-slug/${slug}/waiting`)).json()) as { waiting: VideoWaiter[] }).waiting;
-    return { ...ctx, room, slug, base, ask, poll, list, lk: `alfred-${room.id}` };
+    return { ...ctx, room, slug, base, ask, askRaw, poll, list, lk: `alfred-${room.id}` };
   }
 
   it('est active par défaut et se règle depuis l’app', async () => {
@@ -309,7 +314,11 @@ describe('salle d’attente', () => {
     expect(g.video).toMatchObject({ room: ctx.lk, roomJoin: true, canPublish: true });
     expect(g.video.roomAdmin).toBeUndefined();
     expect(ctx.arrivals).toHaveLength(1);
-    // Le jeton n'est donné qu'une fois.
+    // Réponse perdue : le jeton peut être redemandé pendant une minute, pour la même identité (une seule place).
+    const again = (await (await ctx.poll(asked.ticket)).json()) as VideoWaitStatus;
+    if (again.state !== 'admitted') throw new Error('non admis');
+    expect((verifyAccessToken(again.join.token, SECRET) as { sub: string }).sub).toBe(waiting[0].id);
+    ctx.clock.now = new Date(ctx.clock.now.getTime() + 61_000);
     expect((await ctx.poll(asked.ticket)).status).toBe(404);
   });
 
@@ -320,6 +329,11 @@ describe('salle d’attente', () => {
     expect((await ctx.admin(`/api/video/by-slug/${ctx.slug}/deny`, 'POST', { id: w.id })).status).toBe(200);
     expect(await ctx.list()).toHaveLength(0);
     expect((await (await ctx.poll(asked.ticket)).json()) as VideoWaitStatus).toEqual({ state: 'denied' });
+    // Le refus reste lisible (page en veille, réponse perdue) et l'invité ne peut pas l'effacer ; il s'oublie après 10 minutes.
+    await ctx.json(`${ctx.base}/wait/leave`, 'POST', { ticket: asked.ticket });
+    ctx.clock.now = new Date(ctx.clock.now.getTime() + 300_000);
+    expect((await (await ctx.poll(asked.ticket)).json()) as VideoWaitStatus).toEqual({ state: 'denied' });
+    ctx.clock.now = new Date(ctx.clock.now.getTime() + 301_000);
     expect((await ctx.poll(asked.ticket)).status).toBe(404);
     expect((await ctx.admin(`/api/video/by-slug/${ctx.slug}/deny`, 'POST', { id: w.id })).status).toBe(404);
   });
@@ -368,16 +382,28 @@ describe('salle d’attente', () => {
     expect((await ctx.admin(`/api/video/by-slug/${ctx.slug}/admit`, 'POST', { id: w3.id })).status).toBe(200);
   });
 
+  it('ne laisse pas une même adresse remplir la file : sa demande la plus ancienne cède', async () => {
+    const ctx = await waitingSetup();
+    const first = await ctx.ask('Un', '198.51.100.7');
+    await ctx.ask('Autre invité');
+    await ctx.ask('Deux', '198.51.100.7');
+    await ctx.ask('Trois', '198.51.100.7');
+    await ctx.ask('Quatre', '198.51.100.7');
+    expect((await ctx.list()).map((w) => w.name)).toEqual(['Autre invité', 'Deux', 'Trois', 'Quatre']);
+    expect((await ctx.poll(first.ticket)).status).toBe(404);
+  });
+
   it('borne la file, et la vide quand la salle ferme', async () => {
     const ctx = await waitingSetup();
     const first = await ctx.ask('Invité 0');
     for (let i = 1; i < 12; i++) await ctx.ask(`Invité ${i}`);
-    const over = await ctx.json(`${ctx.base}/join`, 'POST', { name: 'De trop' });
+    const over = await ctx.askRaw('De trop');
     expect(over.status).toBe(429);
     expect(((await over.json()) as { code: string }).code).toBe('wait_full');
     // Salle supprimée : la file se vide et l'invité apprend que la visio est fermée.
+    const last = await ctx.ask('Dernier', '203.0.113.1');
     await ctx.admin(`/api/video/rooms/${ctx.room.id}`, 'DELETE');
-    expect((await ctx.poll(first.ticket)).status).toBe(410);
+    expect((await ctx.poll(last.ticket)).status).toBe(410);
     expect((await ctx.admin(`/api/video/by-slug/${ctx.slug}/admit`, 'POST', { id: 'invite-000000000000' })).status).toBe(410);
   });
 

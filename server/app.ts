@@ -106,7 +106,8 @@ export function createApp(deps: AppDeps): Hono {
       connectSrc: ["'self'", ...(videoOrigin ? [videoOrigin] : [])],
       mediaSrc: ["'self'", 'blob:'],
       manifestSrc: ["'self'"],
-      workerSrc: ["'self'"],
+      // blob: : le flou d'arrière-plan cadence ses images depuis un petit worker créé à la volée.
+      workerSrc: ["'self'", 'blob:'],
       frameAncestors: ["'none'"],
     },
   }));

@@ -10,7 +10,7 @@ import {
   UsersIcon, VideoIcon, VideoOffIcon,
 } from '../icons';
 import { MoonIcon, SunIcon, useTheme } from '../theme';
-import { blurSupported, blurWanted, createBlur, rememberBlur, setBlur } from './blur';
+import { BlurFailure, blurSupported, blurWanted, publishBlurredCamera, rememberBlur, setBlur } from './blur';
 import '../rdv/rdv.css';
 import './video.css';
 
@@ -51,6 +51,7 @@ function mediaErrorText(err: unknown): string | null {
 }
 
 const BLUR_FAILED = 'Le flou d’arrière-plan n’a pas pu démarrer sur cet appareil.';
+const BLUR_FAILED_CAMERA_OFF = 'Le flou d’arrière-plan n’a pas pu démarrer : la caméra reste coupée. Touchez à nouveau la caméra pour l’ouvrir sans flou.';
 
 /** Deux notes brèves : quelqu'un attend d'entrer. Sans effet si le navigateur bloque le son. */
 function chime(): void {
@@ -219,6 +220,8 @@ function Lobby({ room, onJoin, onPrefs, onCancel, waiting, busy, error }: {
   const [audioTrack, setAudioTrack] = useState<LocalAudioTrack | null>(null);
   const [devices, setDevices] = useState<{ cams: MediaDeviceInfo[]; mics: MediaDeviceInfo[] }>({ cams: [], mics: [] });
   const [cameraId, setCameraId] = useState<string | undefined>();
+  // Caméra réellement ouverte, relevée avant tout traitement (le flou remplace la piste par une image calculée).
+  const [openedCameraId, setOpenedCameraId] = useState<string | undefined>();
   const [microphoneId, setMicrophoneId] = useState<string | undefined>();
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [level, setLevel] = useState(0);
@@ -232,6 +235,7 @@ function Lobby({ room, onJoin, onPrefs, onCancel, waiting, busy, error }: {
     createLocalVideoTrack({ deviceId: cameraId, resolution: VideoPresets.h540.resolution }).then((t) => {
       if (cancelled) return t.stop();
       track = t;
+      setOpenedCameraId(t.mediaStreamTrack.getSettings().deviceId);
       setVideoTrack(t);
       setMediaError(null);
     }, (err: unknown) => {
@@ -323,12 +327,12 @@ function Lobby({ room, onJoin, onPrefs, onCancel, waiting, busy, error }: {
 
   const prefs = (): Prefs => ({
     name: name.trim(), camera, microphone, blur,
-    cameraId: cameraId ?? videoTrack?.mediaStreamTrack.getSettings().deviceId,
+    cameraId: cameraId ?? openedCameraId,
     microphoneId: microphoneId ?? audioTrack?.mediaStreamTrack.getSettings().deviceId,
   });
   const prefsRef = useRef(prefs);
   prefsRef.current = prefs;
-  useEffect(() => onPrefs(prefsRef.current()), [onPrefs, camera, microphone, blur, cameraId, microphoneId, videoTrack, audioTrack]);
+  useEffect(() => onPrefs(prefsRef.current()), [onPrefs, camera, microphone, blur, cameraId, openedCameraId, microphoneId, videoTrack, audioTrack]);
 
   const when = whenLabel(room);
   const submit = (e: React.FormEvent) => {
@@ -387,7 +391,7 @@ function Lobby({ room, onJoin, onPrefs, onCancel, waiting, busy, error }: {
                 {devices.cams.length > 1 && (
                   <div className="fld">
                     <label htmlFor="vc-cam">Caméra</label>
-                    <select id="vc-cam" value={cameraId ?? videoTrack?.mediaStreamTrack.getSettings().deviceId ?? ''} onChange={(e) => setCameraId(e.target.value)}>
+                    <select id="vc-cam" value={cameraId ?? openedCameraId ?? ''} onChange={(e) => setCameraId(e.target.value)}>
                       {devices.cams.map((d, i) => <option key={d.deviceId} value={d.deviceId}>{d.label || `Caméra ${i + 1}`}</option>)}
                     </select>
                   </div>
@@ -468,10 +472,13 @@ function Call({ room, info, publicRoom, initialBlur, onLeave }: { room: Room; in
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const known = new Set<string>();
+    // Une seule relève à la fois : celle lancée en dernier l'emporte.
+    let gen = 0;
     const tick = async () => {
+      const my = ++gen;
       try {
         const res = await requestJson<{ waiting: VideoWaiter[] }>('GET', `/api/video/by-slug/${encodeURIComponent(slug)}/waiting`);
-        if (stopped) return;
+        if (stopped || my !== gen) return;
         if (res.waiting.some((w) => !known.has(w.id))) chime();
         known.clear();
         for (const w of res.waiting) known.add(w.id);
@@ -480,7 +487,7 @@ function Call({ room, info, publicRoom, initialBlur, onLeave }: { room: Room; in
         // Session expirée : la file n'est plus lisible, inutile d'insister.
         if (err instanceof ApiError && err.status === 401) return;
       }
-      if (!stopped) timer = setTimeout(() => void tick(), 3000);
+      if (!stopped && my === gen) timer = setTimeout(() => void tick(), 3000);
     };
     void tick();
     // Un onglet en arrière-plan est ralenti par le navigateur : au retour, la file est relue tout de suite.
@@ -600,12 +607,12 @@ function Call({ room, info, publicRoom, initialBlur, onLeave }: { room: Room; in
     const existing = local.getTrackPublication(Track.Source.Camera)?.track as LocalVideoTrack | undefined;
     if (!blur || existing) return local.setCameraEnabled(true);
     try {
-      await local.setCameraEnabled(true, { processor: await createBlur() });
+      await publishBlurredCamera(local, { resolution: (info.quality === 'eco' ? VideoPresets.h360 : VideoPresets.h720).resolution });
     } catch (err) {
-      if (mediaErrorText(err)) throw err;
+      if (!(err instanceof BlurFailure)) throw err;
+      // Jamais d'image nette à la place du flou demandé : la caméra reste coupée, un second clic l'ouvre sans flou.
       setBlurOn(false);
-      await local.setCameraEnabled(true);
-      setToast(BLUR_FAILED);
+      setToast(BLUR_FAILED_CAMERA_OFF);
     }
   });
 
@@ -852,7 +859,7 @@ export function VideoApp() {
   const waitUrl = `${BASE}/${encodeURIComponent(slug)}/wait`;
 
   // Ouvre la salle avec un jeton d'entrée, puis la caméra et le micro selon les choix faits avant d'entrer.
-  const connect = async (info: VideoJoinInfo, prefs: Prefs) => {
+  const connect = async (info: VideoJoinInfo, prefs: Prefs): Promise<boolean> => {
     let room: Room | null = null;
     try {
       const eco = info.quality === 'eco';
@@ -884,15 +891,17 @@ export function VideoApp() {
       if (prefs.camera) {
         // Flou demandé : il est posé avant la publication, aucune image nette ne part vers les autres.
         // S'il ne démarre pas, la caméra reste coupée : à la personne de décider si elle l'ouvre sans flou.
-        const processor = blur ? await createBlur().catch(() => null) : null;
-        if (blur && !processor) {
-          blur = false;
-          problems.push('flou d’arrière-plan (caméra laissée coupée)');
-        } else {
-          await local.setCameraEnabled(true, { deviceId: prefs.cameraId, ...(processor ? { processor } : {}) }).catch(() => {
-            problems.push(processor ? 'caméra avec flou' : 'caméra');
-          });
-        }
+        const opening = blur
+          ? publishBlurredCamera(local, { deviceId: prefs.cameraId, resolution: (eco ? VideoPresets.h360 : VideoPresets.h720).resolution })
+          : local.setCameraEnabled(true, { deviceId: prefs.cameraId });
+        await opening.catch((err: unknown) => {
+          if (err instanceof BlurFailure) {
+            blur = false;
+            problems.push('flou d’arrière-plan (caméra laissée coupée)');
+          } else {
+            problems.push('caméra');
+          }
+        });
       }
       room.off(RoomEvent.Disconnected, onEarly);
       if (early !== undefined || room.state === ConnectionState.Disconnected) {
@@ -901,14 +910,16 @@ export function VideoApp() {
           kind: 'left',
           reason: early === DisconnectReason.ROOM_DELETED || early === DisconnectReason.PARTICIPANT_REMOVED ? 'ended' : early === DisconnectReason.DUPLICATE_IDENTITY ? 'replaced' : 'lost',
         });
-        return;
+        return true;
       }
       setPhase({ kind: 'call', room, info, blur });
       if (problems.length > 0) setJoinError(`Impossible d’ouvrir : ${problems.join(' et ')}.`);
+      return true;
     } catch (err) {
       await room?.disconnect().catch(() => undefined);
       roomRef.current = null;
       setJoinError(errorText(err));
+      return false;
     }
   };
 
@@ -934,51 +945,57 @@ export function VideoApp() {
     if (!ticket) return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // Une seule relève à la fois : celle lancée en dernier l'emporte (retour sur l'onglet pendant une relève).
+    let gen = 0;
+    // Entrée avec le jeton reçu ; en cas d'échec, la place gardée par ce ticket est rendue tout de suite.
+    const enter = async (info: VideoJoinInfo, held: string | null) => {
+      stopped = true;
+      setBusy(true);
+      setWait(null);
+      const ok = await connect(info, prefsRef.current);
+      if (!ok && held) leaveWait(held);
+      setBusy(false);
+    };
     const tick = async () => {
+      const my = ++gen;
+      const stale = () => stopped || my !== gen;
       let delay = 3000;
       try {
         const status = await requestJson<VideoWaitStatus>('POST', waitUrl, { ticket });
-        if (stopped) return;
+        if (stale()) return;
         if (status.state === 'waiting') {
           setWait((w) => (w && w.ticket === ticket ? { ...w, hostPresent: status.hostPresent } : w));
         } else if (status.state === 'denied') {
+          stopped = true;
           setWait(null);
           setPhase({ kind: 'left', reason: 'refused' });
           return;
         } else {
-          stopped = true;
-          setBusy(true);
-          setWait(null);
-          await connect(status.join, prefsRef.current);
-          setBusy(false);
+          await enter(status.join, ticket);
           return;
         }
       } catch (err) {
-        if (stopped) return;
+        if (stale()) return;
         if (err instanceof ApiError && err.code === 'wait_expired') {
           // Page restée longtemps en arrière-plan : la demande est refaite sans rien redemander.
+          stopped = true;
           try {
             const again = await requestJson<VideoJoinResult>('POST', `${BASE}/${encodeURIComponent(slug)}/join`, { name: prefsRef.current.name });
-            if (stopped) {
+            if (cancelled) {
               if ('waiting' in again) leaveWait(again.ticket);
               return;
             }
-            if ('waiting' in again) {
-              setWait({ ticket: again.ticket, hostPresent: again.hostPresent });
-            } else {
-              setWait(null);
-              setBusy(true);
-              await connect(again, prefsRef.current);
-              setBusy(false);
-            }
+            if ('waiting' in again) setWait({ ticket: again.ticket, hostPresent: again.hostPresent });
+            else await enter(again, null);
           } catch (inner) {
-            if (stopped) return;
+            if (cancelled) return;
             setWait(null);
             setJoinError(errorText(inner));
           }
           return;
         }
         if (err instanceof ApiError && (err.status === 410 || err.status === 404 || err.status === 403)) {
+          stopped = true;
           setWait(null);
           void load();
           return;
@@ -986,8 +1003,10 @@ export function VideoApp() {
         // Coupure passagère, serveur occupé : on réessaie, moins souvent.
         delay = 6000;
       }
-      if (!stopped) timer = setTimeout(() => void tick(), delay);
+      if (!stale()) timer = setTimeout(() => void tick(), delay);
     };
+    // L'effet a été défait (annulation, page quittée) : à distinguer d'un arrêt décidé par la relève elle-même.
+    let cancelled = false;
     timer = setTimeout(() => void tick(), 1500);
     const onVisible = () => {
       if (document.visibilityState !== 'visible' || stopped) return;
@@ -997,6 +1016,7 @@ export function VideoApp() {
     document.addEventListener('visibilitychange', onVisible);
     return () => {
       stopped = true;
+      cancelled = true;
       clearTimeout(timer);
       document.removeEventListener('visibilitychange', onVisible);
     };
