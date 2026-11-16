@@ -92,12 +92,16 @@ function Loading({ label }: { label: string }) {
   );
 }
 
-/** Titre d'étape : reçoit le focus à chaque changement d'écran (lecteurs d'écran, clavier). */
+/**
+ * Titre d'étape : reçoit le focus à chaque changement d'écran (lecteurs d'écran, clavier).
+ * Le focus suit le texte du titre : deux écrans de même structure réutilisent le même
+ * composant, il ne suffit donc pas de le prendre au montage.
+ */
 function StepTitle({ children, sub }: { children: string; sub?: React.ReactNode }) {
   const ref = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     ref.current?.focus({ preventScroll: true });
-  }, []);
+  }, [children]);
   return (
     <div className="rdv-title">
       <h1 ref={ref} tabIndex={-1}>
@@ -174,7 +178,8 @@ interface SlotsState {
 }
 
 const EMPTY_SLOTS: SlotsState = { days: new Map(), loaded: new Set(), loading: true, error: null, ready: false };
-const PROBE_DAYS = 61;
+/** L'API sert 42 jours par appel : la sonde couvre aujourd'hui et les 41 jours suivants. */
+const PROBE_DAYS = 41;
 
 /** Charge les créneaux d'un type, mois par mois, et propose le premier jour libre. */
 function useSlots(type: PublicBookingType, timezone: string, preferredDay: string | null) {
@@ -214,7 +219,7 @@ function useSlots(type: PublicBookingType, timezone: string, preferredDay: strin
     }
   }, [type.slug]);
 
-  // Sonde initiale : de aujourd'hui à 61 jours (limite de l'API : 62 jours par appel).
+  // Sonde initiale : de aujourd'hui à 41 jours plus tard ; les mois suivants sont demandés un par un.
   const probe = useCallback(() => {
     generation.current++;
     setState(EMPTY_SLOTS);
@@ -250,6 +255,17 @@ function SlotPicker({ type, timezone, preferredDay, onPick }: {
 }) {
   const s = useSlots(type, timezone, preferredDay);
   const weeks = useMemo(() => monthWeeks(s.month), [s.month]);
+  const slotsRef = useRef<HTMLElement>(null);
+  const dayTitleRef = useRef<HTMLHeadingElement>(null);
+  // Jour choisi par le visiteur (pas la présélection initiale) : sur écran étroit, les heures
+  // sont sous le calendrier, hors de la vue. On les amène à l'écran et on y porte le focus.
+  const [picked, setPicked] = useState(0);
+  useEffect(() => {
+    if (picked === 0 || !window.matchMedia('(max-width: 719px)').matches) return;
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    slotsRef.current?.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+    dayTitleRef.current?.focus({ preventScroll: true });
+  }, [picked]);
   const slots = s.day ? s.days.get(s.day) ?? [] : [];
   // Rien du tout : tous les mois jusqu'à l'horizon sont chargés et aucun n'a de créneau.
   const noneAtAll = s.ready && !s.loading && !s.error && s.days.size === 0 && s.loaded.has(s.maxMonth);
@@ -303,7 +319,10 @@ function SlotPicker({ type, timezone, preferredDay, onPick }: {
                 disabled={count === 0}
                 aria-pressed={count > 0 ? key === s.day : undefined}
                 aria-label={label}
-                onClick={() => s.setDay(key)}
+                onClick={() => {
+                  s.setDay(key);
+                  setPicked((n) => n + 1);
+                }}
               >
                 {dayNumber(key)}
               </button>
@@ -317,10 +336,10 @@ function SlotPicker({ type, timezone, preferredDay, onPick }: {
         )}
       </section>
 
-      <section className="rdv-slots" aria-label="Choix de l’heure">
+      <section className="rdv-slots" aria-label="Choix de l’heure" ref={slotsRef}>
         {s.day && slots.length > 0 ? (
           <>
-            <h2 className="cap">{dayLabel(s.day)}</h2>
+            <h2 className="cap" ref={dayTitleRef} tabIndex={-1} aria-live="polite">{dayLabel(s.day)}</h2>
             {groups.map(([label, list]) => (
               <div key={label} className="rdv-slot-group">
                 <h3>{label}</h3>
@@ -377,7 +396,9 @@ function Field({ label, error, hint, optional, children }: {
 
 function validate(v: FormValues, phoneRequired: boolean): Record<string, string> {
   const errors: Record<string, string> = {};
-  if (v.name.trim().length < 2) errors.name = 'Indiquez votre nom et votre prénom.';
+  const name = v.name.trim();
+  if (name.length < 2) errors.name = 'Indiquez votre nom et votre prénom.';
+  else if (!/^[\p{L}\p{M}][\p{L}\p{M} '’.-]*$/u.test(name) || /\.[^ -]/.test(name)) errors.name = 'Indiquez seulement votre nom et votre prénom (lettres, espaces, tirets et apostrophes).';
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.email.trim())) errors.email = 'Indiquez une adresse e-mail valide.';
   if (phoneRequired && !v.phone.trim()) errors.phone = 'Indiquez le numéro auquel vous joindre.';
   return errors;
@@ -386,7 +407,7 @@ function validate(v: FormValues, phoneRequired: boolean): Record<string, string>
 function BookingForm({ type, start, timezone, values, onChange, onBack, onDone, onSlotLost, onClosed }: {
   type: PublicBookingType; start: string; timezone: string; values: FormValues;
   onChange: (v: FormValues) => void; onBack: () => void;
-  onDone: (c: BookingConfirmation, email: string) => void; onSlotLost: () => void; onClosed: () => void;
+  onDone: (c: BookingConfirmation, email: string) => void; onSlotLost: () => void; onClosed: (typeGone: boolean) => void;
 }) {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [failure, setFailure] = useState<string | null>(null);
@@ -417,7 +438,7 @@ function BookingForm({ type, start, timezone, values, onChange, onBack, onDone, 
       onDone(confirmation, values.email.trim());
     } catch (err) {
       if (err instanceof ApiError && err.code === 'slot_unavailable') return onSlotLost();
-      if (err instanceof ApiError && (err.code === 'closed' || err.code === 'unknown_type')) return onClosed();
+      if (err instanceof ApiError && (err.code === 'closed' || err.code === 'unknown_type')) return onClosed(err.code === 'unknown_type');
       if (err instanceof ApiError && err.code === 'invalid' && err.fields) {
         const { start: _start, typeSlug: _type, ...rest } = err.fields;
         setErrors(rest);
@@ -435,7 +456,7 @@ function BookingForm({ type, start, timezone, values, onChange, onBack, onDone, 
       <button type="button" className="rdv-link" onClick={onBack}>Choisir un autre créneau</button>
 
       <Field label="Nom et prénom" error={errors.name}>
-        {(p) => <input {...p} type="text" name="name" autoComplete="name" maxLength={80} required value={values.name} onChange={(e) => set({ name: e.target.value })} />}
+        {(p) => <input {...p} type="text" name="name" autoComplete="name" maxLength={60} required value={values.name} onChange={(e) => set({ name: e.target.value })} />}
       </Field>
       <Field label="Adresse e-mail" error={errors.email} hint="La confirmation et le lien d’annulation y sont envoyés.">
         {(p) => <input {...p} type="email" name="email" autoComplete="email" inputMode="email" maxLength={254} required value={values.email} onChange={(e) => set({ email: e.target.value })} />}
@@ -480,6 +501,8 @@ function BookingFlow() {
   const [values, setValues] = useState<FormValues>(EMPTY_FORM);
   const [done, setDone] = useState<{ confirmation: BookingConfirmation; email: string } | null>(null);
   const [slotLost, setSlotLost] = useState(false);
+  /** Le type choisi a été retiré pendant le parcours : à dire sur la liste des types. */
+  const [typeGone, setTypeGone] = useState(false);
   const [preferredDay, setPreferredDay] = useState<string | null>(null);
 
   const load = useCallback(() => {
@@ -491,9 +514,13 @@ function BookingFlow() {
   useEffect(() => {
     const onPop = () => {
       const s = slugFromPath();
+      // L'étape « coordonnées » a sa propre entrée d'historique : Précédent ramène aux créneaux,
+      // Suivant y retourne avec le créneau choisi.
+      const state = history.state as { step?: string; start?: string } | null;
+      const formStart = s && state?.step === 'form' && typeof state.start === 'string' ? state.start : null;
       setSlug(s);
-      setStart(null);
-      setStep((prev) => (prev === 'done' ? 'done' : s ? 'slots' : 'types'));
+      setStart(formStart);
+      setStep((prev) => (prev === 'done' ? 'done' : formStart ? 'form' : s ? 'slots' : 'types'));
     };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
@@ -518,7 +545,16 @@ function BookingFlow() {
     setSlug(t.slug);
     setStart(null);
     setSlotLost(false);
+    setTypeGone(false);
     setStep('slots');
+  };
+  /** Quitte le formulaire pour revenir aux créneaux, en défaisant son entrée d'historique. */
+  const leaveForm = () => {
+    if ((history.state as { step?: string } | null)?.step === 'form') history.back();
+    else {
+      setStart(null);
+      setStep('slots');
+    }
   };
   const backToTypes = () => {
     go('/rdv');
@@ -592,7 +628,7 @@ function BookingFlow() {
   }
 
   if (!type || step === 'types') {
-    const unknown = slug !== null && !type;
+    const unknown = (slug !== null && !type) || typeGone;
     return (
       <Shell name={name}>
         <div className="rdv-panel">
@@ -647,7 +683,7 @@ function BookingFlow() {
     return (
       <Shell name={name}>
         <div className="rdv-panel narrow">
-          <button type="button" className="rdv-back" onClick={() => setStep('slots')}><ArrowLeftIcon />Retour</button>
+          <button type="button" className="rdv-back" onClick={leaveForm}><ArrowLeftIcon />Retour</button>
           <Steps current={3} />
           <StepTitle sub="Plus qu’une étape : indiquez comment vous joindre.">Vos coordonnées</StepTitle>
           <BookingForm
@@ -656,20 +692,22 @@ function BookingFlow() {
             timezone={info.timezone}
             values={values}
             onChange={setValues}
-            onBack={() => setStep('slots')}
+            onBack={leaveForm}
             onDone={(confirmation, email) => {
               setDone({ confirmation, email });
               setStep('done');
             }}
             onSlotLost={() => {
               setSlotLost(true);
-              setStart(null);
-              setStep('slots');
+              leaveForm();
             }}
-            onClosed={() => {
+            onClosed={(gone) => {
+              // Le type vient d'être retiré (ou la prise de rendez-vous refermée) : retour à la
+              // liste, avec l'explication, plutôt qu'un écran d'accueil muet.
+              setTypeGone(gone);
               setStart(null);
               setStep('types');
-              go('/rdv');
+              history.replaceState(null, '', '/rdv');
               setSlug(null);
               load();
             }}
@@ -700,6 +738,9 @@ function BookingFlow() {
             setStart(iso);
             setPreferredDay(dayKeyIn(info.timezone, new Date(iso)));
             setSlotLost(false);
+            // Entrée d'historique propre au formulaire : le geste « retour » du téléphone
+            // ramène au choix du créneau, pas à la liste des types.
+            history.pushState({ step: 'form', start: iso }, '', location.pathname);
             setStep('form');
           }}
         />
@@ -789,7 +830,9 @@ function CancelPage({ token }: { token: string }) {
         {state.kind === 'cancelled' && (
           <>
             <span className="rdv-badge ok" aria-hidden="true"><CheckIcon /></span>
-            <StepTitle sub="Le créneau est libéré. Un e-mail vous confirme l’annulation.">Votre rendez-vous est annulé</StepTitle>
+            <StepTitle sub={state.booking.emailSent ? 'Le créneau est libéré. Un e-mail vous confirme l’annulation.' : 'Le créneau est libéré. Vous n’avez plus rien à faire.'}>
+              Votre rendez-vous est annulé
+            </StepTitle>
             <div className="rdv-struck">{recap(state.booking)}</div>
             <div className="rdv-actions">{again}</div>
           </>
