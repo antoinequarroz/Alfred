@@ -1,0 +1,826 @@
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import type {
+  Booking, BookingAdminState, BookingHoursRange, BookingMode, BookingSettings, BookingStep, BookingType, BookingTypeInput, CalendarInfo,
+} from '../../../shared/types';
+import { ApiError, bookingApi } from '../api';
+import { AlertIcon, CheckIcon, Chevron, CloseIcon, CopyIcon, ExternalIcon, MenuIcon, PlusIcon } from '../icons';
+import { dateTimeShortIn, dayKeyIn, dayLabel, durationLabel, timeIn } from './tz';
+import './rdv.css';
+
+type Tab = 'bookings' | 'types' | 'hours' | 'settings';
+const TABS: [Tab, string][] = [['bookings', 'Réservations'], ['types', 'Types'], ['hours', 'Horaires'], ['settings', 'Réglages']];
+const MODES: Record<BookingMode, string> = { cabinet: 'Au cabinet', telephone: 'Par téléphone', visio: 'En visio', autre: 'Autre (texte libre)' };
+const WEEKDAYS = ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche'];
+
+const message = (err: unknown) => (err instanceof Error ? err.message : 'Une erreur est survenue');
+
+/** Lieu tel que le client le verra (même règle que le serveur). */
+function modeLabel(t: Pick<BookingType, 'mode' | 'location'>): string {
+  if (t.mode === 'cabinet') return t.location || 'Au cabinet';
+  if (t.mode === 'telephone') return t.location ? `Par téléphone (${t.location})` : 'Par téléphone';
+  if (t.mode === 'visio') return t.location ? `En visio (${t.location})` : 'En visio';
+  return t.location;
+}
+
+// --- petits composants ---------------------------------------------------------
+
+function Switch({ checked, onChange, label, disabled }: { checked: boolean; onChange: (v: boolean) => void; label: string; disabled?: boolean }) {
+  return (
+    <button type="button" role="switch" aria-checked={checked} aria-label={label} className="switch" disabled={disabled} onClick={() => onChange(!checked)}>
+      <span />
+    </button>
+  );
+}
+
+function Modal({ title, onClose, children, small }: { title: string; onClose: () => void; children: React.ReactNode; small?: boolean }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const close = useRef(onClose);
+  close.current = onClose;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') close.current();
+    };
+    window.addEventListener('keydown', onKey);
+    ref.current?.querySelector<HTMLElement>('input:not([type=hidden]), select, textarea, button')?.focus();
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+  return (
+    <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div ref={ref} className={`dialog bk-dialog${small ? ' ask' : ''}`} role="dialog" aria-modal="true" aria-labelledby={titleId}>
+        <h2 id={titleId} className="bk-dialog-title">{title}</h2>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function Fld({ label, error, hint, children, className }: { label: string; error?: string; hint?: string; children: (id: string) => React.ReactNode; className?: string }) {
+  const id = useId();
+  return (
+    <div className={`fld${error ? ' invalid' : ''}${className ? ` ${className}` : ''}`}>
+      <label htmlFor={id}>{label}</label>
+      {children(id)}
+      {error ? <p className="fld-err" role="alert">{error}</p> : hint ? <p className="fld-hint">{hint}</p> : null}
+    </div>
+  );
+}
+
+function Card({ title, sub, action, children }: { title: string; sub?: React.ReactNode; action?: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <section className="bk-card">
+      <header className="bk-card-head">
+        <div>
+          <h2>{title}</h2>
+          {sub && <p>{sub}</p>}
+        </div>
+        {action}
+      </header>
+      {children}
+    </section>
+  );
+}
+
+// --- types ---------------------------------------------------------------------
+
+interface TypeDraft {
+  name: string; durationMin: string; mode: BookingMode; location: string; description: string;
+  bufferBeforeMin: string; bufferAfterMin: string; minNoticeHours: string; horizonDays: string; slug: string; active: boolean;
+}
+
+function toDraft(t: BookingType | null): TypeDraft {
+  return {
+    name: t?.name ?? '', durationMin: String(t?.durationMin ?? 30), mode: t?.mode ?? 'cabinet', location: t?.location ?? '',
+    description: t?.description ?? '', bufferBeforeMin: String(t?.bufferBeforeMin ?? 0), bufferAfterMin: String(t?.bufferAfterMin ?? 0),
+    minNoticeHours: String(t?.minNoticeHours ?? 12), horizonDays: String(t?.horizonDays ?? 60), slug: t?.slug ?? '', active: t?.active ?? true,
+  };
+}
+
+function TypeDialog({ type, onSaved, onDeleted, onClose }: { type: BookingType | null; onSaved: () => void; onDeleted: () => void; onClose: () => void }) {
+  const [d, setD] = useState(() => toDraft(type));
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [failure, setFailure] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const set = (patch: Partial<TypeDraft>) => setD((prev) => ({ ...prev, ...patch }));
+  const num = (v: string) => (v.trim() === '' ? Number.NaN : Number(v));
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setErrors({});
+    setFailure(null);
+    const input: BookingTypeInput = {
+      name: d.name.trim(), durationMin: num(d.durationMin), mode: d.mode, location: d.location.trim(), description: d.description.trim(),
+      bufferBeforeMin: num(d.bufferBeforeMin), bufferAfterMin: num(d.bufferAfterMin), minNoticeHours: num(d.minNoticeHours),
+      horizonDays: num(d.horizonDays), active: d.active,
+    };
+    if (type && d.slug.trim() !== type.slug) input.slug = d.slug.trim();
+    try {
+      if (type) await bookingApi.updateType(type.id, input);
+      else await bookingApi.createType(input);
+      onSaved();
+    } catch (err) {
+      if (err instanceof ApiError && err.fields) setErrors(err.fields);
+      else if (err instanceof ApiError && err.code === 'slug_taken') setErrors({ slug: err.message });
+      else setFailure(message(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!type) return;
+    setBusy(true);
+    try {
+      await bookingApi.deleteType(type.id);
+      onDeleted();
+    } catch (err) {
+      setFailure(message(err));
+      setBusy(false);
+    }
+  };
+
+  const locationLabel = d.mode === 'cabinet' ? 'Adresse du cabinet' : d.mode === 'telephone' ? 'Précision (facultatif)' : d.mode === 'visio' ? 'Lien ou précision (facultatif)' : 'Lieu affiché au client';
+
+  return (
+    <Modal title={type ? 'Modifier le type de rendez-vous' : 'Nouveau type de rendez-vous'} onClose={onClose}>
+      <form className="bk-form" onSubmit={(e) => void submit(e)} noValidate>
+        <div className="bk-grid">
+          <Fld label="Nom" error={errors.name} className="span-2">
+            {(id) => <input id={id} type="text" value={d.name} maxLength={100} placeholder="Consultation" onChange={(e) => set({ name: e.target.value })} />}
+          </Fld>
+          <Fld label="Durée (min)" error={errors.durationMin}>
+            {(id) => <input id={id} type="number" inputMode="numeric" min={5} max={480} step={5} value={d.durationMin} onChange={(e) => set({ durationMin: e.target.value })} />}
+          </Fld>
+          <Fld label="Mode" error={errors.mode}>
+            {(id) => (
+              <select id={id} value={d.mode} onChange={(e) => set({ mode: e.target.value as BookingMode })}>
+                {(Object.keys(MODES) as BookingMode[]).map((m) => <option key={m} value={m}>{MODES[m]}</option>)}
+              </select>
+            )}
+          </Fld>
+          <Fld label={locationLabel} error={errors.location} className="span-2">
+            {(id) => <input id={id} type="text" value={d.location} maxLength={300} onChange={(e) => set({ location: e.target.value })} />}
+          </Fld>
+          <Fld label="Description (affichée au client)" error={errors.description} className="span-2">
+            {(id) => <textarea id={id} rows={2} value={d.description} maxLength={2000} onChange={(e) => set({ description: e.target.value })} />}
+          </Fld>
+          <Fld label="Tampon avant (min)" error={errors.bufferBeforeMin}>
+            {(id) => <input id={id} type="number" inputMode="numeric" min={0} max={240} step={5} value={d.bufferBeforeMin} onChange={(e) => set({ bufferBeforeMin: e.target.value })} />}
+          </Fld>
+          <Fld label="Tampon après (min)" error={errors.bufferAfterMin}>
+            {(id) => <input id={id} type="number" inputMode="numeric" min={0} max={240} step={5} value={d.bufferAfterMin} onChange={(e) => set({ bufferAfterMin: e.target.value })} />}
+          </Fld>
+          <Fld label="Préavis minimal (heures)" error={errors.minNoticeHours}>
+            {(id) => <input id={id} type="number" inputMode="numeric" min={0} max={720} value={d.minNoticeHours} onChange={(e) => set({ minNoticeHours: e.target.value })} />}
+          </Fld>
+          <Fld label="Réservable jusqu’à (jours)" error={errors.horizonDays}>
+            {(id) => <input id={id} type="number" inputMode="numeric" min={1} max={365} value={d.horizonDays} onChange={(e) => set({ horizonDays: e.target.value })} />}
+          </Fld>
+          {type && (
+            <Fld label="Identifiant du lien" error={errors.slug} hint={`Lien direct : /rdv/${d.slug || '…'}. Le changer casse les liens déjà partagés.`} className="span-2">
+              {(id) => <input id={id} type="text" value={d.slug} maxLength={50} spellCheck={false} autoCapitalize="none" onChange={(e) => set({ slug: e.target.value })} />}
+            </Fld>
+          )}
+        </div>
+        <label className="check">
+          <input type="checkbox" checked={d.active} onChange={(e) => set({ active: e.target.checked })} />
+          Proposé sur la page publique
+        </label>
+        {failure && <p className="form-error" role="alert">{failure}</p>}
+        {confirmDelete ? (
+          <div className="actions">
+            <span className="bk-confirm-text">Supprimer ce type ? Ses réservations sont conservées.</span>
+            <span className="spacer" />
+            <button type="button" className="btn ghost" onClick={() => setConfirmDelete(false)}>Non</button>
+            <button type="button" className="btn danger" disabled={busy} onClick={() => void remove()}>Supprimer</button>
+          </div>
+        ) : (
+          <div className="actions">
+            {type && <button type="button" className="btn ghost danger" onClick={() => setConfirmDelete(true)}>Supprimer</button>}
+            <span className="spacer" />
+            <button type="button" className="btn ghost" onClick={onClose}>Annuler</button>
+            <button className="btn primary" disabled={busy}>{type ? 'Enregistrer' : 'Créer'}</button>
+          </div>
+        )}
+      </form>
+    </Modal>
+  );
+}
+
+function TypesTab({ types, reload, notify }: { types: BookingType[]; reload: () => Promise<void>; notify: (msg: string) => void }) {
+  const [editing, setEditing] = useState<BookingType | 'new' | null>(null);
+  const [local, setLocal] = useState(types);
+  useEffect(() => setLocal(types), [types]);
+
+  const act = async (fn: () => Promise<unknown>) => {
+    try {
+      await fn();
+    } catch (err) {
+      notify(message(err));
+    }
+    await reload();
+  };
+  const move = (index: number, delta: number) => {
+    const next = [...local];
+    const [item] = next.splice(index, 1);
+    next.splice(index + delta, 0, item);
+    setLocal(next);
+    void act(() => bookingApi.reorderTypes(next.map((t) => t.id)));
+  };
+  const toggle = (t: BookingType, active: boolean) => {
+    setLocal((list) => list.map((x) => (x.id === t.id ? { ...x, active } : x)));
+    void act(() => bookingApi.updateType(t.id, { active }));
+  };
+
+  return (
+    <>
+      <Card
+        title="Types de rendez-vous"
+        sub="Ce que tes clients peuvent réserver : durée, lieu, délais."
+        action={<button className="btn primary" onClick={() => setEditing('new')}><PlusIcon />Nouveau type</button>}
+      >
+        {local.length === 0 ? (
+          <p className="bk-empty">Aucun type pour l’instant. Crée le premier, par exemple « Consultation, 30 min ».</p>
+        ) : (
+          <ul className="bk-list">
+            {local.map((t, i) => (
+              <li key={t.id} className={`bk-type${t.active ? '' : ' off'}`}>
+                <div className="bk-order">
+                  <button className="icon-btn" disabled={i === 0} onClick={() => move(i, -1)} aria-label={`Monter ${t.name}`}><span className="rot-up"><Chevron dir="left" /></span></button>
+                  <button className="icon-btn" disabled={i === local.length - 1} onClick={() => move(i, 1)} aria-label={`Descendre ${t.name}`}><span className="rot-down"><Chevron dir="left" /></span></button>
+                </div>
+                <div className="bk-type-body">
+                  <p className="bk-type-name">{t.name}{!t.active && <span className="tag">Masqué</span>}</p>
+                  <p className="bk-meta">
+                    {durationLabel(t.durationMin)} · {modeLabel(t) || 'Lieu à préciser'}
+                    {(t.bufferBeforeMin > 0 || t.bufferAfterMin > 0) && ` · tampons ${t.bufferBeforeMin}/${t.bufferAfterMin} min`}
+                    {` · préavis ${t.minNoticeHours} h · jusqu’à ${t.horizonDays} j`}
+                  </p>
+                  <p className="bk-meta mono">/rdv/{t.slug}</p>
+                </div>
+                <Switch checked={t.active} onChange={(v) => toggle(t, v)} label={`Proposer « ${t.name} » sur la page publique`} />
+                <button className="btn" onClick={() => setEditing(t)}>Modifier</button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
+      {editing && (
+        <TypeDialog
+          type={editing === 'new' ? null : editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => { setEditing(null); void reload(); }}
+          onDeleted={() => { setEditing(null); void reload(); }}
+        />
+      )}
+    </>
+  );
+}
+
+// --- horaires et calendriers ---------------------------------------------------
+
+const toTime = (min: number) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+
+/** Lit « 9 », « 9h30 », « 09:30 », « 0930 », « 24:00 » ; null si ce n'est pas une heure. */
+function parseTime(value: string, isEnd: boolean): number | null {
+  const m = /^(\d{1,2})(?:\s*[:h.]?\s*(\d{2}))?\s*h?$/i.exec(value.trim());
+  if (!m) return null;
+  const min = Number(m[1]) * 60 + Number(m[2] ?? 0);
+  if (Number(m[2] ?? 0) > 59 || min > 1440) return null;
+  // Une fin à 00:00 signifie minuit le soir même ; un début à 24:00 n'existe pas.
+  if (isEnd) return min === 0 ? 1440 : min;
+  return min === 1440 ? null : min;
+}
+
+/**
+ * Champ d'heure en texte, toujours sur 24 heures (le champ « time » du navigateur suit
+ * la langue du système et peut passer en AM/PM). La valeur est validée en quittant le champ.
+ */
+function TimeField({ value, isEnd, label, onChange }: { value: number; isEnd: boolean; label: string; onChange: (min: number) => void }) {
+  const [text, setText] = useState(() => toTime(value));
+  useEffect(() => setText(toTime(value)), [value]);
+  const commit = () => {
+    const min = parseTime(text, isEnd);
+    if (min === null) setText(toTime(value));
+    else {
+      setText(toTime(min));
+      if (min !== value) onChange(min);
+    }
+  };
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      autoComplete="off"
+      maxLength={5}
+      placeholder={isEnd ? '12:00' : '09:00'}
+      aria-label={label}
+      value={text}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+    />
+  );
+}
+
+const sortHours = (list: BookingHoursRange[]) => [...list].sort((a, b) => a.weekday - b.weekday || a.startMin - b.startMin);
+const sameHours = (a: BookingHoursRange[], b: BookingHoursRange[]) => JSON.stringify(sortHours(a)) === JSON.stringify(sortHours(b));
+
+function HoursCard({ hours, onSaved, notify }: { hours: BookingHoursRange[]; onSaved: (h: BookingHoursRange[]) => void; notify: (msg: string) => void }) {
+  // L'ordre de saisie est conservé pendant l'édition (pas de tri qui ferait sauter les lignes).
+  const [draft, setDraft] = useState(hours);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => setDraft(hours), [hours]);
+  const dirty = !sameHours(draft, hours);
+
+  const update = (range: BookingHoursRange, patch: Partial<BookingHoursRange>) => {
+    setError(null);
+    setDraft((list) => list.map((r) => (r === range ? { ...r, ...patch } : r)));
+  };
+  const add = (weekday: number) => {
+    setError(null);
+    setDraft((list) => {
+      const day = list.filter((r) => r.weekday === weekday);
+      const last = day.reduce((max, r) => Math.max(max, r.endMin), 0);
+      const startMin = day.length === 0 ? 540 : Math.min(last + 60, 1380);
+      return [...list, { weekday, startMin, endMin: Math.min(startMin + (day.length === 0 ? 180 : 120), 1440) }];
+    });
+  };
+  const remove = (range: BookingHoursRange) => {
+    setError(null);
+    setDraft((list) => list.filter((r) => r !== range));
+  };
+
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      onSaved(await bookingApi.saveHours(sortHours(draft)));
+      notify('Horaires enregistrés');
+    } catch (err) {
+      setError(err instanceof ApiError && err.fields?.hours ? err.fields.hours : message(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card title="Horaires hebdomadaires" sub="Les créneaux ne sont proposés qu’à l’intérieur de ces plages, hors de tes événements.">
+      <ul className="bk-hours">
+        {WEEKDAYS.map((name, i) => {
+          const weekday = i + 1;
+          const ranges = draft.filter((r) => r.weekday === weekday);
+          return (
+            <li key={weekday} className={ranges.length === 0 ? 'closed' : ''}>
+              <span className="bk-dayname">{name}</span>
+              <div className="bk-ranges">
+                {ranges.length === 0 && <span className="bk-closed">Fermé</span>}
+                {ranges.map((r, j) => (
+                  <span key={j} className="bk-range">
+                    <TimeField value={r.startMin} isEnd={false} label={`${name}, début de la plage ${j + 1}`} onChange={(startMin) => update(r, { startMin })} />
+                    <span aria-hidden="true">–</span>
+                    <TimeField value={r.endMin} isEnd label={`${name}, fin de la plage ${j + 1}`} onChange={(endMin) => update(r, { endMin })} />
+                    <button type="button" className="icon-btn" onClick={() => remove(r)} aria-label={`Supprimer la plage ${j + 1} du ${name.toLowerCase()}`}><CloseIcon /></button>
+                  </span>
+                ))}
+              </div>
+              <button type="button" className="icon-btn bk-add" onClick={() => add(weekday)} aria-label={`Ajouter une plage le ${name.toLowerCase()}`} title="Ajouter une plage"><PlusIcon /></button>
+            </li>
+          );
+        })}
+      </ul>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      {dirty && (
+        <div className="bk-savebar">
+          <span>Modifications non enregistrées</span>
+          <button className="btn ghost" onClick={() => { setDraft(hours); setError(null); }}>Annuler</button>
+          <button className="btn primary" disabled={busy} onClick={() => void save()}>Enregistrer les horaires</button>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function BlockingCard({ calendars, onChange }: { calendars: CalendarInfo[]; onChange: (c: CalendarInfo, blocks: boolean) => void }) {
+  return (
+    <Card title="Calendriers qui bloquent les créneaux" sub="Un événement d’un calendrier coché rend le créneau indisponible, même si le calendrier est masqué. Les événements marqués « disponible » ne bloquent jamais.">
+      {calendars.length === 0 ? <p className="bk-empty">Aucun calendrier pour l’instant.</p> : (
+        <div className="bk-cals">
+          {calendars.map((c) => (
+            <label key={c.id} className="cal-item" style={{ '--c': c.color } as React.CSSProperties}>
+              <input type="checkbox" checked={c.blocksBooking} onChange={(e) => onChange(c, e.target.checked)} />
+              <span className="swatch" />
+              <span className="cal-name">{c.name}</span>
+            </label>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// --- réglages ------------------------------------------------------------------
+
+function SettingsCard({ state, calendars, onSaved, notify }: { state: BookingAdminState; calendars: CalendarInfo[]; onSaved: (s: BookingAdminState) => void; notify: (msg: string) => void }) {
+  const [d, setD] = useState<BookingSettings>(state.settings);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  useEffect(() => setD(state.settings), [state.settings]);
+  const s = state.settings;
+  const dirty = d.publicName !== s.publicName || d.welcomeText !== s.welcomeText || d.calendarId !== s.calendarId || d.slotStepMin !== s.slotStepMin;
+  const writable = calendars.filter((c) => !c.readOnly);
+  const effective = calendars.find((c) => c.id === state.effectiveCalendarId);
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setErrors({});
+    try {
+      onSaved(await bookingApi.saveSettings({ publicName: d.publicName.trim(), welcomeText: d.welcomeText, calendarId: d.calendarId, slotStepMin: d.slotStepMin }));
+      notify('Réglages enregistrés');
+    } catch (err) {
+      if (err instanceof ApiError && err.fields) setErrors(err.fields);
+      else notify(message(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card title="Page publique" sub="Ce que voient tes clients, et où atterrissent les rendez-vous.">
+      <form className="bk-form" onSubmit={(e) => void save(e)}>
+        <div className="bk-grid">
+          <Fld label="Nom affiché" error={errors.publicName} className="span-2">
+            {(id) => <input id={id} type="text" maxLength={100} value={d.publicName} onChange={(e) => setD({ ...d, publicName: e.target.value })} />}
+          </Fld>
+          <Fld label="Texte d’accueil" error={errors.welcomeText} hint="Affiché en haut de la page, sous le titre. Texte simple." className="span-2">
+            {(id) => <textarea id={id} rows={3} maxLength={2000} value={d.welcomeText} onChange={(e) => setD({ ...d, welcomeText: e.target.value })} />}
+          </Fld>
+          <Fld label="Calendrier des rendez-vous" error={errors.calendarId} hint={d.calendarId === null && effective ? `Actuellement : ${effective.name}.` : undefined}>
+            {(id) => (
+              <select id={id} value={d.calendarId ?? ''} onChange={(e) => setD({ ...d, calendarId: e.target.value || null })}>
+                <option value="">Automatique (premier calendrier modifiable)</option>
+                {writable.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            )}
+          </Fld>
+          <div className="fld">
+            <span className="fld-label" id="bk-step-label">Pas des créneaux</span>
+            <div className="seg bk-seg" role="radiogroup" aria-labelledby="bk-step-label">
+              {([15, 30, 60] as BookingStep[]).map((step) => (
+                <button key={step} type="button" role="radio" aria-checked={d.slotStepMin === step} className={d.slotStepMin === step ? 'active' : ''} onClick={() => setD({ ...d, slotStepMin: step })}>
+                  {step} min
+                </button>
+              ))}
+            </div>
+            {errors.slotStepMin && <p className="fld-err" role="alert">{errors.slotStepMin}</p>}
+          </div>
+        </div>
+        <div className="bk-savebar static">
+          {dirty && <span>Modifications non enregistrées</span>}
+          {dirty && <button type="button" className="btn ghost" onClick={() => { setD(s); setErrors({}); }}>Annuler</button>}
+          <button className="btn primary" disabled={busy || !dirty}>Enregistrer</button>
+        </div>
+      </form>
+    </Card>
+  );
+}
+
+function MailCard({ state, lastError, timezone, notify }: { state: BookingAdminState; lastError: Booking | null; timezone: string; notify: (msg: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const test = async () => {
+    setBusy(true);
+    setResult(null);
+    try {
+      const res = await bookingApi.testMail();
+      setResult({ ok: true, text: `E-mail d’essai envoyé à ${res.to}.` });
+    } catch (err) {
+      setResult({ ok: false, text: `Échec de l’envoi : ${message(err)}` });
+      if (!(err instanceof ApiError)) notify(message(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Card title="E-mails" sub="Confirmations et annulations envoyées aux clients, avis envoyés à toi.">
+      <div className={`bk-status ${state.mail.configured ? 'ok' : 'off'}`}>
+        <span className="sync-dot" />
+        <div>
+          <p className="bk-status-title">{state.mail.configured ? 'Envoi configuré' : 'Envoi non configuré'}</p>
+          <p className="bk-meta">
+            {state.mail.configured
+              ? 'Les e-mails partent par le serveur SMTP.'
+              : 'Les réservations fonctionnent, mais aucun e-mail ne part. Renseigne SMTP_USER et SMTP_PASSWORD sur le serveur (deploy/configurer.sh).'}
+          </p>
+        </div>
+      </div>
+      <dl className="bk-dl">
+        <div><dt>Expéditeur</dt><dd>{state.mail.from}</dd></div>
+        <div><dt>Avis envoyés à</dt><dd>{state.mail.notifyTo}</dd></div>
+        <div>
+          <dt>Dernière erreur</dt>
+          <dd>
+            {lastError
+              ? <span className="bk-err-text">{lastError.mailError} <span className="bk-meta">(réservation de {lastError.name}, {dateTimeShortIn(timezone, lastError.start)})</span></span>
+              : 'Aucune'}
+          </dd>
+        </div>
+      </dl>
+      <div className="bk-savebar static">
+        {result && <span className={result.ok ? 'ok' : 'err'} role="status">{result.text}</span>}
+        <button className="btn" disabled={busy || !state.mail.configured} onClick={() => void test()}>{busy ? 'Envoi…' : 'Envoyer un e-mail d’essai'}</button>
+      </div>
+    </Card>
+  );
+}
+
+// --- réservations --------------------------------------------------------------
+
+function BookingRow({ b, timezone, mailConfigured, onCancel, onResend }: {
+  b: Booking; timezone: string; mailConfigured: boolean; onCancel: (b: Booking) => void; onResend: (b: Booking) => void;
+}) {
+  const confirmed = b.status === 'confirmed';
+  const upcoming = confirmed && new Date(b.end).getTime() > Date.now();
+  return (
+    <li className={`bk-booking${confirmed ? '' : ' cancelled'}`}>
+      <div className="bk-when">
+        <span className="bk-when-day">{dayLabel(dayKeyIn(timezone, new Date(b.start)))}</span>
+        <span className="bk-when-time">{timeIn(timezone, b.start)} – {timeIn(timezone, b.end)}</span>
+      </div>
+      <div className="bk-who">
+        <p className="bk-who-name">{b.name} <span className="bk-meta">· {b.typeName}</span></p>
+        <p className="bk-meta bk-contacts">
+          <a href={`mailto:${b.email}`}>{b.email}</a>
+          {b.phone && <a href={`tel:${b.phone.replace(/[^\d+]/g, '')}`}>{b.phone}</a>}
+          {b.location && <span>{b.location}</span>}
+        </p>
+        {b.message && <p className="bk-message">{b.message}</p>}
+        <div className="bk-flags">
+          {!confirmed && (
+            <span className="tag">
+              Annulée {b.cancelledBy === 'client' ? 'par le client' : 'par toi'}{b.cancelledAt ? ` le ${dateTimeShortIn(timezone, b.cancelledAt)}` : ''}
+            </span>
+          )}
+          {b.eventState === 'missing' && (
+            <span className="tag danger" title="L’événement n’est plus dans le calendrier. Le créneau reste pris : annule la réservation pour prévenir le client et le libérer.">
+              <AlertIcon />Événement supprimé du calendrier
+            </span>
+          )}
+          {b.eventState === 'moved' && b.eventStart && (
+            <span className="tag warn" title="L’événement a été déplacé dans le calendrier. Le client n’est pas prévenu automatiquement.">
+              <AlertIcon />Déplacé au {dateTimeShortIn(timezone, b.eventStart)}
+            </span>
+          )}
+          {b.mailError && <span className="tag warn"><AlertIcon />{b.mailError}</span>}
+        </div>
+        {b.eventState === 'missing' && <p className="bk-hint">Le créneau reste pris. Annule la réservation pour prévenir le client et libérer le créneau.</p>}
+      </div>
+      {upcoming && (
+        <div className="bk-row-actions">
+          {mailConfigured && <button className="btn ghost small" onClick={() => onResend(b)}>Renvoyer l’e-mail</button>}
+          <button className="btn small danger" onClick={() => onCancel(b)}>Annuler</button>
+        </div>
+      )}
+    </li>
+  );
+}
+
+function CancelDialog({ b, timezone, mailConfigured, onDone, onClose }: { b: Booking; timezone: string; mailConfigured: boolean; onDone: () => void; onClose: () => void }) {
+  const [notifyClient, setNotifyClient] = useState(mailConfigured);
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const confirm = async () => {
+    setBusy(true);
+    setFailure(null);
+    try {
+      await bookingApi.cancelBooking(b.id, notifyClient);
+      onDone();
+    } catch (err) {
+      setFailure(message(err));
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal title="Annuler ce rendez-vous ?" onClose={onClose} small>
+      <p className="bk-dialog-text">
+        {b.typeName} avec <strong>{b.name}</strong>, {dateTimeShortIn(timezone, b.start)}. L’événement est retiré de ton calendrier et le créneau redevient libre.
+      </p>
+      <label className="check">
+        <input type="checkbox" checked={notifyClient} disabled={!mailConfigured} onChange={(e) => setNotifyClient(e.target.checked)} />
+        Prévenir le client par e-mail
+      </label>
+      {!mailConfigured && <p className="bk-hint">L’envoi d’e-mails n’est pas configuré : pense à prévenir {b.name} toi-même.</p>}
+      {failure && <p className="form-error" role="alert">{failure}</p>}
+      <div className="actions">
+        <span className="spacer" />
+        <button type="button" className="btn ghost" onClick={onClose}>Garder</button>
+        <button type="button" className="btn danger" disabled={busy} onClick={() => void confirm()}>Annuler le rendez-vous</button>
+      </div>
+    </Modal>
+  );
+}
+
+// --- écran ---------------------------------------------------------------------
+
+export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void; onCalendarChanged: () => void }) {
+  const [tab, setTab] = useState<Tab>('bookings');
+  const [state, setState] = useState<BookingAdminState | null>(null);
+  const [types, setTypes] = useState<BookingType[]>([]);
+  const [hours, setHours] = useState<BookingHoursRange[]>([]);
+  const [calendars, setCalendars] = useState<CalendarInfo[]>([]);
+  const [upcoming, setUpcoming] = useState<Booking[]>([]);
+  const [past, setPast] = useState<Booking[]>([]);
+  const [scope, setScope] = useState<'upcoming' | 'past'>('upcoming');
+  const [cancelling, setCancelling] = useState<Booking | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const notify = useCallback((msg: string) => setToast(msg), []);
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 5000);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  const reload = useCallback(async () => {
+    try {
+      const [s, t, h, c, up, pa] = await Promise.all([
+        bookingApi.state(), bookingApi.types(), bookingApi.hours(), bookingApi.calendars(), bookingApi.bookings('upcoming'), bookingApi.bookings('past'),
+      ]);
+      setState(s);
+      setTypes(t);
+      setHours(h);
+      setCalendars(c);
+      setUpcoming(up);
+      setPast(pa);
+      setLoadError(null);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return;
+      setLoadError(message(err));
+    }
+  }, []);
+  useEffect(() => void reload(), [reload]);
+
+  // Les réservations arrivent de l'extérieur : rafraîchissement régulier et au retour sur l'app.
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === 'visible') void reload();
+    };
+    const t = setInterval(refresh, 60_000);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [reload]);
+
+  const lastMailError = useMemo(
+    () => [...upcoming, ...past].filter((b) => b.mailError).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null,
+    [upcoming, past],
+  );
+
+  const setEnabled = async (enabled: boolean) => {
+    setState((s) => (s ? { ...s, settings: { ...s.settings, enabled } } : s));
+    try {
+      setState(await bookingApi.saveSettings({ enabled }));
+    } catch (err) {
+      notify(message(err));
+      void reload();
+    }
+  };
+
+  const copyLink = async () => {
+    if (!state) return;
+    try {
+      await navigator.clipboard.writeText(state.publicPageUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      notify('Copie impossible : sélectionne le lien à la main.');
+    }
+  };
+
+  const setBlocks = async (c: CalendarInfo, blocksBooking: boolean) => {
+    setCalendars((list) => list.map((x) => (x.id === c.id ? { ...x, blocksBooking } : x)));
+    try {
+      await bookingApi.setCalendarBlocks(c.id, blocksBooking);
+      onCalendarChanged();
+    } catch (err) {
+      notify(message(err));
+    }
+    void reload();
+  };
+
+  const resend = async (b: Booking) => {
+    try {
+      const res = await bookingApi.resendConfirmation(b.id);
+      notify(res.mailError ? `E-mail non envoyé : ${res.mailError}` : `Confirmation renvoyée à ${b.email} (nouveau lien d’annulation).`);
+    } catch (err) {
+      notify(message(err));
+    }
+    void reload();
+  };
+
+  const list = scope === 'upcoming' ? upcoming : past;
+  const attention = upcoming.filter((b) => b.eventState === 'missing' || b.eventState === 'moved').length;
+
+  return (
+    <main className="main bk-main">
+      <header className="toolbar">
+        <button className="icon-btn menu-btn" onClick={onMenu} aria-label="Menu"><MenuIcon /></button>
+        <h1>Rendez-vous</h1>
+      </header>
+      <div className="bk-scroll">
+        <div className="bk">
+          {loadError && !state && (
+            <div className="bk-card"><p className="form-error" role="alert">{loadError}</p><button className="btn" onClick={() => void reload()}>Réessayer</button></div>
+          )}
+          {state && (
+            <>
+              <section className={`bk-card bk-hero${state.settings.enabled ? ' on' : ''}`}>
+                <div className="bk-hero-main">
+                  <Switch checked={state.settings.enabled} onChange={(v) => void setEnabled(v)} label="Ouvrir la prise de rendez-vous" />
+                  <div>
+                    <h2>{state.settings.enabled ? 'La prise de rendez-vous est ouverte' : 'La prise de rendez-vous est fermée'}</h2>
+                    <p>{state.settings.enabled ? 'Tes clients peuvent réserver un créneau libre depuis la page publique.' : 'La page publique n’accepte aucune réservation tant que tu ne l’ouvres pas.'}</p>
+                  </div>
+                </div>
+                <div className="bk-link">
+                  <span className="bk-link-label">Lien public</span>
+                  <code className="bk-url">{state.publicPageUrl}</code>
+                  <button className="btn" onClick={() => void copyLink()}>{copied ? <CheckIcon /> : <CopyIcon />}{copied ? 'Copié' : 'Copier'}</button>
+                  <a className="btn" href="/rdv" target="_blank" rel="noopener"><ExternalIcon />Ouvrir</a>
+                </div>
+                {state.warnings.filter((w) => !/^La prise de rendez-vous est fermée/.test(w)).length > 0 && (
+                  <ul className="bk-warnings">
+                    {state.warnings.filter((w) => !/^La prise de rendez-vous est fermée/.test(w)).map((w) => <li key={w}><AlertIcon /><span>{w}</span></li>)}
+                  </ul>
+                )}
+              </section>
+
+              <div className="seg bk-tabs" role="tablist" aria-label="Rubriques">
+                {TABS.map(([key, label]) => (
+                  <button key={key} role="tab" aria-selected={tab === key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>
+                    {label}
+                    {key === 'bookings' && upcoming.length > 0 && <span className={`bk-count${attention > 0 ? ' alert' : ''}`}>{upcoming.length}</span>}
+                  </button>
+                ))}
+              </div>
+
+              {tab === 'bookings' && (
+                <Card
+                  title={scope === 'upcoming' ? 'Réservations à venir' : 'Réservations passées ou annulées'}
+                  sub={scope === 'upcoming' ? 'Chaque réservation crée un événement dans ton calendrier.' : undefined}
+                  action={(
+                    <div className="seg small bk-scope" role="radiogroup" aria-label="Période">
+                      <button role="radio" aria-checked={scope === 'upcoming'} className={scope === 'upcoming' ? 'active' : ''} onClick={() => setScope('upcoming')}>À venir</button>
+                      <button role="radio" aria-checked={scope === 'past'} className={scope === 'past' ? 'active' : ''} onClick={() => setScope('past')}>Passées</button>
+                    </div>
+                  )}
+                >
+                  {list.length === 0 ? (
+                    <p className="bk-empty">{scope === 'upcoming' ? 'Aucune réservation à venir.' : 'Rien pour l’instant.'}</p>
+                  ) : (
+                    <ul className="bk-list">
+                      {list.map((b) => (
+                        <BookingRow key={b.id} b={b} timezone={state.timezone} mailConfigured={state.mail.configured} onCancel={setCancelling} onResend={(x) => void resend(x)} />
+                      ))}
+                    </ul>
+                  )}
+                </Card>
+              )}
+              {tab === 'types' && <TypesTab types={types} reload={reload} notify={notify} />}
+              {tab === 'hours' && (
+                <>
+                  <HoursCard hours={hours} onSaved={(h) => { setHours(h); void reload(); }} notify={notify} />
+                  <BlockingCard calendars={calendars} onChange={(c, v) => void setBlocks(c, v)} />
+                </>
+              )}
+              {tab === 'settings' && (
+                <>
+                  <SettingsCard state={state} calendars={calendars} onSaved={setState} notify={notify} />
+                  <MailCard state={state} lastError={lastMailError} timezone={state.timezone} notify={notify} />
+                </>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+      {cancelling && state && (
+        <CancelDialog
+          b={cancelling}
+          timezone={state.timezone}
+          mailConfigured={state.mail.configured}
+          onClose={() => setCancelling(null)}
+          onDone={() => { setCancelling(null); notify('Rendez-vous annulé'); onCalendarChanged(); void reload(); }}
+        />
+      )}
+      {toast && <div className="toast" role="status" onClick={() => setToast(null)}>{toast}</div>}
+    </main>
+  );
+}

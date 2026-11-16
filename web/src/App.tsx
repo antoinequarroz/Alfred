@@ -1,13 +1,19 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CalendarInfo, EditScope, SyncStatus } from '../../shared/types';
 import { api, ApiError } from './api';
 import { addDays, addMonths, capitalize, fmt, startOfDay, startOfWeek } from './dates';
 import { EventDialog, ScopeDialog } from './EventDialog';
-import { Chevron, MenuIcon, PlusIcon } from './icons';
+import { CalendarIcon, Chevron, ClockIcon, MenuIcon, PlusIcon } from './icons';
 import { draftFromOcc, draftToInput, movedInput, newDraft, toOcc, type CalendarMap, type Draft, type Occ } from './model';
 import { MiniMonth, monthGrid, MonthView } from './MonthView';
 import { MoonIcon, SunIcon, ThemeSwitch, useTheme } from './theme';
 import { WeekView } from './WeekView';
+
+// L'écran « Rendez-vous » n'est chargé que lorsqu'on l'ouvre.
+const BookingAdmin = lazy(() => import('./rdv/BookingAdmin').then((m) => ({ default: m.BookingAdmin })));
+
+type Section = 'calendar' | 'booking';
+const sectionFromHash = (): Section => (location.hash === '#rendez-vous' ? 'booking' : 'calendar');
 
 type View = 'day' | 'week' | 'month';
 const VIEW_LABELS: Record<View, string> = { day: 'Jour', week: 'Semaine', month: 'Mois' };
@@ -56,6 +62,7 @@ function Title({ text }: { text: string }) {
 }
 
 export function App({ onLogout }: { onLogout: () => void }) {
+  const [section, setSectionState] = useState<Section>(sectionFromHash);
   const [view, setView] = useState<View>(initialView);
   const [cursor, setCursor] = useState(() => new Date());
   const [calendars, setCalendars] = useState<CalendarInfo[]>([]);
@@ -69,6 +76,18 @@ export function App({ onLogout }: { onLogout: () => void }) {
   const [miniCursor, setMiniCursor] = useState(() => new Date());
   const requestId = useRef(0);
   const theme = useTheme();
+
+  useEffect(() => {
+    const onHash = () => setSectionState(sectionFromHash());
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+  const setSection = useCallback((next: Section) => {
+    setSectionState(next);
+    setMenuOpen(false);
+    const hash = next === 'booking' ? '#rendez-vous' : '';
+    if (location.hash !== hash) history.pushState(null, '', location.pathname + location.search + hash);
+  }, []);
 
   const [from, to] = useMemo(() => viewRange(view, cursor), [view, cursor]);
   const calendarMap: CalendarMap = useMemo(() => new Map(calendars.map((c) => [c.id, c])), [calendars]);
@@ -110,6 +129,10 @@ export function App({ onLogout }: { onLogout: () => void }) {
 
   useEffect(() => void loadEvents(), [loadEvents]);
   useEffect(() => void loadMeta(), [loadMeta]);
+  // Au retour de l'écran « Rendez-vous » : une réservation ou une annulation a pu changer l'agenda.
+  useEffect(() => {
+    if (section === 'calendar') void loadEventsRef.current();
+  }, [section]);
 
   // Rafraîchissement régulier et au retour sur l'app.
   useEffect(() => {
@@ -156,7 +179,7 @@ export function App({ onLogout }: { onLogout: () => void }) {
   // Raccourcis clavier.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (draft || pendingMove || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (section !== 'calendar' || draft || pendingMove || e.metaKey || e.ctrlKey || e.altKey) return;
       const tag = (e.target as HTMLElement).tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
       if (e.key === 'ArrowLeft') navigate(-1);
@@ -172,7 +195,7 @@ export function App({ onLogout }: { onLogout: () => void }) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [draft, pendingMove, navigate, openNew]);
+  }, [section, draft, pendingMove, navigate, openNew]);
 
   const run = async (fn: () => Promise<unknown>, after?: () => void) => {
     setBusy(true);
@@ -248,7 +271,17 @@ export function App({ onLogout }: { onLogout: () => void }) {
           <span className="logo">A</span>
           <span>Alfred</span>
         </div>
-        <button className="btn primary new-btn" onClick={() => { setMenuOpen(false); openNew(); }}>
+        <nav className="side-nav" aria-label="Rubriques">
+          <button className={section === 'calendar' ? 'active' : ''} aria-current={section === 'calendar' ? 'page' : undefined} onClick={() => setSection('calendar')}>
+            <CalendarIcon />
+            <span>Calendrier</span>
+          </button>
+          <button className={section === 'booking' ? 'active' : ''} aria-current={section === 'booking' ? 'page' : undefined} onClick={() => setSection('booking')}>
+            <ClockIcon />
+            <span>Rendez-vous</span>
+          </button>
+        </nav>
+        <button className="btn primary new-btn" onClick={() => { setSection('calendar'); openNew(); }}>
           <PlusIcon />
           <span>Nouvel événement</span>
           <kbd>N</kbd>
@@ -256,7 +289,7 @@ export function App({ onLogout }: { onLogout: () => void }) {
         <MiniMonth
           cursor={miniCursor}
           selected={cursor}
-          onPick={(d) => { setCursor(d); setMenuOpen(false); }}
+          onPick={(d) => { setCursor(d); setSection('calendar'); }}
           onNavigate={(delta) => setMiniCursor((c) => addMonths(c, delta))}
         />
         <div className="cal-list">
@@ -287,6 +320,11 @@ export function App({ onLogout }: { onLogout: () => void }) {
       </aside>
       {menuOpen && <div className="scrim" onClick={() => setMenuOpen(false)} />}
 
+      {section === 'booking' ? (
+        <Suspense fallback={<main className="main" />}>
+          <BookingAdmin onMenu={() => setMenuOpen(true)} onCalendarChanged={() => { void loadMeta(); void loadEventsRef.current(); }} />
+        </Suspense>
+      ) : (
       <main className="main">
         <header className="toolbar">
           <button className="icon-btn menu-btn" onClick={() => setMenuOpen(true)} aria-label="Menu"><MenuIcon /></button>
@@ -324,6 +362,7 @@ export function App({ onLogout }: { onLogout: () => void }) {
         )}
         <button className="fab" onClick={openNew} aria-label="Nouvel événement"><PlusIcon /></button>
       </main>
+      )}
 
       {draft && (
         <EventDialog
