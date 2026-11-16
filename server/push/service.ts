@@ -296,8 +296,8 @@ export class PushService {
     return url.slice(this.publicUrl.length);
   }
 
-  /** Un invité vient d'entrer (ou demande à entrer) dans une salle de visio. */
-  async guestArrived(room: { slug: string; title: string }, guestName: string): Promise<void> {
+  /** Un invité vient d'entrer dans une salle de visio, ou attend d'y être admis (waiting). */
+  async guestArrived(room: { slug: string; title: string }, guestName: string, waiting = false): Promise<void> {
     const prefs = this.getPrefs();
     if (!prefs.guestArrived || this.rows().length === 0) return;
     const nowMs = this.now().getTime();
@@ -306,8 +306,8 @@ export class PushService {
     this.guestSeen.set(key, nowMs);
     if (this.guestSeen.size > 500) for (const [k, t] of this.guestSeen) if (t <= nowMs - GUEST_QUIET_MS) this.guestSeen.delete(k);
     await this.deliver(prefs.details
-      ? { title: `${guestName} est dans la visio`, body: `« ${room.title} » · touche pour rejoindre`, url: `/v/${room.slug}`, tag: `visio-${room.slug}` }
-      : { title: 'Un invité est dans la visio', body: 'Touche pour rejoindre', url: `/v/${room.slug}`, tag: `visio-${room.slug}` },
+      ? { title: waiting ? `${guestName} attend d’entrer dans la visio` : `${guestName} est dans la visio`, body: `« ${room.title} » · touche pour ${waiting ? 'le faire entrer' : 'rejoindre'}`, url: `/v/${room.slug}`, tag: `visio-${room.slug}` }
+      : { title: waiting ? 'Un invité attend dans la visio' : 'Un invité est dans la visio', body: waiting ? 'Touche pour le faire entrer' : 'Touche pour rejoindre', url: `/v/${room.slug}`, tag: `visio-${room.slug}` },
     { ttl: 300, urgency: 'high' });
   }
 

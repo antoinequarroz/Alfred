@@ -48,7 +48,7 @@ const video = new VideoService({
   db: store.db, server: videoEnv, publicUrl: config.publicUrl, timezone: config.timezone,
   hostName: () => bookingRef?.getSettings().publicName ?? config.mail.from.name,
   bookingLink: (id) => bookingRef?.videoLink(id) ?? null,
-  onGuestJoin: (room, name) => void pushRef?.guestArrived(room, name).catch((err) => console.error('[alfred] notifications :', err)),
+  onGuestJoin: (room, name, waiting) => void pushRef?.guestArrived(room, name, waiting).catch((err) => console.error('[alfred] notifications :', err)),
 });
 const booking = new BookingService({
   video,

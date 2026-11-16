@@ -49,7 +49,7 @@ export interface VideoOptions {
   /** État et horaire actuels d'une réservation (une salle de rendez-vous suit son rendez-vous). */
   bookingLink?: (bookingId: string) => BookingLink | null;
   /** Un invité reçoit son jeton d'entrée (notification à l'hôte). Ne doit pas lever. */
-  onGuestJoin?: (room: { slug: string; title: string }, guestName: string) => void;
+  onGuestJoin?: (room: { slug: string; title: string }, guestName: string, waiting?: boolean) => void;
   backend?: VideoBackend;
   now?: () => Date;
 }
@@ -123,7 +123,7 @@ export class VideoService {
   readonly timezone: string;
   private readonly hostName: () => string;
   private readonly bookingLink: (bookingId: string) => BookingLink | null;
-  private readonly onGuestJoin?: (room: { slug: string; title: string }, guestName: string) => void;
+  private readonly onGuestJoin?: (room: { slug: string; title: string }, guestName: string, waiting?: boolean) => void;
   private readonly now: () => Date;
   private healthCache: { at: number; ok: boolean } | null = null;
   /** Jetons d'invités délivrés depuis peu, par salle : identité → échéance (ms). Ferme la course entre deux entrées simultanées. */

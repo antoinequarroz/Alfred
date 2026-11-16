@@ -266,6 +266,8 @@ describe('visio et routes', () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(net.calls).toHaveLength(1);
     expect(phone.decrypt(net.calls[0].body)).toMatchObject({ title: 'Léa est dans la visio', url: `/v/${slug}` });
+    await push.guestArrived({ slug: 'autre', title: 'Bilan' }, 'Tom', true);
+    expect(phone.decrypt(net.calls[1].body)).toMatchObject({ title: 'Tom attend d’entrer dans la visio', body: '« Bilan » · touche pour le faire entrer' });
   });
 
   it('expose l’état, les choix, les appareils et l’essai derrière la session', async () => {
