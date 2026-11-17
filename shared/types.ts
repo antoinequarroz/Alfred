@@ -200,6 +200,8 @@ export interface Booking {
   remindersSent: number[];
   /** Nombre de fois où le client a déplacé lui-même ce rendez-vous. */
   clientReschedules: number;
+  /** Fiche Personne du client (annuaire), null pour une réservation antérieure sans e-mail. */
+  personId?: string | null;
 }
 
 // --- partie publique --------------------------------------------------------
@@ -555,4 +557,58 @@ export interface VideoWaiter {
   name: string;
   /** Instant ISO de sa demande. */
   since: string;
+}
+
+// ---------------------------------------------------------------------------
+// Personnes et liens (phase 4, contrat de données de la suite Media). Voir docs/DONNEES.md.
+
+/** Une fiche de l'annuaire : un client, un invité. Une seule par e-mail (normalisé). */
+export interface PersonSummary {
+  id: string;
+  /** Adresse stable : media://alfred/person/<id>. */
+  address: string;
+  name: string;
+  /** E-mail normalisé (minuscules). */
+  email: string;
+  phone: string;
+  /** Réservations, annulées comprises. */
+  bookingCount: number;
+  /** Début du prochain rendez-vous confirmé, null s'il n'y en a pas. */
+  nextAt: string | null;
+  /** Début du dernier rendez-vous passé (confirmé), null s'il n'y en a pas. */
+  lastAt: string | null;
+  createdAt: string;
+}
+
+export interface PersonDetail extends PersonSummary {
+  upcoming: Booking[];
+  past: Booking[];
+  links: LinkInfo[];
+}
+
+/** Un lien d'un objet d'Alfred vers un autre objet de la suite (note Cairn…) ou une page web. */
+export interface LinkInfo {
+  id: string;
+  /** Adresse media:// de l'objet d'Alfred d'où part le lien. */
+  from: string;
+  /** Adresse media:// de la cible, ou l'URL d'une page web. */
+  to: string;
+  kind: string;
+  /** Module de la cible (« cairn »…), « web » pour une simple page. */
+  module: string;
+  title: string;
+  /** Où l'ouvrir, null si la cible n'a pas d'adresse web connue. */
+  url: string | null;
+  createdAt: string;
+}
+
+/** Ce qu'une adresse media://alfred/… désigne (GET /api/v1/resolve). */
+export interface ResolvedAddress {
+  address: string;
+  module: string;
+  type: string;
+  id: string;
+  title: string;
+  /** Page d'Alfred qui montre l'objet. */
+  url: string;
 }

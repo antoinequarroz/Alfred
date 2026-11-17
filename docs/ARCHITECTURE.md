@@ -113,6 +113,10 @@ rendez-vous, annulation par un client, rappel, invité arrivé en visio. Code da
 VAPID avec `node:crypto`, planificateur qui relit `bookings` toutes les 30 s), service worker `web/public/sw.js`,
 carte Réglages > Notifications. Détails, limites et options natives : [APPS.md](APPS.md).
 
+## Données, personnes et liens (phase 4)
+
+Migrations numérotées, espace, UUID v7, adresses `media://`, fiches Personnes et liens vers Cairn : voir [DONNEES.md](DONNEES.md).
+
 ## Sécurité
 
 - Un seul utilisateur. Mot de passe stocké sous forme d'empreinte scrypt, session par cookie `HttpOnly`, `Secure`, `SameSite=Lax`, blocage après cinq essais ratés.

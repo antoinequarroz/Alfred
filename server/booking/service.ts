@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { uuidv7 } from '../ids.js';
 import { expand, newUid, type BusyOccurrence } from '../ics.js';
 import {
   CHANGE_NOTICE_CHOICES, REMINDER_HOURS_CHOICES,
@@ -347,7 +348,7 @@ export class BookingService {
     if (!isObject(body)) throw invalid({ _: 'Corps de requête invalide' });
     const fields: Record<string, string> = {};
     const t: BookingType = base ? { ...base } : {
-      id: randomUUID(), slug: '', name: '', durationMin: 0, description: '', mode: 'cabinet', location: '',
+      id: uuidv7(), slug: '', name: '', durationMin: 0, description: '', mode: 'cabinet', location: '',
       bufferBeforeMin: 0, bufferAfterMin: 0, minNoticeHours: 12, horizonDays: 60, active: true, sort: this.data.nextTypeSort(),
     };
     const text = (key: 'name' | 'description' | 'location', max: number, label: string, multiline = false) => {
@@ -795,7 +796,7 @@ export class BookingService {
         throw unavailable();
       }
       const booking: BookingRow = {
-        id: randomUUID(), type_id: type.id, type_name: type.name, location,
+        id: uuidv7(), type_id: type.id, type_name: type.name, location,
         buffer_before_min: type.bufferBeforeMin, buffer_after_min: type.bufferAfterMin,
         event_id: eventId, event_uid: uid, calendar_id: calendarId, start_utc: start, end_utc: end,
         name, email, phone, message, status: 'confirmed', token_hash: hashToken(token),
@@ -1151,6 +1152,7 @@ export class BookingService {
       videoUrl: b.status === 'confirmed' ? (this.video?.urlForBooking(b.id) ?? null) : null,
       remindersSent: (REMINDER_HOURS_CHOICES as readonly number[]).filter((h) => parseReminderHours(b.reminders_sent).includes(h)),
       clientReschedules: b.client_reschedules ?? 0,
+      personId: b.person_id ?? null,
     };
   }
 
@@ -1160,6 +1162,22 @@ export class BookingService {
     const nowIso = this.now().toISOString();
     const rows = scope === 'upcoming' ? this.data.listUpcoming(nowIso, limit) : this.data.listPast(nowIso, limit, offset);
     return rows.map((r) => this.toBooking(r));
+  }
+
+  /** Réservations d'une fiche Personne : à venir (les plus proches d'abord) et passées ou annulées (les plus récentes d'abord). */
+  bookingsForPerson(personId: string): { upcoming: Booking[]; past: Booking[] } {
+    this.reconcile();
+    const nowIso = this.now().toISOString();
+    const rows = this.data.listForPerson(personId);
+    const upcoming = rows.filter((r) => r.status === 'confirmed' && r.end_utc > nowIso).reverse();
+    const past = rows.filter((r) => !(r.status === 'confirmed' && r.end_utc > nowIso));
+    return { upcoming: upcoming.map((r) => this.toBooking(r)), past: past.map((r) => this.toBooking(r)) };
+  }
+
+  /** Titre et existence d'une réservation, pour les adresses media://alfred/booking/<id>. */
+  describeBooking(id: string): { title: string; personId: string | null } | null {
+    const row = this.data.getBooking(id);
+    return row ? { title: `${row.type_name} : ${row.name}`, personId: row.person_id ?? null } : null;
   }
 
   private requireBooking(id: string): BookingRow {

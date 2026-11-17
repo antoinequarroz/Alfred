@@ -14,6 +14,8 @@ import { IcsError } from './ics.js';
 import { verifyPassword } from './password.js';
 import { registerPushRoutes } from './push/routes.js';
 import { PushError, type PushService } from './push/service.js';
+import { PeopleError, PeopleService } from './people.js';
+import { registerPeopleRoutes } from './people-routes.js';
 import { ForbiddenError, NotFoundError, type CalendarService } from './service.js';
 import { toCalendarInfo, type Store } from './store.js';
 import { DEFAULT_VIDEO_LIMITS, registerAdminVideoRoutes, registerPublicVideoRoutes, type VideoLimits } from './video/routes.js';
@@ -42,6 +44,8 @@ export interface AppDeps {
   videoLimits?: Partial<VideoLimits>;
   /** Notifications sur les appareils (Web Push). Sans elles, les routes /api/push n'existent pas. */
   push?: PushService;
+  /** Annuaire des personnes et liens. Par défaut : construit sur la même base, Cairn à son adresse habituelle. */
+  people?: PeopleService;
 }
 
 class BadRequest extends Error {}
@@ -96,6 +100,7 @@ export function createApp(deps: AppDeps): Hono {
       return null;
     }
   })();
+  const people = deps.people ?? new PeopleService({ db: store.db, store, booking, cairnUrl: 'https://cairn.antoinequarroz.ch' });
   const throttle = new LoginThrottle();
   const app = new Hono();
 
@@ -134,6 +139,7 @@ export function createApp(deps: AppDeps): Hono {
     if (err instanceof HTTPException) return c.json({ error: 'Requête refusée' }, err.status);
     if (err instanceof PushError) return c.json({ error: err.message, code: err.code }, err.status);
     if (err instanceof VideoError) return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}) }, err.status);
+    if (err instanceof PeopleError) return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}) }, err.status);
     if (err instanceof BookingError) return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}) }, err.status);
     if (err instanceof ConnectionError) {
       return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}), ...(err.reason ? { reason: err.reason } : {}) }, err.status);
@@ -195,6 +201,10 @@ export function createApp(deps: AppDeps): Hono {
     if (!authed(c)) return c.json({ error: 'Non connecté' }, 401);
     await next();
   });
+
+  // --- personnes et liens (phase 4) ------------------------------------------
+
+  registerPeopleRoutes(app, people);
 
   // --- calendriers ---------------------------------------------------------
 

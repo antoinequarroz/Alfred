@@ -9,6 +9,7 @@ import { CaldavSync } from './caldav.js';
 import { allowPrivateHosts, config, connectionEnv, secretKeyEnv, videoEnv } from './config.js';
 import { ConnectionsService } from './connections.js';
 import { openDb } from './db.js';
+import { PeopleService } from './people.js';
 import { SecretBox } from './secrets.js';
 import { hashPassword } from './password.js';
 import { CalendarService } from './service.js';
@@ -63,8 +64,9 @@ const push = new PushService({
 });
 pushRef = push;
 connections.mailContext = () => ({ publicName: booking.getSettings().publicName, timezone: config.timezone, publicUrl: config.publicUrl });
+const people = new PeopleService({ db: store.db, store, booking, cairnUrl: config.cairnUrl });
 const app = createApp({
-  store, service, caldav, passwordHash, booking, connections, video, push,
+  store, service, caldav, passwordHash, booking, connections, video, push, people,
   secureCookies: config.production,
   sessionDays: config.sessionDays,
 });
