@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { uuidv7 } from './ids.js';
 import type { CalendarInfo, CalendarSource, Occurrence } from '../shared/types.js';
 import type { Db } from './db.js';
 import { expand, expandBusy, summarize, type BusyOccurrence } from './ics.js';
@@ -112,7 +113,7 @@ export class Store {
   ensureLocalCalendar(): void {
     const any = this.db.prepare('SELECT 1 FROM calendars LIMIT 1').get();
     if (any) return;
-    this.upsertCalendar({ id: `local:${randomUUID()}`, source: 'local', url: null, name: 'Personnel', color: DEFAULT_COLORS[0], read_only: 0, sort: 0 });
+    this.upsertCalendar({ id: `local:${uuidv7()}`, source: 'local', url: null, name: 'Personnel', color: DEFAULT_COLORS[0], read_only: 0, sort: 0 });
   }
 
   // --- événements --------------------------------------------------------
@@ -132,7 +133,7 @@ export class Store {
   /** Enregistre (ou remplace) une ressource. Lève une erreur si l'iCalendar est illisible. */
   saveEvent(ev: { id?: string; calendarId: string; href: string | null; etag: string | null; ics: string }): string {
     const s = summarize(ev.ics);
-    const id = ev.id ?? (ev.href ? eventIdForHref(ev.href) : randomUUID());
+    const id = ev.id ?? (ev.href ? eventIdForHref(ev.href) : uuidv7());
     this.db
       .prepare(
         `INSERT INTO events (id, calendar_id, href, etag, uid, ics, summary, start_ms, end_ms, recurring, recur_end_ms, busy, updated_at)
@@ -185,12 +186,32 @@ export class Store {
    * Occupation de l'agenda sur une période, pour la prise de rendez-vous : toutes les
    * occurrences des calendriers « bloquants », qu'ils soient affichés ou non.
    * Ne renvoie que des horaires et des drapeaux, jamais de titre ni de détail.
+   * skipAllDay : journées entières à écarter d'après le titre de leur événement (mots-clés des réglages).
    */
-  busyOccurrences(from: Date, to: Date): BusyOccurrence[] {
+  busyOccurrences(from: Date, to: Date, skipAllDay?: (title: string) => unknown): BusyOccurrence[] {
+    const out: BusyOccurrence[] = [];
+    this.eachBusy(from, to, (o, title) => {
+      if (o.allDay && skipAllDay?.(title)) return;
+      out.push(o);
+    });
+    return out;
+  }
+
+  /** Journées entières des calendriers bloquants sur une période, avec leur titre : pour l'aperçu des réglages. */
+  allDayBusy(from: Date, to: Date): (BusyOccurrence & { eventId: string; calendarId: string; title: string })[] {
+    const out: (BusyOccurrence & { eventId: string; calendarId: string; title: string })[] = [];
+    this.eachBusy(from, to, (o, title, eventId, calendarId) => {
+      if (o.allDay) out.push({ ...o, eventId, calendarId, title });
+    });
+    out.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+    return out;
+  }
+
+  private eachBusy(from: Date, to: Date, visit: (o: BusyOccurrence, title: string, eventId: string, calendarId: string) => void): void {
     const margin = 86_400_000;
     const rows = this.db
       .prepare(
-        `SELECT e.id, e.recurring, e.busy, CASE WHEN e.busy IS NULL THEN e.ics END AS ics
+        `SELECT e.id, e.calendar_id, e.summary, e.recurring, e.busy, CASE WHEN e.busy IS NULL THEN e.ics END AS ics
          FROM events e JOIN calendars c ON c.id = e.calendar_id
          WHERE c.blocks_booking = 1
            AND e.start_ms < ?
@@ -198,26 +219,25 @@ export class Store {
              OR (e.recurring = 1 AND (e.recur_end_ms IS NULL OR e.recur_end_ms > ?)))`,
       )
       .all(to.getTime() + margin, from.getTime() - margin, from.getTime() - margin) as unknown as
-        { id: string; recurring: number; busy: string | null; ics: string | null }[];
-    const out: BusyOccurrence[] = [];
+        { id: string; calendar_id: string; summary: string; recurring: number; busy: string | null; ics: string | null }[];
     for (const row of rows) {
       try {
+        let list: BusyOccurrence[];
         if (row.busy !== null) {
           // Événement simple : son occupation est déjà en base, sans relire l'iCalendar.
-          for (const o of unpackBusy(row.busy)) out.push(o);
+          list = unpackBusy(row.busy);
         } else if (row.recurring === 1) {
-          for (const o of expandBusy(row.ics!, from, to)) out.push(o);
+          list = expandBusy(row.ics!, from, to);
         } else {
           // Ligne antérieure à la colonne « busy » : calculée une fois, puis mémorisée.
-          const busy = summarize(row.ics!).busy ?? [];
-          this.db.prepare('UPDATE events SET busy = ? WHERE id = ?').run(packBusy(busy), row.id);
-          for (const o of busy) out.push(o);
+          list = summarize(row.ics!).busy ?? [];
+          this.db.prepare('UPDATE events SET busy = ? WHERE id = ?').run(packBusy(list), row.id);
         }
+        for (const o of list) visit(o, row.summary ?? '', row.id, row.calendar_id);
       } catch (err) {
         console.warn(`[alfred] événement ${row.id} ignoré : ${(err as Error).message}`);
       }
     }
-    return out;
   }
 
   /**

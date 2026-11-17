@@ -96,6 +96,11 @@ export interface BookingSettings {
    */
   allDayBlocks: boolean;
   /**
+   * Mots du titre d'une journée entière qui ne bloque jamais (anniversaire, fête…), quelle que soit
+   * sa marque « occupé / disponible ». Comparés sans majuscules ni accents. Par défaut : « anniversaire ».
+   */
+  allDayIgnore: string[];
+  /**
    * Rappels envoyés au client avant le rendez-vous, en heures (parmi REMINDER_HOURS_CHOICES),
    * du plus tôt au plus tard. Vide : aucun rappel. Par défaut : 24 h et 1 h.
    */
@@ -139,6 +144,21 @@ export interface BookingHoursRange {
   weekday: number;
   startMin: number;
   endMin: number;
+}
+
+/** Journée entière à venir d'un calendrier bloquant, pour l'aperçu des réglages. */
+export interface AllDayPreviewItem {
+  eventId: string;
+  calendarId: string;
+  title: string;
+  /** Date AAAA-MM-JJ du premier jour. */
+  start: string;
+  /** Date AAAA-MM-JJ exclusive. */
+  end: string;
+  /** Vrai : la journée est indisponible à la réservation. */
+  blocks: boolean;
+  /** Pourquoi elle bloque ou non, en français. */
+  reason: string;
 }
 
 export interface BookingAdminState {
@@ -202,6 +222,8 @@ export interface Booking {
   remindersSent: number[];
   /** Nombre de fois où le client a déplacé lui-même ce rendez-vous. */
   clientReschedules: number;
+  /** Fiche Personne du client (annuaire), null pour une réservation antérieure sans e-mail. */
+  personId?: string | null;
   /** Acompte payé en ligne, null si le rendez-vous n'en avait pas. */
   payment: BookingPayment | null;
 }
@@ -496,6 +518,8 @@ export interface VideoSettings {
   /** Participants au plus dans une salle, toi compris (2 à 8). */
   maxParticipants: number;
   quality: VideoQuality;
+  /** Salle d'attente : un invité n'entre que lorsque tu l'as fait entrer. */
+  waitingRoom: boolean;
 }
 
 export interface VideoServerStatus {
@@ -522,6 +546,8 @@ export interface VideoRoom {
   bookingId: string | null;
   /** Personnes connectées en ce moment (null : serveur de visio injoignable). */
   live: number | null;
+  /** Invités qui patientent en salle d'attente. */
+  waiting: number;
 }
 
 export interface VideoAdminState {
@@ -555,6 +581,8 @@ export interface PublicVideoRoom {
   timezone: string;
   /** Le visiteur est connecté à Alfred : il entre comme hôte. */
   isHost: boolean;
+  /** Le visiteur passera par la salle d'attente : l'hôte doit le faire entrer. */
+  waitingRoom: boolean;
 }
 
 export interface VideoJoinInfo {
@@ -564,4 +592,128 @@ export interface VideoJoinInfo {
   identity: string;
   isHost: boolean;
   quality: VideoQuality;
+}
+
+// --- notifications (Web Push) ----------------------------------------------
+
+/** Rappels : aucun, avant les rendez-vous pris en ligne, ou avant tout événement à heure fixe. */
+export type PushReminderMode = 'off' | 'bookings' | 'all';
+
+export interface PushPrefs {
+  newBooking: boolean;
+  cancellation: boolean;
+  guestArrived: boolean;
+  reminders: PushReminderMode;
+  /** Délai du rappel : 5, 10, 15, 30 ou 60 minutes avant le début. */
+  reminderMinutes: number;
+  /** Faux : les notifications ne montrent ni nom ni titre (écran verrouillé). */
+  details: boolean;
+}
+
+export interface PushDevice {
+  id: string;
+  label: string;
+  /** Service de push de l'appareil : Apple, Google, Mozilla… */
+  service: string;
+  /** Empreinte de l'abonnement (SHA-256 de son adresse, 16 caractères) : l'app reconnaît l'appareil sur lequel elle tourne. */
+  ref: string;
+  createdAt: string;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  lastErrorAt: string | null;
+}
+
+export interface PushState {
+  /** Clé publique VAPID (applicationServerKey), en base64url. */
+  publicKey: string;
+  prefs: PushPrefs;
+  devices: PushDevice[];
+}
+
+export interface PushTestResult {
+  id: string;
+  label: string;
+  ok: boolean;
+  /** L'appareil s'était désabonné : il a été retiré de la liste. */
+  removed: boolean;
+  error: string | null;
+}
+
+/** Réponse à une demande d'entrée quand la salle d'attente est active. */
+export interface VideoWaitInfo {
+  waiting: true;
+  /** Secret à présenter pour suivre la demande. */
+  ticket: string;
+  /** L'hôte est dans la salle ; null si on ne sait pas. */
+  hostPresent: boolean | null;
+}
+
+export type VideoJoinResult = VideoJoinInfo | VideoWaitInfo;
+
+/** Suivi d'une demande en salle d'attente. */
+export type VideoWaitStatus =
+  | { state: 'waiting'; hostPresent: boolean | null }
+  | { state: 'denied' }
+  | { state: 'admitted'; join: VideoJoinInfo };
+
+/** Un invité qui patiente, vu par l'hôte. */
+export interface VideoWaiter {
+  id: string;
+  name: string;
+  /** Instant ISO de sa demande. */
+  since: string;
+}
+
+// ---------------------------------------------------------------------------
+// Personnes et liens (phase 4, contrat de données de la suite Media). Voir docs/DONNEES.md.
+
+/** Une fiche de l'annuaire : un client, un invité. Une seule par e-mail (normalisé). */
+export interface PersonSummary {
+  id: string;
+  /** Adresse stable : media://alfred/person/<id>. */
+  address: string;
+  name: string;
+  /** E-mail normalisé (minuscules). */
+  email: string;
+  phone: string;
+  /** Réservations, annulées comprises. */
+  bookingCount: number;
+  /** Début du prochain rendez-vous confirmé, null s'il n'y en a pas. */
+  nextAt: string | null;
+  /** Début du dernier rendez-vous passé (confirmé), null s'il n'y en a pas. */
+  lastAt: string | null;
+  createdAt: string;
+}
+
+export interface PersonDetail extends PersonSummary {
+  upcoming: Booking[];
+  past: Booking[];
+  links: LinkInfo[];
+}
+
+/** Un lien d'un objet d'Alfred vers un autre objet de la suite (note Cairn…) ou une page web. */
+export interface LinkInfo {
+  id: string;
+  /** Adresse media:// de l'objet d'Alfred d'où part le lien. */
+  from: string;
+  /** Adresse media:// de la cible, ou l'URL d'une page web. */
+  to: string;
+  kind: string;
+  /** Module de la cible (« cairn »…), « web » pour une simple page. */
+  module: string;
+  title: string;
+  /** Où l'ouvrir, null si la cible n'a pas d'adresse web connue. */
+  url: string | null;
+  createdAt: string;
+}
+
+/** Ce qu'une adresse media://alfred/… désigne (GET /api/v1/resolve). */
+export interface ResolvedAddress {
+  address: string;
+  module: string;
+  type: string;
+  id: string;
+  title: string;
+  /** Page d'Alfred qui montre l'objet. */
+  url: string;
 }

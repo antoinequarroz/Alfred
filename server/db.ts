@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { ensureSpaceColumns, migrateUp } from './migrations.js';
 
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
@@ -133,44 +134,15 @@ CREATE TABLE IF NOT EXISTS video_rooms (
   closed_at   TEXT                       -- fermée (annulation, suppression, lien renouvelé)
 );
 CREATE INDEX IF NOT EXISTS video_rooms_booking ON video_rooms(booking_id) WHERE booking_id IS NOT NULL;
-
--- Paiement des acomptes (Stripe Checkout). Une réservation avec acompte commence par une
--- retenue : le créneau est bloqué pendant le paiement, la réservation n'est créée qu'une fois
--- le paiement abouti.
-CREATE TABLE IF NOT EXISTS payment_holds (
-  id                TEXT PRIMARY KEY,
-  ref_hash          TEXT NOT NULL UNIQUE,   -- SHA-256 de la référence de retour (/rdv/paiement/<ref>)
-  status            TEXT NOT NULL,          -- 'pending' | 'paid' | 'completed' | 'expired'
-  type_id           TEXT,
-  type_name         TEXT NOT NULL,
-  mode              TEXT NOT NULL,
-  location          TEXT NOT NULL DEFAULT '',  -- précision du type (brute), comme booking_types.location
-  buffer_before_min INTEGER NOT NULL DEFAULT 0,
-  buffer_after_min  INTEGER NOT NULL DEFAULT 0,
-  start_utc         TEXT NOT NULL,
-  end_utc           TEXT NOT NULL,
-  name              TEXT NOT NULL,
-  email             TEXT NOT NULL,
-  phone             TEXT NOT NULL DEFAULT '',
-  message           TEXT NOT NULL DEFAULT '',
-  token_hash        TEXT NOT NULL,          -- empreinte du jeton d'annulation de la future réservation
-  cancel_token      TEXT,                   -- jeton en clair, le temps d'envoyer la confirmation ; effacé ensuite
-  amount_cents      INTEGER NOT NULL,
-  currency          TEXT NOT NULL,
-  checkout_id       TEXT,                   -- session Stripe Checkout
-  payment_intent    TEXT,
-  booking_id        TEXT,
-  created_at        TEXT NOT NULL,
-  expires_at        TEXT NOT NULL,          -- fin de validité de la page de paiement
-  last_error        TEXT
-);
-CREATE INDEX IF NOT EXISTS payment_holds_status ON payment_holds(status);
 `;
 
 /** Horaires proposés à la première ouverture : lundi à vendredi, 09:00-12:00 et 13:30-17:30. */
 const DEFAULT_HOURS: [number, number][] = [[9 * 60, 12 * 60], [13 * 60 + 30, 17 * 60 + 30]];
 
-/** Migrations idempotentes : colonnes ajoutées après coup et valeurs initiales. */
+/**
+ * Schéma de départ : colonnes ajoutées après coup et valeurs initiales, rejouables. Les
+ * changements suivants sont des migrations numérotées (server/migrations.ts).
+ */
 function migrate(db: DatabaseSync): void {
   const addColumn = (table: string, column: string, definition: string) => {
     const columns = db.prepare(`PRAGMA table_info(${table})`).all() as unknown as { name: string }[];
@@ -191,13 +163,6 @@ function migrate(db: DatabaseSync): void {
   addColumn('bookings', 'reminder_ref', 'TEXT');
   // Déplacements faits par le client lui-même, depuis le lien de ses e-mails.
   addColumn('bookings', 'client_reschedules', 'INTEGER NOT NULL DEFAULT 0');
-  // Acompte : montant par type, et paiement de chaque réservation (NULL : pas d'acompte).
-  addColumn('booking_types', 'deposit_cents', 'INTEGER NOT NULL DEFAULT 0');
-  addColumn('bookings', 'payment_amount_cents', 'INTEGER');
-  addColumn('bookings', 'payment_currency', 'TEXT');
-  addColumn('bookings', 'payment_intent', 'TEXT');
-  addColumn('bookings', 'payment_status', 'TEXT'); // 'paid' | 'refunded' | 'refund_failed'
-  addColumn('bookings', 'payment_error', 'TEXT');
   // Les horaires ne sont posés qu'une fois : si Antoine les vide ensuite, ils restent vides.
   const seeded = db.prepare("SELECT 1 FROM booking_settings WHERE key = 'hours_seeded'").get();
   if (!seeded) {
@@ -227,6 +192,9 @@ export function openDb(dataDir: string): Db {
   const db = new DatabaseSync(path);
   db.exec(SCHEMA);
   migrate(db);
+  // Phase 4 : migrations numérotées (espaces, personnes, liens…), voir server/migrations.ts.
+  migrateUp(db);
+  ensureSpaceColumns(db);
   return db;
 }
 

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type {
+  AllDayPreviewItem,
   Booking, BookingAdminState, BookingConfirmation, BookingType, CalendarInfo, Occurrence, PublicBooking, PublicBookingInfo, PublicSlots,
 } from '../shared/types.js';
 import { createApp } from '../server/app.js';
@@ -198,7 +199,7 @@ describe('prise de rendez-vous : réglages', () => {
   it('lit et modifie les réglages', async () => {
     const ctx = await setup();
     const state = (await (await ctx.admin('/api/booking/settings')).json()) as BookingAdminState;
-    expect(state.settings).toEqual({ enabled: false, publicName: 'Antoine Quarroz', welcomeText: '', calendarId: null, slotStepMin: 30, allDayBlocks: true,
+    expect(state.settings).toEqual({ enabled: false, publicName: 'Antoine Quarroz', welcomeText: '', calendarId: null, slotStepMin: 30, allDayBlocks: true, allDayIgnore: ['anniversaire'],
       reminderHours: [24, 1], allowReschedule: true, changeNoticeHours: 0,
     });
     expect(state.effectiveCalendarId).toBe(ctx.calendar.id);
@@ -215,7 +216,7 @@ describe('prise de rendez-vous : réglages', () => {
     const next = (await res.json()) as BookingAdminState;
     expect(next.settings).toEqual({
       enabled: true, publicName: 'Cabinet Quarroz', welcomeText: 'Bienvenue.\nChoisissez un créneau.', calendarId: ctx.calendar.id, slotStepMin: 15,
-      allDayBlocks: true, reminderHours: [24, 1], allowReschedule: true, changeNoticeHours: 0,
+      allDayBlocks: true, allDayIgnore: ['anniversaire'], reminderHours: [24, 1], allowReschedule: true, changeNoticeHours: 0,
     });
     // Modification partielle : le reste est conservé.
     const partial = (await (await ctx.admin('/api/booking/settings', 'PUT', { slotStepMin: 60 })).json()) as BookingAdminState;
@@ -433,6 +434,8 @@ describe('prise de rendez-vous : créneaux', () => {
     save('serie', ['DTSTART:20261112T080000Z', 'DTEND:20261112T090000Z', 'SUMMARY:Cours', 'RRULE:FREQ=WEEKLY']);
 
     const get = async () => ((await (await ctx.json('/api/public/booking/types/consultation/slots?from=2026-11-16&to=2026-11-19')).json()) as PublicSlots).days;
+    // Sans mot-clé d'exception (par défaut « anniversaire », testé à part).
+    expect((await ctx.admin('/api/booking/settings', 'PUT', { allDayIgnore: [] })).status).toBe(200);
     // Par défaut, une journée entière bloque toute la journée, même marquée « disponible ».
     expect((await get()).map((d) => d.date)).toEqual(['2026-11-16', '2026-11-19']);
     // Réglage décoché : seules les journées entières « occupé » bloquent (comportement iCalendar strict).
@@ -448,6 +451,35 @@ describe('prise de rendez-vous : créneaux', () => {
     expect(days[2].slots[0]).toBe('2026-11-19T09:00:00.000Z');
   });
 
+  it('laisse libres les journées entières dont le titre contient un mot-clé, et les montre dans l’aperçu', async () => {
+    const ctx = await setup();
+    await open(ctx);
+    const save = (uid: string, lines: string[]) => ctx.store.saveEvent({ calendarId: ctx.calendar.id, href: null, etag: null, ics: rawEvent(uid, lines) });
+    // Mardi : anniversaire opaque. Mercredi : fête de village « disponible ». Jeudi : cours de ski sur deux jours (jeudi-vendredi).
+    save('anniv', ['DTSTART;VALUE=DATE:20261117', 'DTEND;VALUE=DATE:20261118', 'SUMMARY:Anniversaire Léa 🩷']);
+    save('fete', ['DTSTART;VALUE=DATE:20261118', 'DTEND;VALUE=DATE:20261119', 'SUMMARY:Fête au village', 'TRANSP:TRANSPARENT']);
+    save('ski', ['DTSTART;VALUE=DATE:20261119', 'DTEND;VALUE=DATE:20261121', 'SUMMARY:Ski-Club : Cours de Ski']);
+    const get = async () => ((await (await ctx.json('/api/public/booking/types/consultation/slots?from=2026-11-16&to=2026-11-20')).json()) as PublicSlots).days.map((d) => d.date);
+    // Par défaut, « anniversaire » ne bloque pas (majuscules ignorées).
+    expect(await get()).toEqual(['2026-11-16', '2026-11-17']);
+    // Accents ignorés : « fete » couvre « Fête ».
+    const res = await ctx.admin('/api/booking/settings', 'PUT', { allDayIgnore: ['anniversaire', ' fete ', 'FETE'] });
+    expect(((await res.json()) as BookingAdminState).settings.allDayIgnore).toEqual(['anniversaire', 'fete']);
+    expect(await get()).toEqual(['2026-11-16', '2026-11-17', '2026-11-18']);
+
+    const preview = (await (await ctx.admin('/api/booking/all-day')).json()) as { horizonDays: number; items: AllDayPreviewItem[] };
+    expect(preview.horizonDays).toBe(60);
+    expect(preview.items.map((i) => [i.start, i.title, i.blocks, i.reason])).toEqual([
+      ['2026-11-17', 'Anniversaire Léa 🩷', false, 'Titre avec « anniversaire »'],
+      ['2026-11-18', 'Fête au village', false, 'Titre avec « fete »'],
+      ['2026-11-19', 'Ski-Club : Cours de Ski', true, 'Marquée « occupé »'],
+    ]);
+    // L'aperçu contient des titres : réservé à l'admin.
+    expect((await ctx.json('/api/booking/all-day')).status).toBe(401);
+    // Valeurs invalides refusées.
+    expect((await ctx.admin('/api/booking/settings', 'PUT', { allDayIgnore: 'anniversaire' })).status).toBe(400);
+  });
+
   it('ne relit ni ne redéveloppe l’agenda à chaque demande : l’occupation est gardée tant que rien ne change', async () => {
     const ctx = await setup();
     await open(ctx);
@@ -456,9 +488,9 @@ describe('prise de rendez-vous : créneaux', () => {
     save('simple', ['DTSTART:20261117T080000Z', 'DTEND:20261117T090000Z', 'SUMMARY:Rendez-vous']);
     let reads = 0;
     const original = ctx.store.busyOccurrences.bind(ctx.store);
-    ctx.store.busyOccurrences = (from, to) => {
+    ctx.store.busyOccurrences = (from, to, skip) => {
       reads++;
-      return original(from, to);
+      return original(from, to, skip);
     };
     const get = async (from: string, to: string, ip: string) =>
       ((await (await ctx.json(`/api/public/booking/types/consultation/slots?from=${from}&to=${to}`, 'GET', undefined, { ip })).json()) as PublicSlots).days;

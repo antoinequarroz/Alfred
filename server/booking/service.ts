@@ -1,8 +1,9 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { uuidv7 } from '../ids.js';
 import { expand, newUid, type BusyOccurrence } from '../ics.js';
 import {
   CHANGE_NOTICE_CHOICES, REMINDER_HOURS_CHOICES,
-  type Booking, type BookingAdminState, type BookingConfirmation, type BookingHoursRange, type BookingMode, type BookingSettings,
+  type AllDayPreviewItem, type Booking, type BookingAdminState, type BookingConfirmation, type BookingHoursRange, type BookingMode, type BookingSettings,
   type BookingType, type PublicBooking, type PublicBookingInfo, type PublicBookingType, type PublicDeposit, type PublicPaymentStatus, type PublicSlots,
 } from '../../shared/types.js';
 import { formatAmount } from '../../shared/money.js';
@@ -301,6 +302,13 @@ export class BookingService {
       if (typeof body.allDayBlocks === 'boolean') next.allDayBlocks = body.allDayBlocks;
       else fields.allDayBlocks = 'Valeur attendue : vrai ou faux';
     }
+    if ('allDayIgnore' in body) {
+      const list = body.allDayIgnore;
+      if (Array.isArray(list) && list.length <= 30 && list.every((w) => typeof w === 'string' && w.trim().length <= 50 && !CONTROL_RE.test(w))) {
+        const seen = new Set<string>();
+        next.allDayIgnore = (list as string[]).map((w) => w.trim()).filter((w) => w && !seen.has(normalizeWord(w)) && seen.add(normalizeWord(w)));
+      } else fields.allDayIgnore = 'Mots-clés : 30 au plus, 50 caractères chacun';
+    }
     if ('reminderHours' in body) {
       const list = body.reminderHours;
       const choices = REMINDER_HOURS_CHOICES as readonly number[];
@@ -394,7 +402,7 @@ export class BookingService {
     if (!isObject(body)) throw invalid({ _: 'Corps de requête invalide' });
     const fields: Record<string, string> = {};
     const t: BookingType = base ? { ...base } : {
-      id: randomUUID(), slug: '', name: '', durationMin: 0, description: '', mode: 'cabinet', location: '',
+      id: uuidv7(), slug: '', name: '', durationMin: 0, description: '', mode: 'cabinet', location: '',
       bufferBeforeMin: 0, bufferAfterMin: 0, minNoticeHours: 12, horizonDays: 60, depositCents: 0, active: true, sort: this.data.nextTypeSort(),
     };
     const text = (key: 'name' | 'description' | 'location', max: number, label: string, multiline = false) => {
@@ -570,22 +578,50 @@ export class BookingService {
   private agendaBusy(fromMs: number, toMs: number): BusyOccurrence[] {
     const today = localDateOf(this.now().getTime(), this.timezone);
     const horizon = this.data.listTypes().reduce((max, t) => Math.max(max, t.horizonDays), 0);
-    const allDayBlocks = this.getSettings().allDayBlocks;
-    const key = `${this.store.version}|${today}|${horizon}|${allDayBlocks ? 1 : 0}`;
+    const { allDayBlocks, allDayIgnore } = this.getSettings();
+    const key = `${this.store.version}|${today}|${horizon}|${allDayBlocks ? 1 : 0}|${JSON.stringify(allDayIgnore)}`;
     if (this.busyCache?.key !== key) {
       const start = startOfLocalDay(today, this.timezone) - DAY_MS;
       const end = startOfLocalDay(addDays(today, horizon + 1), this.timezone) + DAY_MS;
-      this.busyCache = { key, fromMs: start, toMs: end, list: this.readBusy(start, end, allDayBlocks) };
+      this.busyCache = { key, fromMs: start, toMs: end, list: this.readBusy(start, end, allDayBlocks, allDayIgnore) };
     }
     if (fromMs >= this.busyCache.fromMs && toMs <= this.busyCache.toMs) return this.busyCache.list;
-    return this.readBusy(fromMs, toMs, allDayBlocks);
+    return this.readBusy(fromMs, toMs, allDayBlocks, allDayIgnore);
   }
 
-  private readBusy(fromMs: number, toMs: number, allDayBlocks: boolean): BusyOccurrence[] {
-    const list = this.store.busyOccurrences(new Date(fromMs), new Date(toMs));
+  private readBusy(fromMs: number, toMs: number, allDayBlocks: boolean, allDayIgnore: string[]): BusyOccurrence[] {
+    const ignored = keywordMatcher(allDayIgnore);
+    const list = this.store.busyOccurrences(new Date(fromMs), new Date(toMs), ignored);
     // Apple Calendar marque « disponible » les journées entières qu'il crée (congés compris) :
     // selon le réglage, une journée entière bloque quelle que soit cette marque.
     return allDayBlocks ? list.map((o) => (o.allDay && o.transparent ? { ...o, transparent: false } : o)) : list;
+  }
+
+  /**
+   * Journées entières à venir (jusqu'à l'horizon de réservation le plus lointain) des calendriers
+   * bloquants, et si chacune bloque avec les réglages actuels. Réservé à l'admin : contient les titres.
+   */
+  allDayPreview(): { horizonDays: number; items: AllDayPreviewItem[] } {
+    const today = localDateOf(this.now().getTime(), this.timezone);
+    const horizonDays = this.data.listTypes().reduce((max, t) => Math.max(max, t.horizonDays), 0) || 60;
+    const last = addDays(today, horizonDays);
+    const { allDayBlocks, allDayIgnore } = this.getSettings();
+    const ignored = keywordMatcher(allDayIgnore);
+    const items: AllDayPreviewItem[] = [];
+    const from = new Date(startOfLocalDay(today, this.timezone) - DAY_MS);
+    const to = new Date(startOfLocalDay(addDays(last, 1), this.timezone) + DAY_MS);
+    for (const o of this.store.allDayBusy(from, to)) {
+      if (o.end <= today || o.start > last) continue;
+      let blocks = true;
+      let reason = 'Marquée « occupé »';
+      const word = ignored(o.title);
+      if (o.cancelled) { blocks = false; reason = 'Annulée'; }
+      else if (word) { blocks = false; reason = `Titre avec « ${word} »`; }
+      else if (o.transparent && !allDayBlocks) { blocks = false; reason = 'Marquée « disponible »'; }
+      else if (o.transparent) reason = 'Journée entière (réglage « bloque toujours »)';
+      items.push({ eventId: o.eventId, calendarId: o.calendarId, title: o.title, start: o.start, end: o.end, blocks, reason });
+    }
+    return { horizonDays, items };
   }
 
   /**
@@ -845,7 +881,7 @@ export class BookingService {
         const ref = randomBytes(32).toString('base64url');
         const now = this.now();
         const hold: HoldRow = {
-          id: randomUUID(), ref_hash: hashToken(ref), status: 'pending', type_id: type.id, type_name: type.name, mode: type.mode,
+          id: uuidv7(), ref_hash: hashToken(ref), status: 'pending', type_id: type.id, type_name: type.name, mode: type.mode,
           location: type.location, buffer_before_min: type.bufferBeforeMin, buffer_after_min: type.bufferAfterMin,
           start_utc: start, end_utc: end, name, email, phone, message, token_hash: hashToken(token), cancel_token: token,
           amount_cents: type.depositCents, currency: CURRENCY, checkout_id: null, payment_intent: null, booking_id: null,
@@ -928,7 +964,7 @@ export class BookingService {
     }
     const booking: BookingRow = {
       // Le type a pu être supprimé pendant le paiement : la réservation garde son nom, sans lien.
-      id: randomUUID(), type_id: type.id && this.data.getType(type.id) ? type.id : null, type_name: type.name, location,
+      id: uuidv7(), type_id: type.id && this.data.getType(type.id) ? type.id : null, type_name: type.name, location,
       buffer_before_min: type.bufferBeforeMin, buffer_after_min: type.bufferAfterMin,
       event_id: eventId, event_uid: uid, calendar_id: calendarId, start_utc: start, end_utc: end,
       name, email, phone, message, status: 'confirmed', token_hash: tokenHash,
@@ -1513,6 +1549,7 @@ export class BookingService {
       videoUrl: b.status === 'confirmed' ? (this.video?.urlForBooking(b.id) ?? null) : null,
       remindersSent: (REMINDER_HOURS_CHOICES as readonly number[]).filter((h) => parseReminderHours(b.reminders_sent).includes(h)),
       clientReschedules: b.client_reschedules ?? 0,
+      personId: b.person_id ?? null,
     };
   }
 
@@ -1522,6 +1559,22 @@ export class BookingService {
     const nowIso = this.now().toISOString();
     const rows = scope === 'upcoming' ? this.data.listUpcoming(nowIso, limit) : this.data.listPast(nowIso, limit, offset);
     return rows.map((r) => this.toBooking(r));
+  }
+
+  /** Réservations d'une fiche Personne : à venir (les plus proches d'abord) et passées ou annulées (les plus récentes d'abord). */
+  bookingsForPerson(personId: string): { upcoming: Booking[]; past: Booking[] } {
+    this.reconcile();
+    const nowIso = this.now().toISOString();
+    const rows = this.data.listForPerson(personId);
+    const upcoming = rows.filter((r) => r.status === 'confirmed' && r.end_utc > nowIso).reverse();
+    const past = rows.filter((r) => !(r.status === 'confirmed' && r.end_utc > nowIso));
+    return { upcoming: upcoming.map((r) => this.toBooking(r)), past: past.map((r) => this.toBooking(r)) };
+  }
+
+  /** Titre et existence d'une réservation, pour les adresses media://alfred/booking/<id>. */
+  describeBooking(id: string): { title: string; personId: string | null } | null {
+    const row = this.data.getBooking(id);
+    return row ? { title: `${row.type_name} : ${row.name}`, personId: row.person_id ?? null } : null;
   }
 
   private requireBooking(id: string): BookingRow {
@@ -1565,4 +1618,19 @@ export class BookingService {
     await this.sendMails(id, messages, sending);
     return this.toBooking(this.requireBooking(id));
   }
+}
+
+/** Mot comparé sans majuscules ni accents ni espaces en trop. */
+function normalizeWord(w: string): string {
+  return w.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+/** Renvoie le premier mot-clé contenu dans un titre (sans majuscules ni accents), sinon une chaîne vide. */
+function keywordMatcher(words: string[]): (title: string) => string {
+  const list = words.map((w) => [w, normalizeWord(w)] as const).filter(([, n]) => n.length > 0);
+  if (list.length === 0) return () => '';
+  return (title) => {
+    const t = normalizeWord(title);
+    return list.find(([, n]) => t.includes(n))?.[0] ?? '';
+  };
 }

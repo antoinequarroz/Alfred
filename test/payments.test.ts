@@ -410,6 +410,30 @@ describe('paiement en ligne : annulation et remboursement', () => {
     expect(ctx.stripe.refunds).toHaveLength(1);
   });
 
+  it('ne rembourse jamais automatiquement quand la règle est désactivée', async () => {
+    const ctx = await setup();
+    const confirmation = await paidBooking(ctx);
+    await ctx.admin('/api/payments', 'PUT', { refundHours: null });
+    const token = confirmation.cancelUrl.split('/').pop()!;
+    const after = (await (await ctx.json(`/api/public/booking/cancel/${token}`, 'POST')).json()) as PublicBooking;
+    expect(after.deposit).toMatchObject({ refundOnCancel: false, refundHours: null, refunded: false });
+    expect(ctx.stripe.refunds).toHaveLength(0);
+  });
+
+  it('garde l’acompte payé quand le client déplace son rendez-vous', async () => {
+    const ctx = await setup();
+    const confirmation = await paidBooking(ctx);
+    const token = confirmation.cancelUrl.split('/').pop()!;
+    const slots = (await (await ctx.json(`/api/public/booking/manage/${token}/slots?from=2026-11-16&to=2026-11-20`)).json()) as PublicSlots;
+    const next = slots.days.flatMap((d) => d.slots).find((s) => s !== MONDAY_9)!;
+    const res = await ctx.json(`/api/public/booking/manage/${token}/reschedule`, 'POST', { start: next });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as PublicBooking).deposit).toMatchObject({ amountCents: 5000, refunded: false });
+    const [b] = (await (await ctx.admin('/api/booking/bookings')).json()) as Booking[];
+    expect(b).toMatchObject({ start: next, payment: { amountCents: 5000, status: 'paid' } });
+    expect(ctx.stripe.refunds).toHaveLength(0);
+  });
+
   it('n’envoie aucun remboursement quand Antoine décoche « rembourser »', async () => {
     const ctx = await setup();
     await paidBooking(ctx);

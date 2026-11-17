@@ -4,6 +4,7 @@ import {
   type PaymentStatus,
 } from '../../shared/types.js';
 import { tx, type Db } from '../db.js';
+import { DEFAULT_SPACE_ID, upsertPerson } from '../migrations.js';
 
 export interface BookingRow {
   id: string;
@@ -43,6 +44,8 @@ export interface BookingRow {
   reminder_ref?: string | null;
   /** Déplacements faits par le client lui-même. */
   client_reschedules?: number;
+  /** Fiche de la personne dans l'annuaire (people). Absent avant la migration 2. */
+  person_id?: string | null;
 }
 
 /** Heures de rappel lues dans la colonne reminders_sent. */
@@ -98,6 +101,15 @@ interface TypeRow {
   sort: number;
 }
 
+function parseKeywords(json: string): string[] {
+  try {
+    const list: unknown = JSON.parse(json);
+    return Array.isArray(list) ? list.filter((w): w is string => typeof w === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 const MODES: BookingMode[] = ['cabinet', 'telephone', 'visio', 'autre'];
 
 function toType(r: TypeRow): BookingType {
@@ -138,6 +150,7 @@ export class BookingStore {
       calendarId: map.get('calendar_id') || null,
       slotStepMin: step === 15 || step === 60 ? step : (30 as BookingStep),
       allDayBlocks: map.get('all_day_blocks') !== '0',
+      allDayIgnore: map.has('all_day_ignore') ? parseKeywords(map.get('all_day_ignore')!) : ['anniversaire'],
       reminderHours: (REMINDER_HOURS_CHOICES as readonly number[]).filter((h) => reminders.includes(h)),
       allowReschedule: map.get('allow_reschedule') !== '0',
       changeNoticeHours: (CHANGE_NOTICE_CHOICES as readonly number[]).includes(notice) ? notice : 0,
@@ -153,6 +166,7 @@ export class BookingStore {
       set.run('calendar_id', s.calendarId ?? '');
       set.run('slot_step_min', String(s.slotStepMin));
       set.run('all_day_blocks', s.allDayBlocks ? '1' : '0');
+      set.run('all_day_ignore', JSON.stringify(s.allDayIgnore));
       set.run('reminder_hours', s.reminderHours.join(','));
       set.run('allow_reschedule', s.allowReschedule ? '1' : '0');
       set.run('change_notice_hours', String(s.changeNoticeHours));
@@ -223,18 +237,30 @@ export class BookingStore {
 
   // --- réservations --------------------------------------------------------
 
+  /** Enregistre la réservation et la rattache à la fiche de la personne (créée au besoin, reconnue par son e-mail). */
   insertBooking(b: BookingRow): void {
-    this.db
-      .prepare(
-        `INSERT INTO bookings (id, type_id, type_name, location, buffer_before_min, buffer_after_min, event_id, event_uid, calendar_id,
-           start_utc, end_utc, name, email, phone, message, status, token_hash, created_at, cancelled_at, cancelled_by, mail_error,
-           notified_start, payment_amount_cents, payment_currency, payment_intent, payment_status, payment_error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(b.id, b.type_id, b.type_name, b.location, b.buffer_before_min, b.buffer_after_min, b.event_id, b.event_uid, b.calendar_id,
-        b.start_utc, b.end_utc, b.name, b.email, b.phone, b.message, b.status, b.token_hash, b.created_at, b.cancelled_at,
-        b.cancelled_by, b.mail_error, b.notified_start, b.payment_amount_cents ?? null, b.payment_currency ?? null,
-        b.payment_intent ?? null, b.payment_status ?? null, b.payment_error ?? null);
+    tx(this.db, () => {
+      const personId = upsertPerson(this.db, { spaceId: DEFAULT_SPACE_ID, email: b.email, name: b.name, phone: b.phone, at: b.created_at });
+      b.person_id = personId;
+      this.db
+        .prepare(
+          `INSERT INTO bookings (id, type_id, type_name, location, buffer_before_min, buffer_after_min, event_id, event_uid, calendar_id,
+             start_utc, end_utc, name, email, phone, message, status, token_hash, created_at, cancelled_at, cancelled_by, mail_error,
+             notified_start, person_id, payment_amount_cents, payment_currency, payment_intent, payment_status, payment_error)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(b.id, b.type_id, b.type_name, b.location, b.buffer_before_min, b.buffer_after_min, b.event_id, b.event_uid, b.calendar_id,
+          b.start_utc, b.end_utc, b.name, b.email, b.phone, b.message, b.status, b.token_hash, b.created_at, b.cancelled_at,
+          b.cancelled_by, b.mail_error, b.notified_start, personId, b.payment_amount_cents ?? null, b.payment_currency ?? null,
+          b.payment_intent ?? null, b.payment_status ?? null, b.payment_error ?? null);
+    });
+  }
+
+  /** Réservations d'une personne (toutes, annulées comprises), les plus récentes d'abord. */
+  listForPerson(personId: string, spaceId: string = DEFAULT_SPACE_ID): BookingRow[] {
+    return this.db
+      .prepare('SELECT * FROM bookings WHERE person_id = ? AND space_id = ? ORDER BY start_utc DESC')
+      .all(personId, spaceId) as unknown as BookingRow[];
   }
 
   getBooking(id: string): BookingRow | undefined {

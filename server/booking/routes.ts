@@ -180,6 +180,7 @@ export function registerAdminBookingRoutes(app: Hono, booking: BookingService, s
   app.put('/api/booking/hours', async (c) => c.json(booking.setHours(await c.req.json())));
 
   // --- calendriers ---------------------------------------------------------
+  app.get('/api/booking/all-day', (c) => c.json(booking.allDayPreview()));
   app.get('/api/booking/calendars', (c) => c.json(store.listCalendars().map(toCalendarInfo)));
   app.patch('/api/booking/calendars/:id', async (c) => {
     const id = c.req.param('id');

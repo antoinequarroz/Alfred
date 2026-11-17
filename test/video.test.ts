@@ -1,6 +1,8 @@
 // Visioconférence : jetons, salles, entrée, lien dans les rendez-vous. Le serveur de visio est simulé.
 import { describe, expect, it } from 'vitest';
-import type { BookingConfirmation, Occurrence, PublicVideoRoom, VideoAdminState, VideoJoinInfo, VideoRoom } from '../shared/types.js';
+import type {
+  BookingConfirmation, Occurrence, PublicVideoRoom, VideoAdminState, VideoJoinInfo, VideoRoom, VideoWaiter, VideoWaitInfo, VideoWaitStatus,
+} from '../shared/types.js';
 import { createApp } from '../server/app.js';
 import type { Mailer, MailMessage } from '../server/booking/mail.js';
 import { BookingService } from '../server/booking/service.js';
@@ -48,7 +50,7 @@ function fakeBackend() {
   return { backend, rooms, state };
 }
 
-async function setup(opts: { configured?: boolean } = {}) {
+async function setup(opts: { configured?: boolean; waitingRoom?: boolean } = {}) {
   const store = new Store(openDb(':memory:'));
   store.ensureLocalCalendar();
   const service = new CalendarService(store, null, 'Europe/Zurich');
@@ -61,7 +63,9 @@ async function setup(opts: { configured?: boolean } = {}) {
   const fake = fakeBackend();
   let bookingRef: BookingService | null = null;
   const configured = opts.configured ?? true;
+  const arrivals: string[] = [];
   const video = new VideoService({
+    onGuestJoin: (room, name, waiting) => { arrivals.push(`${name}${waiting ? ' (attente)' : ''} @ ${room.title}`); },
     db: store.db, publicUrl: 'https://alfred.example.ch', timezone: 'Europe/Zurich',
     server: { apiKey: configured ? KEY : undefined, apiSecret: configured ? SECRET : undefined, internalUrl: 'http://livekit:7880', publicUrl: 'wss://alfred.example.ch' },
     backend: configured ? fake.backend : undefined,
@@ -75,6 +79,8 @@ async function setup(opts: { configured?: boolean } = {}) {
     maxPerEmailPerDay: 100, quietCancelMinutes: 0,
   });
   bookingRef = booking;
+  // Les essais d'entrée directe se font sans salle d'attente ; elle a ses propres essais plus bas.
+  if (!opts.waitingRoom) video.updateSettings({ waitingRoom: false });
   const app = createApp({ store, service, caldav: null, passwordHash, secureCookies: false, sessionDays: 30, booking, video, videoLimits: { join: [1000, 60_000] } });
   const json = (path: string, method = 'GET', body?: unknown, cookie?: string) =>
     app.request(path, {
@@ -85,7 +91,7 @@ async function setup(opts: { configured?: boolean } = {}) {
   const login = await json('/api/login', 'POST', { password: PASSWORD });
   const cookie = login.headers.get('set-cookie')!.split(';')[0];
   const admin = (path: string, method = 'GET', body?: unknown) => json(path, method, body, cookie);
-  return { app, store, video, booking, clock, sent, json, admin, fake };
+  return { app, store, video, booking, clock, sent, json, admin, fake, arrivals };
 }
 
 const slugOf = (room: VideoRoom) => room.url.split('/v/')[1];
@@ -241,6 +247,174 @@ describe('salles', () => {
     expect((await bare.admin('/api/video/rooms', 'POST', {})).status).toBe(503);
     expect((await bare.json('/api/public/video/rooms/abcd-efgh-ijkm')).status).toBe(404);
     expect((await bare.json('/api/public/inconnu')).status).toBe(404);
+  });
+});
+
+describe('salle d’attente', () => {
+  async function waitingSetup() {
+    const ctx = await setup({ waitingRoom: true });
+    const room = (await (await ctx.admin('/api/video/rooms', 'POST', {})).json()) as VideoRoom;
+    const slug = slugOf(room);
+    const base = `/api/public/video/rooms/${slug}`;
+    // Chaque invité vient de sa propre adresse, sauf mention contraire.
+    let n = 0;
+    const askRaw = (name: string, ip = `203.0.113.${++n}`) => ctx.app.request(`${base}/join`, {
+      method: 'POST', headers: { 'sec-fetch-site': 'same-origin', 'content-type': 'application/json', 'x-forwarded-for': ip }, body: JSON.stringify({ name }),
+    });
+    const ask = async (name: string, ip?: string) => (await (await askRaw(name, ip)).json()) as VideoWaitInfo;
+    const poll = (ticket: string) => ctx.json(`${base}/wait`, 'POST', { ticket });
+    const list = async () => ((await (await ctx.admin(`/api/video/by-slug/${slug}/waiting`)).json()) as { waiting: VideoWaiter[] }).waiting;
+    return { ...ctx, room, slug, base, ask, askRaw, poll, list, lk: `alfred-${room.id}` };
+  }
+
+  it('est active par défaut et se règle depuis l’app', async () => {
+    const ctx = await setup({ waitingRoom: true });
+    const state = (await (await ctx.admin('/api/video')).json()) as VideoAdminState;
+    expect(state.settings.waitingRoom).toBe(true);
+    expect((await ctx.admin('/api/video/settings', 'PUT', { waitingRoom: 'oui' })).status).toBe(400);
+    const off = (await (await ctx.admin('/api/video/settings', 'PUT', { waitingRoom: false })).json()) as VideoAdminState;
+    expect(off.settings.waitingRoom).toBe(false);
+  });
+
+  it('fait patienter l’invité sans jeton, jusqu’à ce que l’hôte le fasse entrer', async () => {
+    const ctx = await waitingSetup();
+    expect(((await (await ctx.json(ctx.base)).json()) as PublicVideoRoom).waitingRoom).toBe(true);
+    expect(((await (await ctx.admin(ctx.base)).json()) as PublicVideoRoom).waitingRoom).toBe(false);
+
+    const asked = await ctx.ask('Élodie Müller');
+    expect(asked).toMatchObject({ waiting: true, hostPresent: false });
+    expect(asked.ticket.length).toBeGreaterThanOrEqual(24);
+    expect(JSON.stringify(asked)).not.toContain('token');
+    // L'hôte est prévenu dès la demande (notification), pas une seconde fois à l'entrée.
+    expect(ctx.arrivals).toEqual(['Élodie Müller (attente) @ Réunion']);
+    // Rien n'est créé côté serveur de visio tant que personne n'est admis.
+    expect(ctx.fake.rooms.has(ctx.lk)).toBe(false);
+    expect((await (await ctx.poll(asked.ticket)).json()) as VideoWaitStatus).toEqual({ state: 'waiting', hostPresent: false });
+
+    // L'hôte, lui, entre directement ; la file ne se lit qu'avec une session.
+    const host = (await (await ctx.admin(`${ctx.base}/join`, 'POST', {})).json()) as VideoJoinInfo;
+    expect(host.token).toBeTruthy();
+    expect((await ctx.json(`/api/video/by-slug/${ctx.slug}/waiting`)).status).toBe(401);
+    expect((await ctx.json(`/api/video/by-slug/${ctx.slug}/admit`, 'POST', { id: 'x' })).status).toBe(401);
+    const waiting = await ctx.list();
+    expect(waiting).toHaveLength(1);
+    expect(waiting[0]).toMatchObject({ name: 'Élodie Müller' });
+    expect(waiting[0].id).toMatch(/^invite-[0-9a-f]{12}$/);
+    // Le ticket de l'invité n'est jamais montré, et la liste des salles compte les personnes en attente.
+    expect(JSON.stringify(waiting)).not.toContain(asked.ticket);
+    const state = (await (await ctx.admin('/api/video')).json()) as VideoAdminState;
+    expect(state.rooms[0].waiting).toBe(1);
+
+    expect((await ctx.admin(`/api/video/by-slug/${ctx.slug}/admit`, 'POST', { id: waiting[0].id })).status).toBe(200);
+    expect(await ctx.list()).toHaveLength(0);
+    const admitted = (await (await ctx.poll(asked.ticket)).json()) as VideoWaitStatus;
+    if (admitted.state !== 'admitted') throw new Error('non admis');
+    const g = verifyAccessToken(admitted.join.token, SECRET) as { sub: string; name: string; video: Record<string, unknown> };
+    expect(g).toMatchObject({ sub: waiting[0].id, name: 'Élodie Müller' });
+    expect(g.video).toMatchObject({ room: ctx.lk, roomJoin: true, canPublish: true });
+    expect(g.video.roomAdmin).toBeUndefined();
+    expect(ctx.arrivals).toHaveLength(1);
+    // Réponse perdue : le jeton peut être redemandé pendant une minute, pour la même identité (une seule place).
+    const again = (await (await ctx.poll(asked.ticket)).json()) as VideoWaitStatus;
+    if (again.state !== 'admitted') throw new Error('non admis');
+    expect((verifyAccessToken(again.join.token, SECRET) as { sub: string }).sub).toBe(waiting[0].id);
+    ctx.clock.now = new Date(ctx.clock.now.getTime() + 61_000);
+    expect((await ctx.poll(asked.ticket)).status).toBe(404);
+  });
+
+  it('refuse un invité, qui l’apprend à sa demande suivante', async () => {
+    const ctx = await waitingSetup();
+    const asked = await ctx.ask('Inconnu');
+    const [w] = await ctx.list();
+    expect((await ctx.admin(`/api/video/by-slug/${ctx.slug}/deny`, 'POST', { id: w.id })).status).toBe(200);
+    expect(await ctx.list()).toHaveLength(0);
+    expect((await (await ctx.poll(asked.ticket)).json()) as VideoWaitStatus).toEqual({ state: 'denied' });
+    // Le refus reste lisible (page en veille, réponse perdue) et l'invité ne peut pas l'effacer ; il s'oublie après 10 minutes.
+    await ctx.json(`${ctx.base}/wait/leave`, 'POST', { ticket: asked.ticket });
+    ctx.clock.now = new Date(ctx.clock.now.getTime() + 300_000);
+    expect((await (await ctx.poll(asked.ticket)).json()) as VideoWaitStatus).toEqual({ state: 'denied' });
+    ctx.clock.now = new Date(ctx.clock.now.getTime() + 301_000);
+    expect((await ctx.poll(asked.ticket)).status).toBe(404);
+    expect((await ctx.admin(`/api/video/by-slug/${ctx.slug}/deny`, 'POST', { id: w.id })).status).toBe(404);
+  });
+
+  it('oublie un invité parti, garde celui qui patiente, et n’accepte un ticket que pour sa salle', async () => {
+    const ctx = await waitingSetup();
+    const gone = await ctx.ask('Parti');
+    const quiet = await ctx.ask('Silencieux');
+    const stay = await ctx.ask('Patiente');
+    expect(await ctx.list()).toHaveLength(3);
+    // Annulation explicite : retiré tout de suite.
+    expect((await ctx.json(`${ctx.base}/wait/leave`, 'POST', { ticket: gone.ticket })).status).toBe(200);
+    expect((await ctx.list()).map((w) => w.name)).toEqual(['Silencieux', 'Patiente']);
+    // Plus de nouvelles depuis 90 secondes : retiré ; celui qui continue de demander reste.
+    ctx.clock.now = new Date(ctx.clock.now.getTime() + 60_000);
+    expect((await ctx.poll(stay.ticket)).status).toBe(200);
+    ctx.clock.now = new Date(ctx.clock.now.getTime() + 40_000);
+    expect((await ctx.list()).map((w) => w.name)).toEqual(['Patiente']);
+    const expired = await ctx.poll(quiet.ticket);
+    expect(expired.status).toBe(404);
+    expect(((await expired.json()) as { code: string }).code).toBe('wait_expired');
+    // Un ticket ne vaut que pour sa salle.
+    const other = (await (await ctx.admin('/api/video/rooms', 'POST', {})).json()) as VideoRoom;
+    expect((await ctx.json(`/api/public/video/rooms/${slugOf(other)}/wait`, 'POST', { ticket: stay.ticket })).status).toBe(404);
+    expect((await ctx.json(`${ctx.base}/wait`, 'POST', {})).status).toBe(404);
+  });
+
+  it('n’admet pas au-delà des places, et libère la place d’un admis qui ne vient pas', async () => {
+    const ctx = await waitingSetup();
+    await ctx.admin('/api/video/settings', 'PUT', { maxParticipants: 2 });
+    const a = await ctx.ask('Un');
+    await ctx.ask('Deux');
+    const [w1, w2] = await ctx.list();
+    expect((await ctx.admin(`/api/video/by-slug/${ctx.slug}/admit`, 'POST', { id: w1.id })).status).toBe(200);
+    const full = await ctx.admin(`/api/video/by-slug/${ctx.slug}/admit`, 'POST', { id: w2.id });
+    expect(full.status).toBe(409);
+    expect(((await full.json()) as { code: string }).code).toBe('full');
+    // Le second attend toujours ; le premier ne vient jamais chercher son jeton : sa place se libère.
+    expect((await ctx.list()).map((w) => w.name)).toEqual(['Deux']);
+    ctx.clock.now = new Date(ctx.clock.now.getTime() + 80_000);
+    expect((await ctx.poll((await ctx.ask('Trois')).ticket)).status).toBe(200);
+    ctx.clock.now = new Date(ctx.clock.now.getTime() + 45_000);
+    expect((await ctx.poll(a.ticket)).status).toBe(404);
+    const [w3] = await ctx.list();
+    expect(w3.name).toBe('Trois');
+    expect((await ctx.admin(`/api/video/by-slug/${ctx.slug}/admit`, 'POST', { id: w3.id })).status).toBe(200);
+  });
+
+  it('ne laisse pas une même adresse remplir la file : sa demande la plus ancienne cède', async () => {
+    const ctx = await waitingSetup();
+    const first = await ctx.ask('Un', '198.51.100.7');
+    await ctx.ask('Autre invité');
+    await ctx.ask('Deux', '198.51.100.7');
+    await ctx.ask('Trois', '198.51.100.7');
+    await ctx.ask('Quatre', '198.51.100.7');
+    expect((await ctx.list()).map((w) => w.name)).toEqual(['Autre invité', 'Deux', 'Trois', 'Quatre']);
+    expect((await ctx.poll(first.ticket)).status).toBe(404);
+  });
+
+  it('borne la file, et la vide quand la salle ferme', async () => {
+    const ctx = await waitingSetup();
+    const first = await ctx.ask('Invité 0');
+    for (let i = 1; i < 12; i++) await ctx.ask(`Invité ${i}`);
+    const over = await ctx.askRaw('De trop');
+    expect(over.status).toBe(429);
+    expect(((await over.json()) as { code: string }).code).toBe('wait_full');
+    // Salle supprimée : la file se vide et l'invité apprend que la visio est fermée.
+    const last = await ctx.ask('Dernier', '203.0.113.1');
+    await ctx.admin(`/api/video/rooms/${ctx.room.id}`, 'DELETE');
+    expect((await ctx.poll(last.ticket)).status).toBe(410);
+    expect((await ctx.admin(`/api/video/by-slug/${ctx.slug}/admit`, 'POST', { id: 'invite-000000000000' })).status).toBe(410);
+  });
+
+  it('dit à l’invité que l’hôte est déjà dans la salle', async () => {
+    const ctx = await waitingSetup();
+    ctx.fake.rooms.set(ctx.lk, { max: 8, participants: [{ identity: 'host', name: 'Antoine Quarroz' }] });
+    expect((await ctx.ask('Élodie')).hostPresent).toBe(true);
+    ctx.fake.state.up = false;
+    const fresh = await waitingSetup();
+    fresh.fake.state.up = false;
+    expect((await fresh.ask('Élodie')).hostPresent).toBeNull();
   });
 });
 

@@ -6,14 +6,17 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import { createApp } from './app.js';
 import { BookingService } from './booking/service.js';
 import { CaldavSync } from './caldav.js';
+import { settings as compteSettings } from './compte.js';
 import { allowPrivateHosts, config, connectionEnv, secretKeyEnv, videoEnv } from './config.js';
 import { ConnectionsService } from './connections.js';
 import { openDb } from './db.js';
 import { PaymentsService } from './payments/service.js';
+import { PeopleService } from './people.js';
 import { SecretBox } from './secrets.js';
 import { hashPassword } from './password.js';
 import { CalendarService } from './service.js';
 import { Store } from './store.js';
+import { PushService } from './push/service.js';
 import { VideoService } from './video/service.js';
 
 let passwordHash = config.passwordHash;
@@ -43,10 +46,12 @@ const mailer = connections.mailer;
 // La visio et la prise de rendez-vous se connaissent : une salle de rendez-vous suit sa réservation,
 // et une réservation « En visio » reçoit le lien d'une salle.
 let bookingRef: BookingService | null = null;
+let pushRef: PushService | null = null;
 const video = new VideoService({
   db: store.db, server: videoEnv, publicUrl: config.publicUrl, timezone: config.timezone,
   hostName: () => bookingRef?.getSettings().publicName ?? config.mail.from.name,
   bookingLink: (id) => bookingRef?.videoLink(id) ?? null,
+  onGuestJoin: (room, name, waiting) => void pushRef?.guestArrived(room, name, waiting).catch((err) => console.error('[alfred] notifications :', err)),
 });
 const payments = new PaymentsService({ db: store.db, secrets, pendingCount: () => bookingRef?.pendingPayments() ?? 0 });
 const booking = new BookingService({
@@ -55,9 +60,18 @@ const booking = new BookingService({
   publicUrl: config.publicUrl, defaultPublicName: config.mail.from.name,
 });
 bookingRef = booking;
+// Notifications sur les appareils d'Antoine (iPhone, Mac) : nouveaux rendez-vous, rappels, invités en visio.
+const push = new PushService({
+  db: store.db, store, publicUrl: config.publicUrl, timezone: config.timezone,
+  bookingVideoUrl: (id) => video.urlForBooking(id),
+});
+pushRef = push;
 connections.mailContext = () => ({ publicName: booking.getSettings().publicName, timezone: config.timezone, publicUrl: config.publicUrl });
+const people = new PeopleService({ db: store.db, store, booking, cairnUrl: config.cairnUrl });
+// Compte Postmelo : actif seulement avec COMPTE_URL et COMPTE_CLIENT_SECRET. L'adresse de retour est celle d'Alfred.
+const compte = compteSettings({ ...process.env, APP_URL: process.env.APP_URL?.trim() || config.publicUrl });
 const app = createApp({
-  store, service, caldav, passwordHash, booking, connections, video, payments,
+  store, service, caldav, passwordHash, booking, connections, video, push, people, compte, payments,
   secureCookies: config.production,
   sessionDays: config.sessionDays,
 });
@@ -86,6 +100,7 @@ serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => 
 
 // La synchro régulière tourne toujours : elle ne fait rien tant qu'aucun identifiant n'est en place.
 void caldav.sync();
+push.start();
 setInterval(() => void caldav.sync(), config.caldav.syncIntervalSeconds * 1000).unref();
 // Rappels aux clients avant leurs rendez-vous : un passage par minute (rien ne part sans SMTP ni rappel réglé).
 setTimeout(() => void booking.sendDueReminders(), 30_000).unref();
@@ -107,6 +122,8 @@ console.log(video.configured
 console.log(payments.configured
   ? `[alfred] paiement en ligne : Stripe (${payments.state().mode === 'live' ? 'mode réel' : 'mode test'}), ${payments.paymentMethods.join(' + ')}`
   : '[alfred] paiement en ligne non configuré (réglable dans l’app : Rendez-vous > Réglages)');
+if (compte) console.log(`[alfred] connexion par le Compte Postmelo active (${compte.issuer}, retour ${compte.redirectUri})`);
+else if (process.env.COMPTE_URL?.trim()) console.warn('[alfred] COMPTE_URL est réglé mais la connexion par le Compte Postmelo reste inactive : COMPTE_CLIENT_SECRET manque ou fait moins de 32 caractères');
 for (const notice of connectionsState.notices) console.warn(`[alfred] ${notice}`);
 // Un réglage de l'app passe avant le .env : le dire, pour qui modifie le .env et ne voit aucun effet.
 if (connectionEnv.caldav.password && connectionsState.caldav.password.source === 'app') {

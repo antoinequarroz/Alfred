@@ -239,3 +239,13 @@ export function FlipIcon() {
     </svg>
   );
 }
+
+export function BlurIcon() {
+  return (
+    <svg {...base}>
+      <circle cx="8" cy="6" r="2.25" />
+      <path d="M3.75 13.25c.5-2.1 2.2-3.5 4.25-3.5s3.75 1.4 4.25 3.5" />
+      <path d="M2 3.5h.01M2 7h.01M4.25 1.75h.01M14 3.5h.01M14 7h.01M11.75 1.75h.01M2 10.5h.01M14 10.5h.01" />
+    </svg>
+  );
+}
