@@ -95,6 +95,9 @@ serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => 
 void caldav.sync();
 push.start();
 setInterval(() => void caldav.sync(), config.caldav.syncIntervalSeconds * 1000).unref();
+// Rappels aux clients avant leurs rendez-vous : un passage par minute (rien ne part sans SMTP ni rappel réglé).
+setTimeout(() => void booking.sendDueReminders(), 30_000).unref();
+setInterval(() => void booking.sendDueReminders(), 60_000).unref();
 const SOURCES = { app: 'réglés dans l’app', env: 'du fichier .env', default: 'par défaut', none: 'absents' } as const;
 console.log(caldav.configured
   ? `[alfred] synchro CalDAV toutes les ${config.caldav.syncIntervalSeconds} s avec ${connectionsState.caldav.url.value} (identifiants ${SOURCES[connectionsState.caldav.password.source]})`

@@ -159,3 +159,19 @@
 .vc-admit-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14.5px; font-weight: 500; }
 .vc-admit .btn.small:not(.primary) { background: rgba(255, 255, 255, 0.1); border-color: transparent; color: #e8eaf2; padding-inline: 8px; }
 .vc-admit .btn svg { width: 14px; height: 14px; }
+
+/* Choix de l'arrière-plan (flou, fonds, image importée) : panneau au-dessus du bouton. */
+.vc-bg { position: relative; display: inline-flex; }
+.vc-bg-panel { position: fixed; z-index: 30; overflow: auto; padding: 12px; border-radius: 14px; background: rgba(20, 23, 34, 0.96); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.14); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45); color: #e8eaf2; text-align: left; }
+.vc-bg-title { margin: 0 0 8px; font-size: 13px; font-weight: 600; color: #cfd2dc; }
+.vc-bg-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.vc-bg-opt { display: grid; gap: 4px; padding: 0; border: 0; background: none; color: #cfd2dc; font: inherit; font-size: 11.5px; text-align: center; cursor: pointer; }
+.vc-bg-opt:disabled { opacity: 0.6; cursor: default; }
+.vc-bg-thumb { display: grid; place-items: center; aspect-ratio: 16 / 10; border-radius: 8px; background: rgba(255, 255, 255, 0.1) center / cover no-repeat; outline: 2px solid transparent; outline-offset: 1px; font-size: 20px; color: #e8eaf2; }
+.vc-bg-thumb svg { width: 18px; height: 18px; }
+.vc-bg-thumb.blur { background: linear-gradient(135deg, #5a6078, #2c3042); }
+.vc-bg-thumb.add { border: 1px dashed rgba(255, 255, 255, 0.35); background: none; }
+.vc-bg-opt:hover .vc-bg-thumb { outline-color: rgba(255, 255, 255, 0.35); }
+.vc-bg-opt.sel .vc-bg-thumb { outline-color: var(--accent); }
+.vc-bg-opt.sel { color: #fff; }
+.vc-bg-note { margin: 10px 0 0; font-size: 11.5px; line-height: 1.4; color: #9da2b3; }

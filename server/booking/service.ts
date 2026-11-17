@@ -1,18 +1,19 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { newUid, type BusyOccurrence } from '../ics.js';
-import type {
-  Booking, BookingAdminState, BookingConfirmation, BookingHoursRange, BookingMode, BookingSettings, BookingType,
-  PublicBooking, PublicBookingInfo, PublicBookingType, PublicSlots,
+import { expand, newUid, type BusyOccurrence } from '../ics.js';
+import {
+  CHANGE_NOTICE_CHOICES, REMINDER_HOURS_CHOICES,
+  type Booking, type BookingAdminState, type BookingConfirmation, type BookingHoursRange, type BookingMode, type BookingSettings,
+  type BookingType, type PublicBooking, type PublicBookingInfo, type PublicBookingType, type PublicSlots,
 } from '../../shared/types.js';
 import { ConflictError, type CaldavSync } from '../caldav.js';
 import { ForbiddenError, NotFoundError, type CalendarService } from '../service.js';
 import type { Store } from '../store.js';
 import {
-  cancelUrlFor, clientCancellation, clientConfirmation, createDisabledMailer, ownerCancellation, ownerNotification,
-  type BookingMailData, type Mailer, type MailContext, type MailMessage,
+  cancelUrlFor, clientCancellation, clientConfirmation, clientReminder, clientRescheduled, createDisabledMailer, formatWhen,
+  ownerCancellation, ownerNotification, ownerRescheduled, type BookingMailData, type Mailer, type MailContext, type MailMessage,
 } from './mail.js';
 import { addDays, computeSlotDays, isDateString, localDateOf, startOfLocalDay, type BusyEvent, type SlotDay } from './slots.js';
-import { BookingStore, type BookingRow } from './store.js';
+import { BookingStore, parseReminderHours, type BookingRow } from './store.js';
 
 /** Erreur métier de la prise de rendez-vous : statut HTTP, code stable, message affichable. */
 export class BookingError extends Error {
@@ -64,9 +65,12 @@ export interface BookingOptions {
   mailDailyLimit?: number;
   /** Une annulation par le client dans ce délai après la réservation n'envoie pas d'e-mail au client. */
   quietCancelMinutes?: number;
+  /** Nombre maximal de déplacements faits par le client lui-même, pour un même rendez-vous. */
+  maxClientReschedules?: number;
 }
 
 const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
 /** Étendue maximale d'une demande de créneaux, en jours (un mois affiché, semaines entières comprises). */
 export const MAX_RANGE_DAYS = 42;
 const WEEKDAY_NAMES = ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche'];
@@ -160,6 +164,9 @@ export class BookingService {
   private readonly mailTimeoutMs: number;
   private readonly mailDailyLimit: number;
   private readonly quietCancelMs: number;
+  private readonly maxClientReschedules: number;
+  /** Vrai pendant un passage des rappels : deux passages ne se chevauchent jamais. */
+  private remindersRunning = false;
   private readonly video: BookingVideo | null;
   private chain: Promise<unknown> = Promise.resolve();
   private waiting = 0;
@@ -189,6 +196,7 @@ export class BookingService {
     this.mailTimeoutMs = opts.mailTimeoutMs ?? 60_000;
     this.mailDailyLimit = opts.mailDailyLimit ?? 200;
     this.quietCancelMs = (opts.quietCancelMinutes ?? 15) * 60_000;
+    this.maxClientReschedules = opts.maxClientReschedules ?? 3;
   }
 
   /** Section critique : une seule réservation ou annulation à la fois. */
@@ -207,7 +215,8 @@ export class BookingService {
   }
 
   private mailContext(): MailContext {
-    return { publicName: this.getSettings().publicName, timezone: this.timezone, publicUrl: this.publicUrl };
+    const s = this.getSettings();
+    return { publicName: s.publicName, timezone: this.timezone, publicUrl: this.publicUrl, allowReschedule: s.allowReschedule };
   }
 
   // --- réglages ------------------------------------------------------------
@@ -248,6 +257,21 @@ export class BookingService {
     if ('allDayBlocks' in body) {
       if (typeof body.allDayBlocks === 'boolean') next.allDayBlocks = body.allDayBlocks;
       else fields.allDayBlocks = 'Valeur attendue : vrai ou faux';
+    }
+    if ('reminderHours' in body) {
+      const list = body.reminderHours;
+      const choices = REMINDER_HOURS_CHOICES as readonly number[];
+      if (Array.isArray(list) && list.length <= choices.length && list.every((h) => choices.includes(h as number))) {
+        next.reminderHours = choices.filter((h) => list.includes(h));
+      } else fields.reminderHours = `Rappels : choisis parmi ${choices.join(', ')} heures avant`;
+    }
+    if ('allowReschedule' in body) {
+      if (typeof body.allowReschedule === 'boolean') next.allowReschedule = body.allowReschedule;
+      else fields.allowReschedule = 'Valeur attendue : vrai ou faux';
+    }
+    if ('changeNoticeHours' in body) {
+      if ((CHANGE_NOTICE_CHOICES as readonly unknown[]).includes(body.changeNoticeHours)) next.changeNoticeHours = body.changeNoticeHours as number;
+      else fields.changeNoticeHours = `Délai : ${CHANGE_NOTICE_CHOICES.join(', ')} heures`;
     }
     if (Object.keys(fields).length > 0) throw invalid(fields);
     this.data.saveSettings(next);
@@ -463,6 +487,8 @@ export class BookingService {
       const start = new Date(ev.startMs).toISOString();
       const known = b.notified_start ?? b.start_utc;
       this.data.reschedule(b.id, start, new Date(ev.endMs).toISOString(), Date.parse(known) === ev.startMs ? null : known);
+      // Nouvel horaire : les rappels repartent pour lui. Ceux dont le moment est déjà passé ne partent pas.
+      this.data.resetReminders(b.id, this.now().toISOString());
     }
     this.reconciledVersion = this.store.version;
   }
@@ -505,8 +531,11 @@ export class BookingService {
     return allDayBlocks ? list.map((o) => (o.allDay && o.transparent ? { ...o, transparent: false } : o)) : list;
   }
 
-  /** Créneaux libres d'un type entre deux jours locaux inclus. Ne lit que des horaires, jamais de détail d'événement. */
-  slotDays(type: BookingType, from: string, to: string): SlotDay[] {
+  /**
+   * Créneaux libres d'un type entre deux jours locaux inclus. Ne lit que des horaires, jamais de détail d'événement.
+   * exclude : réservation à déplacer ; son propre horaire (et son événement) ne bloque pas.
+   */
+  slotDays(type: BookingType, from: string, to: string, exclude?: BookingRow): SlotDay[] {
     const now = this.now();
     const today = localDateOf(now.getTime(), this.timezone);
     // Inutile de développer l'agenda hors de ce qui est réservable.
@@ -517,9 +546,18 @@ export class BookingService {
     this.reconcile();
     const fromMs = startOfLocalDay(first, this.timezone) - DAY_MS;
     const toMs = startOfLocalDay(addDays(last, 1), this.timezone) + DAY_MS;
-    const busy: BusyEvent[] = [...this.agendaBusy(fromMs, toMs)];
+    let agenda = this.agendaBusy(fromMs, toMs);
+    if (exclude) {
+      // L'événement de la réservation déplacée : une seule occurrence, exactement à son horaire.
+      const startMs = Date.parse(exclude.start_utc);
+      const endMs = Date.parse(exclude.end_utc);
+      const own = agenda.findIndex((o) => !o.allDay && Date.parse(o.start) === startMs && Date.parse(o.end) === endMs);
+      if (own >= 0) agenda = [...agenda.slice(0, own), ...agenda.slice(own + 1)];
+    }
+    const busy: BusyEvent[] = [...agenda];
     // Les réservations bloquent même si l'événement n'est pas (encore) dans la copie locale.
     for (const b of this.data.confirmedBetween(new Date(fromMs).toISOString(), new Date(toMs).toISOString())) {
+      if (b.id === exclude?.id) continue;
       busy.push({ start: b.start_utc, end: b.end_utc, bufferBeforeMin: b.buffer_before_min, bufferAfterMin: b.buffer_after_min });
     }
     return computeSlotDays({
@@ -581,18 +619,68 @@ export class BookingService {
     return { timezone: this.timezone, durationMin: type.durationMin, days: this.slotDays(type, a, b) };
   }
 
-  private toPublicBooking(b: BookingRow): PublicBooking {
+  /** Dernier instant où le client peut annuler ou déplacer en ligne. */
+  private changeUntilMs(b: BookingRow, settings = this.getSettings()): number {
+    return Date.parse(b.start_utc) - settings.changeNoticeHours * HOUR_MS;
+  }
+
+  /**
+   * Type à utiliser pour proposer d'autres créneaux à une réservation : celui d'origine, avec la
+   * durée et les tampons de la réservation (le type a pu changer depuis). null s'il n'existe plus.
+   */
+  private rescheduleType(b: BookingRow): BookingType | null {
+    const type = b.type_id ? this.data.getType(b.type_id) : undefined;
+    if (!type) return null;
     return {
-      typeName: b.type_name, start: b.start_utc, end: b.end_utc, timezone: this.timezone, locationLabel: b.location,
-      name: b.name, status: b.status, videoUrl: b.status === 'confirmed' ? (this.video?.urlForBooking(b.id) ?? null) : null,
-      cancellable: b.status === 'confirmed' && Date.parse(b.start_utc) > this.now().getTime(),
+      ...type,
+      durationMin: Math.round((Date.parse(b.end_utc) - Date.parse(b.start_utc)) / 60_000),
+      bufferBeforeMin: b.buffer_before_min,
+      bufferAfterMin: b.buffer_after_min,
     };
   }
 
-  private isFree(type: BookingType, startMs: number): boolean {
+  /** Raison pour laquelle le client ne peut pas déplacer ce rendez-vous lui-même, ou null s'il le peut. */
+  private rescheduleRefusal(b: BookingRow, settings = this.getSettings()): BookingError | null {
+    if (b.status !== 'confirmed') return new BookingError(404, 'not_found', 'Ce lien n’est plus valable : rendez-vous introuvable ou déjà annulé.');
+    if (!settings.allowReschedule || !settings.enabled) {
+      return new BookingError(403, 'reschedule_disabled', 'Ce rendez-vous ne peut pas être déplacé en ligne. Contactez-nous pour convenir d’un autre horaire.');
+    }
+    if (this.now().getTime() >= this.changeUntilMs(b, settings)) return this.tooLate(settings, 'déplacé');
+    if ((b.client_reschedules ?? 0) >= this.maxClientReschedules) {
+      return new BookingError(409, 'too_many_changes', 'Ce rendez-vous a déjà été déplacé plusieurs fois : contactez-nous pour en changer encore.');
+    }
+    if (!this.rescheduleType(b)) {
+      return new BookingError(409, 'not_reschedulable', 'Ce rendez-vous ne peut pas être déplacé en ligne. Contactez-nous pour convenir d’un autre horaire.');
+    }
+    return null;
+  }
+
+  private tooLate(settings: BookingSettings, verb: 'annulé' | 'déplacé'): BookingError {
+    return new BookingError(409, 'too_late', settings.changeNoticeHours > 0
+      ? `Ce rendez-vous est dans moins de ${settings.changeNoticeHours} heure${settings.changeNoticeHours > 1 ? 's' : ''} : il ne peut plus être ${verb} en ligne. Contactez-nous directement.`
+      : `Ce rendez-vous a déjà commencé ou est passé : il ne peut plus être ${verb} en ligne.`);
+  }
+
+  private toPublicBooking(b: BookingRow): PublicBooking {
+    const settings = this.getSettings();
+    const type = b.type_id ? this.data.getType(b.type_id) : undefined;
+    const changeUntil = this.changeUntilMs(b, settings);
+    return {
+      typeName: b.type_name, start: b.start_utc, end: b.end_utc, timezone: this.timezone, locationLabel: b.location,
+      name: b.name, status: b.status, videoUrl: b.status === 'confirmed' ? (this.video?.urlForBooking(b.id) ?? null) : null,
+      cancellable: b.status === 'confirmed' && this.now().getTime() < changeUntil,
+      reschedulable: this.rescheduleRefusal(b, settings) === null,
+      changeUntil: new Date(changeUntil).toISOString(),
+      mode: type?.mode ?? 'autre',
+      durationMin: Math.round((Date.parse(b.end_utc) - Date.parse(b.start_utc)) / 60_000),
+      horizonDays: type?.horizonDays ?? 0,
+    };
+  }
+
+  private isFree(type: BookingType, startMs: number, exclude?: BookingRow): boolean {
     const day = localDateOf(startMs, this.timezone);
     const iso = new Date(startMs).toISOString();
-    return this.slotDays(type, day, day).some((d) => d.slots.includes(iso));
+    return this.slotDays(type, day, day, exclude).some((d) => d.slots.includes(iso));
   }
 
   /** Synchro fraîche avant de confirmer, au mieux : on n'attend pas iCloud au-delà du délai. */
@@ -745,6 +833,7 @@ export class BookingService {
       id: b.id, typeName: b.type_name, location: b.location, start: b.start_utc, end: b.end_utc,
       name: b.name, email: b.email, phone: b.phone, message: b.message,
       videoUrl: b.status === 'confirmed' ? (this.video?.urlForBooking(b.id) ?? null) : null,
+      sequence: b.client_reschedules ?? 0,
     };
   }
 
@@ -818,15 +907,162 @@ export class BookingService {
   /** Annulation par le client, depuis le lien reçu par e-mail. emailSent : un e-mail lui confirme l'annulation. */
   async cancelByToken(token: string): Promise<PublicBooking> {
     const row = this.byToken(token);
-    if (Date.parse(row.start_utc) <= this.now().getTime()) {
-      throw new BookingError(409, 'too_late', 'Ce rendez-vous a déjà commencé ou est passé : il ne peut plus être annulé en ligne.');
-    }
+    const settings = this.getSettings();
+    if (this.now().getTime() >= this.changeUntilMs(row, settings)) throw this.tooLate(settings, 'annulé');
     // Annulation aussitôt après la réservation : le client a le résultat sous les yeux, et un
     // aller-retour réserver/annuler ne doit pas doubler les e-mails envoyés à une adresse non vérifiée.
     const quiet = this.now().getTime() - Date.parse(row.created_at) < this.quietCancelMs;
     const cancelled = await this.cancel(row.id, 'client', !quiet);
     if (!cancelled) throw new BookingError(404, 'not_found', 'Ce lien n’est plus valable : rendez-vous introuvable ou déjà annulé.');
     return { ...this.toPublicBooking(cancelled.row), emailSent: cancelled.clientSent };
+  }
+
+  /** Créneaux proposés au client pour déplacer son rendez-vous : son horaire actuel ne bloque pas, et n'est pas proposé. */
+  manageSlots(token: string, from: unknown, to: unknown): PublicSlots {
+    const row = this.byToken(token);
+    const refusal = this.rescheduleRefusal(row);
+    if (refusal) throw refusal;
+    const type = this.rescheduleType(row)!;
+    const [a, b] = this.parseRange(from, to);
+    const current = Date.parse(row.start_utc);
+    const days = this.slotDays(type, a, b, row)
+      .map((d) => ({ ...d, slots: d.slots.filter((iso) => Date.parse(iso) !== current) }))
+      .filter((d) => d.slots.length > 0);
+    return { timezone: this.timezone, durationMin: type.durationMin, days };
+  }
+
+  /**
+   * Déplacement par le client, depuis le lien de ses e-mails : l'événement est déplacé dans le
+   * calendrier (même UID, la visio suit), la réservation prend le nouvel horaire, les rappels
+   * repartent pour lui, et le client comme Antoine sont prévenus. Même contrôles que la réservation.
+   */
+  async rescheduleByToken(token: string, body: unknown): Promise<PublicBooking> {
+    const row = this.byToken(token);
+    const refusal = this.rescheduleRefusal(row);
+    if (refusal) throw refusal;
+    const startMs = isObject(body) && typeof body.start === 'string' && body.start.length <= 40 && ISO_RE.test(body.start) ? Date.parse(body.start) : NaN;
+    if (Number.isNaN(startMs)) throw invalid({ start: 'Créneau invalide' });
+    const same = () => new BookingError(400, 'same_slot', 'C’est déjà l’horaire de votre rendez-vous. Choisissez un autre créneau.');
+    const taken = () => new BookingError(409, 'slot_unavailable', 'Ce créneau n’est plus disponible. Choisissez-en un autre.');
+    if (startMs === Date.parse(row.start_utc)) throw same();
+    if (!this.isFree(this.rescheduleType(row)!, startMs, row)) throw taken();
+
+    await this.freshSync();
+    const moved = await this.locked(async () => {
+      // Tout a pu changer pendant la synchro et l'attente du verrou : tout est relu.
+      this.reconcile();
+      const current = this.data.getBooking(row.id);
+      if (!current || current.status !== 'confirmed') throw new BookingError(404, 'not_found', 'Ce lien n’est plus valable : rendez-vous introuvable ou déjà annulé.');
+      const again = this.rescheduleRefusal(current);
+      if (again) throw again;
+      const type = this.rescheduleType(current)!;
+      if (startMs === Date.parse(current.start_utc)) throw same();
+      if (!this.isFree(type, startMs, current)) throw taken();
+      const previous = { start: current.start_utc, end: current.end_utc };
+      const start = new Date(startMs).toISOString();
+      const end = new Date(startMs + type.durationMin * 60_000).toISOString();
+      await this.moveEvent(current, start, end);
+      this.data.rescheduleByClient(current.id, start, end, this.now().toISOString());
+      return { row: this.data.getBooking(current.id)!, previous };
+    });
+
+    // Le lien que le client vient d'utiliser reste le sien : il est repris dans l'e-mail.
+    const ctx = this.mailContext();
+    const data = this.mailData(moved.row);
+    const [clientSent] = await this.sendMails(moved.row.id, [
+      ['Avis de déplacement au client', clientRescheduled(data, ctx, cancelUrlFor(this.publicUrl, token), moved.previous)],
+      ['Avis de déplacement', ownerRescheduled(data, ctx, this.mailer.notifyTo, moved.previous)],
+    ]);
+    return { ...this.toPublicBooking(moved.row), emailSent: clientSent };
+  }
+
+  /** Déplace l'événement d'une réservation dans le calendrier, en gardant son titre, son lieu et son UID. */
+  private async moveEvent(b: BookingRow, start: string, end: string): Promise<void> {
+    const cannot = () => new BookingError(409, 'not_reschedulable', 'Ce rendez-vous ne peut pas être déplacé en ligne. Contactez-nous pour convenir d’un autre horaire.');
+    const unavailable = () => new BookingError(502, 'calendar_unavailable', 'Le déplacement est momentanément impossible. Réessayez plus tard.');
+    for (let attempt = 0; attempt < 2; attempt++) {
+      // Événement supprimé de l'agenda (la réservation est alors signalée dans l'admin) : Antoine décide.
+      const linked = this.linkedEvent(b);
+      const ev = linked ? this.store.getEvent(linked.id) : undefined;
+      if (!linked || !ev) throw cannot();
+      const occurrence = expand(ev.ics, new Date(linked.startMs - DAY_MS), new Date(linked.endMs + DAY_MS))[0];
+      if (!occurrence || occurrence.recurring) throw cannot();
+      const note = `Déplacé en ligne par le client (horaire précédent : ${formatWhen(b.start_utc, b.end_utc, this.timezone)}).`;
+      const description = [occurrence.description.trim(), note].filter(Boolean).join('\n');
+      try {
+        const updating = this.calendar.update(linked.id, {
+          calendarId: ev.calendar_id, title: occurrence.title, start, end, allDay: false, location: occurrence.location, description,
+        }, 'all', null);
+        if ((await withTimeout(updating, this.calendarTimeoutMs)) === TIMED_OUT) {
+          // S'il aboutit plus tard, le rapprochement verra l'événement déplacé et le signalera dans l'admin.
+          console.error('[alfred] déplacement : le calendrier ne répond pas, demande abandonnée');
+          updating.catch(() => undefined);
+          throw unavailable();
+        }
+        return;
+      } catch (err) {
+        if (err instanceof BookingError) throw err;
+        // Modifié ailleurs : la version du serveur vient d'être rechargée, on réessaie une fois.
+        if (err instanceof ConflictError && attempt === 0) continue;
+        if (err instanceof NotFoundError || err instanceof ForbiddenError) throw cannot();
+        console.error('[alfred] déplacement : modification de l’événement en échec :', err);
+        throw unavailable();
+      }
+    }
+    throw unavailable();
+  }
+
+  // --- rappels -------------------------------------------------------------
+
+  /**
+   * Envoie les rappels arrivés à échéance ; appelé chaque minute. Un rappel :
+   * - ne part qu'une fois par horaire (noté avant l'envoi : au pire perdu, jamais doublé) ;
+   * - ne part que si le client connaissait déjà l'horaire à son moment (pas de rappel « 24 h avant »
+   *   pour un rendez-vous pris ou déplacé 3 heures avant) ;
+   * - un seul message part quand plusieurs rappels sont dus ensemble (Alfred arrêté entre-temps).
+   * Renvoie le nombre de rappels partis. Ne rejette jamais.
+   */
+  async sendDueReminders(): Promise<number> {
+    if (this.remindersRunning) return 0;
+    const settings = this.getSettings();
+    const hours = settings.reminderHours;
+    // Sans envoi possible, rien n'est noté : les rappels encore à temps partiront une fois l'envoi configuré.
+    if (hours.length === 0 || !this.mailer.configured) return 0;
+    this.remindersRunning = true;
+    let count = 0;
+    try {
+      this.reconcile();
+      const nowMs = this.now().getTime();
+      const horizon = new Date(nowMs + Math.max(...hours) * HOUR_MS).toISOString();
+      for (const row of this.data.confirmedStartingBetween(new Date(nowMs).toISOString(), horizon)) {
+        const startMs = Date.parse(row.start_utc);
+        const knownSince = Date.parse(row.reminder_ref ?? row.created_at);
+        const sent = parseReminderHours(row.reminders_sent);
+        const opened = hours.filter((h) => nowMs >= startMs - h * HOUR_MS);
+        const due = opened.filter((h) => !sent.includes(h) && knownSince < startMs - h * HOUR_MS);
+        if (due.length === 0) continue;
+        // Événement retiré de l'agenda sans annuler la réservation : pas de rappel, Antoine décide.
+        if (!this.linkedEvent(row)) continue;
+        this.data.setRemindersSent(row.id, [...new Set([...sent, ...opened])]);
+        const token = randomBytes(32).toString('base64url');
+        this.data.addToken(row.id, hashToken(token), new Date(nowMs).toISOString());
+        const moved = row.notified_start !== null && row.notified_start !== row.start_utc;
+        const message = clientReminder(this.mailData(row), this.mailContext(), cancelUrlFor(this.publicUrl, token), {
+          nowMs, moved, canChange: nowMs < this.changeUntilMs(row, settings),
+        });
+        const [ok] = await this.dispatch(row.id, [['Rappel au client', message]]);
+        if (!ok) continue;
+        count++;
+        // Le rappel annonçait l'horaire actuel : le client le connaît désormais.
+        const current = this.data.getBooking(row.id);
+        if (moved && current?.start_utc === row.start_utc) this.data.setNotifiedStart(row.id, null);
+      }
+    } catch (err) {
+      console.error('[alfred] rappels : passage interrompu :', err);
+    } finally {
+      this.remindersRunning = false;
+    }
+    return count;
   }
 
   /**
@@ -913,6 +1149,8 @@ export class BookingService {
       cancelledAt: b.cancelled_at, cancelledBy: b.cancelled_by, eventId: b.event_id, calendarId: b.calendar_id,
       eventState, eventStart, eventEnd, notifiedStart, mailError: b.mail_error,
       videoUrl: b.status === 'confirmed' ? (this.video?.urlForBooking(b.id) ?? null) : null,
+      remindersSent: (REMINDER_HOURS_CHOICES as readonly number[]).filter((h) => parseReminderHours(b.reminders_sent).includes(h)),
+      clientReschedules: b.client_reschedules ?? 0,
     };
   }
 
