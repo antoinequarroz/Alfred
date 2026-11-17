@@ -387,6 +387,21 @@ a.btn { text-decoration: none; color: inherit; }
 .bk-option { display: flex; flex-direction: column; gap: 4px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
 .bk-option .check { height: auto; min-height: 28px; }
 .bk-option .bk-hint { max-width: 64ch; }
+.bk-words { display: flex; gap: 8px; }
+.bk-words input { flex: 1; min-width: 0; }
+.bk-allday-title { font-size: 13.5px; font-weight: 600; }
+.bk-allday { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; }
+.bk-allday li { display: grid; grid-template-columns: 11em minmax(0, 1fr); gap: 2px 12px; align-items: baseline; padding: 7px 0; font-size: 13px; }
+.bk-allday li + li { border-top: 1px solid var(--line-soft); }
+.bk-allday-when { color: var(--muted); font-variant-numeric: tabular-nums; }
+.bk-allday-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bk-allday-why { grid-column: 2; font-size: 12px; color: var(--muted); }
+.bk-allday li.blocks .bk-allday-why { color: var(--danger, #e5484d); }
+.bk-allday li.free .bk-allday-name { color: var(--muted); }
+@media (max-width: 640px) {
+  .bk-allday li { grid-template-columns: minmax(0, 1fr); }
+  .bk-allday-why { grid-column: 1; }
+}
 .bk-checks { display: flex; flex-wrap: wrap; gap: 2px 18px; }
 .bk-reminders { display: flex; flex-direction: column; gap: 6px; }
 .bk-notice select { max-width: 320px; }
