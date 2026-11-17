@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../server/app.js';
 import { settings } from '../server/compte.js';
@@ -7,6 +8,8 @@ import { CalendarService } from '../server/service.js';
 import { Store } from '../server/store.js';
 
 const ISSUER = 'https://compte.test/api/auth';
+/** Mot de passe de secours, tiré au sort à chaque lancement. */
+const BACKUP = randomUUID();
 const compte = settings({
   COMPTE_URL: 'https://compte.test',
   COMPTE_CLIENT_ID: 'alfred',
@@ -47,7 +50,7 @@ async function setup(allowed: string[] = [], withCompte = true, s = compte) {
     store,
     service: new CalendarService(store, null, 'Europe/Zurich'),
     caldav: null,
-    passwordHash: await hashPassword('secours'),
+    passwordHash: await hashPassword(BACKUP),
     secureCookies: false,
     sessionDays: 30,
     compte: withCompte ? { settings: s, allowed } : undefined,
@@ -132,7 +135,7 @@ describe('connexion avec le compte PostMelo', () => {
     const login = await app.request('/api/login', {
       method: 'POST',
       headers: { 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
-      body: JSON.stringify({ password: 'secours' }),
+      body: JSON.stringify({ password: BACKUP }),
     });
     expect(login.status).toBe(200);
   });
