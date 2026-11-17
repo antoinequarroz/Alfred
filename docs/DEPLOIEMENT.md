@@ -109,35 +109,48 @@ Tout le reste (activer, nombre de participants, qualité) se règle dans l'app. 
 |---|---|
 | Mettre à jour | `cd /opt/alfred && git pull && bash deploy/visio.sh` (Alfred et la visio ; coupe les appels en cours). Alfred seul : `docker compose -f deploy/docker-compose.yml up -d --build alfred` |
 | Voir les journaux | `docker logs alfred --tail 100` |
-| Sauvegarder la base et la clé | `docker cp alfred:/data ./alfred-data-$(date +%F)` |
+| Sauvegarder la base et la clé (en plus de la sauvegarde quotidienne) | `bash deploy/sauvegarde.sh` |
+| Vérifier que la dernière sauvegarde se restaure | `bash deploy/restaurer.sh --essai` |
 | Arrêter | `docker compose -f deploy/docker-compose.yml down` |
 
 **La base est à sauvegarder.** Les événements ne sont qu'une copie (la référence reste iCloud) et reviennent tout seuls à la synchro suivante, mais depuis la prise de rendez-vous la base porte aussi ce qui n'existe nulle part ailleurs : les réglages, les types, les horaires et surtout les réservations (coordonnées des clients, empreintes des liens d'annulation). Si le volume est perdu, la prise de rendez-vous se referme, les types et les horaires sont à refaire, la rubrique Rendez-vous ne liste plus aucune réservation et les liens d'annulation déjà envoyés répondent « ce lien n'est plus valable ».
 
-La commande du tableau copie tout le dossier `/data` : la base et ses fichiers `-wal` et `-shm`, à garder ensemble, et le fichier de clé `secret.key` s'il existe (il apparaît au premier mot de passe enregistré dans l'app). **La clé est à sauvegarder avec la base** : sans elle, la base restaurée fonctionne, mais les mots de passe enregistrés dans l'app (boîte d'envoi, iCloud) ne se déchiffrent plus et sont à ressaisir dans Réglages ; rien d'autre n'est perdu. La copie contient donc de quoi déchiffrer ces mots de passe : la garder dans un dossier réservé (`chmod 700`). Si la clé est fournie par `ALFRED_SECRET_KEY`, c'est le `.env` qu'il faut sauvegarder avec la base. Pour une sauvegarde hebdomadaire automatique, par exemple le lundi à 3 h, ajouter avec `crontab -e` :
+La commande du tableau copie tout le dossier `/data` : la base et ses fichiers `-wal` et `-shm`, à garder ensemble, et le fichier de clé `secret.key` s'il existe (il apparaît au premier mot de passe enregistré dans l'app). **La clé est à sauvegarder avec la base** : sans elle, la base restaurée fonctionne, mais les mots de passe enregistrés dans l'app (boîte d'envoi, iCloud) ne se déchiffrent plus et sont à ressaisir dans Réglages ; rien d'autre n'est perdu. La copie contient donc de quoi déchiffrer ces mots de passe : la garder dans un dossier réservé (`chmod 700`). Si la clé est fournie par `ALFRED_SECRET_KEY`, c'est le `.env` qu'il faut sauvegarder avec la base. ### Sauvegardes automatiques
+
+[`deploy/sauvegarde.sh`](../deploy/sauvegarde.sh) fait une archive `/opt/sauvegardes/alfred/alfred-AAAA-MM-JJ_HHMM.tar.gz` (mode 600, dossier en 700) avec :
+
+- `alfred.db` : copie cohérente de la base prise à chaud (`VACUUM INTO`), sans arrêter Alfred, vérifiée par `PRAGMA integrity_check` ;
+- `secret.key` : la clé des mots de passe enregistrés dans l'app, s'il y en a une ;
+- `env` et `env.livekit` : les fichiers `.env` d'`/opt/alfred` (empreinte du mot de passe, clés de la visio) ;
+- `resume.txt` : le nombre de lignes de chaque table (RDV, types, événements…), pour voir d'un coup d'œil ce que contient la sauvegarde.
+
+La copie se fait dans un conteneur jetable de l'image `alfred:latest` (sans réseau, 128 Mo, quelques secondes), que le conteneur `alfred` tourne ou non. L'archive pèse quelques Mo. On garde 14 jours, et toujours au moins les 3 dernières ; la sauvegarde s'annule s'il reste moins de 500 Mo sur le disque. Chaque passage est noté dans `/opt/sauvegardes/alfred/sauvegarde.log`, et la date du dernier succès dans `derniere-reussie`.
 
 ```bash
-0 3 * * 1  docker cp alfred:/data /opt/sauvegardes/alfred-data-$(date +\%F)
+bash /opt/alfred/deploy/sauvegarde.sh --installer     # tâche quotidienne (cron de l'utilisateur, 3 h 17) + première sauvegarde
+bash /opt/alfred/deploy/sauvegarde.sh                 # sauvegarde immédiate, par exemple avant une mise à jour
+bash /opt/alfred/deploy/sauvegarde.sh --desinstaller  # retire la tâche, garde les archives
 ```
 
-Pour restaurer, depuis `/opt/alfred` :
+**Ces archives restent sur le VPS** : elles protègent d'une erreur ou d'une mise à jour ratée, pas de la perte du serveur. Pour une copie ailleurs, le plus simple et gratuit est de les rapatrier sur le Mac (`rsync -a antoine-vps:/opt/sauvegardes/alfred/ ~/Sauvegardes/Alfred/`, à lancer chaque jour par launchd) ; un stockage objet suisse (Infomaniak Swiss Backup, ~1 à 3 €/mois) est l'autre option. Les archives contiennent la clé de déchiffrement : à garder dans un dossier privé.
+
+### Restaurer
 
 ```bash
-docker compose -f deploy/docker-compose.yml stop
-docker cp ./alfred-data-AAAA-MM-JJ/. alfred:/data/
-# docker cp crée les fichiers au nom de root, alors qu'Alfred tourne sous l'utilisateur « node » :
-# sans cette étape, la base ne peut plus être modifiée et le fichier de clé (mode 600) ne peut plus être lu.
-docker run --rm --volumes-from alfred -u 0 --entrypoint sh alfred:latest -c 'chown -R node:node /data && chmod 700 /data && { [ ! -f /data/secret.key ] || chmod 600 /data/secret.key; }'
-docker compose -f deploy/docker-compose.yml start
+bash /opt/alfred/deploy/restaurer.sh --essai                      # essai à blanc sur la dernière archive
+bash /opt/alfred/deploy/restaurer.sh --essai /opt/sauvegardes/alfred/alfred-AAAA-MM-JJ_HHMM.tar.gz
+bash /opt/alfred/deploy/restaurer.sh --vrai  /opt/sauvegardes/alfred/alfred-AAAA-MM-JJ_HHMM.tar.gz
 ```
 
-Puis ouvrir Réglages : aucun message « à ressaisir » ne doit apparaître, et la synchro doit repartir. Cette procédure est à répéter une fois à blanc sur le VPS avant d'en avoir besoin (elle n'a pas pu être jouée dans l'environnement de développement, qui n'a pas Docker).
+`--essai` ne touche pas à Alfred en service : il démarre une copie d'Alfred (conteneur `alfred-essai-restauration`, sans réseau, donc ni synchro iCloud ni e-mail) sur les données de l'archive, attend qu'elle réponde sur `/healthz`, affiche ce qu'elle contient, puis l'efface avec son volume. À lancer de temps en temps, et après chaque changement de version.
+
+`--vrai` fait d'abord une sauvegarde de l'état actuel, arrête le conteneur `alfred`, remplace la base et la clé du volume par celles de l'archive (avec les droits de l'utilisateur `node`), puis redémarre Alfred. Les `.env` ne sont pas remplacés (ceux de l'archive sont dans `env` et `env.livekit` si besoin). Ensuite, ouvrir Réglages : aucun message « à ressaisir » ne doit apparaître, et la synchro doit repartir.
 
 ## Dépannage
 
 - **« Synchro iCloud en échec »** dans la barre latérale : le diagnostic est affiché dessous, avec un lien vers Réglages. Le plus souvent, « Identifiants refusés » : le mot de passe d'application a été révoqué ou mal recopié ; en créer un nouveau chez Apple et le coller dans Réglages > Calendrier iCloud.
 - **« Mot de passe à ressaisir »** dans Réglages : la base a été restaurée sans son fichier `secret.key` (ou `ALFRED_SECRET_KEY` a changé). Ressaisir le mot de passe concerné suffit. Variante « le serveur a changé » : le serveur d'envoi ou son port n'est plus celui pour lequel le mot de passe avait été saisi ; le ressaisir suffit aussi.
-- **« Alfred n'a pas le droit de lire le fichier de clé »**, ou « Impossible de chiffrer le mot de passe » : les fichiers du volume appartiennent à root, typiquement après une restauration par `docker cp` sans l'étape `chown`. Jouer la ligne `docker run … chown …` de la section Sauvegarde, puis `docker restart alfred`.
+- **« Alfred n'a pas le droit de lire le fichier de clé »**, ou « Impossible de chiffrer le mot de passe » : les fichiers du volume appartiennent à root, typiquement après une restauration par `docker cp` sans l'étape `chown`. Rejouer la restauration avec `bash deploy/restaurer.sh --vrai <archive>`, qui remet les bons droits, ou : `docker run --rm --volumes-from alfred -u 0 --entrypoint sh alfred:latest -c "chown -R node:node /data && chmod 700 /data"` puis `docker restart alfred`.
 - **Le nouveau mot de passe saisi dans `configurer.sh` n'a aucun effet** : un mot de passe enregistré dans l'app passe avant le `.env`. Le changer dans l'app (Réglages pour iCloud, Rendez-vous > Réglages pour les e-mails).
 - **Un serveur refusé comme « adresse interne ou privée »** : c'est voulu, Alfred ne se connecte pas au réseau interne du VPS pour un serveur saisi dans l'app. Un serveur interne légitime se déclare dans le `.env`.
 - **Connexion refusée en boucle** : vérifier que `ALFRED_PASSWORD_HASH` commence par `scrypt:` et tient sur une seule ligne dans le `.env`.
