@@ -47,10 +47,12 @@ export function ConnectionsScreen({ onMenu, onCalendarChanged }: { onMenu: () =>
                   {state.notices.map((n) => <li key={n}><AlertIcon /><span>{n}</span></li>)}
                 </ul>
               )}
-              <CaldavCard state={state} onState={set} notify={notify} onSynced={synced} />
-              <SmtpCard state={state} onState={set} notify={notify} />
-              {push.state && <NotificationsCard state={push.state} onState={push.set} notify={notify} />}
-              {video.state && <VideoSettingsCard state={video.state} onState={video.set} notify={notify} />}
+              <div className="bk-pair">
+                <CaldavCard state={state} onState={set} notify={notify} onSynced={synced} />
+                <SmtpCard state={state} onState={set} notify={notify} />
+                {push.state && <NotificationsCard state={push.state} onState={push.set} notify={notify} />}
+                {video.state && <VideoSettingsCard state={video.state} onState={video.set} notify={notify} />}
+              </div>
               <p className="cx-foot">
                 <LockIcon />
                 <span>
