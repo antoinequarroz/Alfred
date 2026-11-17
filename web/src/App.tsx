@@ -6,6 +6,7 @@ import { EventDialog, ScopeDialog } from './EventDialog';
 import { CalendarIcon, Chevron, ClockIcon, GearIcon, MenuIcon, PlusIcon, UsersIcon, VideoIcon } from './icons';
 import { draftFromOcc, draftToInput, movedInput, newDraft, toOcc, type CalendarMap, type Draft, type Occ } from './model';
 import { MiniMonth, monthGrid, MonthView } from './MonthView';
+import { Logo } from './Logo';
 import { MoonIcon, SunIcon, ThemeSwitch, useTheme } from './theme';
 import { WeekView } from './WeekView';
 
@@ -280,7 +281,7 @@ export function App({ onLogout }: { onLogout: () => void }) {
     <div className="app">
       <aside className={`sidebar${menuOpen ? ' open' : ''}`}>
         <div className="brand">
-          <span className="logo">A</span>
+          <Logo />
           <span>Alfred</span>
         </div>
         <nav className="side-nav" aria-label="Rubriques">

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from './api';
 import { App } from './App';
+import { Logo } from './Logo';
 
 /** Message laissé dans l'adresse par un retour raté du Compte Postmelo (/?connexion=…), lu une fois puis effacé. */
 function takeSignInError(): string | null {
@@ -33,7 +34,7 @@ function Login({ onDone, compte }: { onDone: () => void; compte: boolean }) {
   return (
     <div className="login">
       <form onSubmit={submit}>
-        <span className="logo big">A</span>
+        <Logo big />
         <h1>Alfred</h1>
         <p className="login-sub">Calendrier personnel</p>
         {compte && (
