@@ -155,10 +155,15 @@ Erreurs :
 
 ### `GET /api/public/booking/cancel/:token`
 
-Récapitulatif pour la page `/rdv/annulation/<jeton>` (`PublicBooking`, même forme que `booking` ci-dessus). Consulter n'annule rien.
+Récapitulatif pour la page `/rdv/gerer/<jeton>` (les anciens liens `/rdv/annulation/<jeton>` mènent à la même page) : `PublicBooking`, même forme que `booking` ci-dessus. Consulter ne change rien.
 
-- `cancellable: false` : le rendez-vous a commencé ou est passé ; ne pas proposer le bouton.
+- `cancellable: false` : le rendez-vous a commencé, est passé, ou est trop proche (réglage `changeNoticeHours`) ; ne pas proposer le bouton.
+- `reschedulable` : le client peut choisir un autre créneau (déplacement autorisé, prise de rendez-vous ouverte, délai respecté, type encore existant, moins de 3 déplacements déjà faits).
+- `changeUntil` : dernier instant (ISO UTC) où annuler ou déplacer en ligne est possible.
+- `mode`, `durationMin`, `horizonDays` : de quoi afficher le choix d'un autre créneau.
 - `404 not_found` : jeton inconnu, mal formé **ou rendez-vous déjà annulé** (réponse volontairement identique). Afficher « Ce lien n'est plus valable : rendez-vous introuvable ou déjà annulé. »
+
+Un jeton est valable tant que le rendez-vous n'est pas annulé : celui de la confirmation, et ceux des rappels (chaque rappel porte un nouveau jeton, le jeton n'étant jamais conservé en clair).
 
 ### `POST /api/public/booking/cancel/:token`
 
@@ -166,9 +171,21 @@ Annule (sans corps). Réponse `200` : le `PublicBooking` avec `status: "cancelle
 
 - `emailSent: true` : un e-mail confirme l'annulation au client. `false` : aucun e-mail ne lui est parti (SMTP absent ou en panne, plafond atteint, ou annulation dans le quart d'heure qui suit la réservation, où l'on n'écrit pas une seconde fois à une adresse non vérifiée) : ne pas annoncer d'e-mail.
 
-Erreurs : `404 not_found` (comme ci-dessus, y compris pour un second clic), `409 too_late` (déjà commencé ou passé), `429 rate_limited`, `502 calendar_unavailable` (rien n'a été annulé, réessayer).
+Erreurs : `404 not_found` (comme ci-dessus, y compris pour un second clic), `409 too_late` (commencé, passé, ou dans le délai `changeNoticeHours` ; le message le dit), `429 rate_limited`, `502 calendar_unavailable` (rien n'a été annulé, réessayer).
 
 L'annulation par jeton reste possible même si la prise de rendez-vous a été refermée.
+
+### `GET /api/public/booking/manage/:token/slots?from=AAAA-MM-JJ&to=AAAA-MM-JJ`
+
+Créneaux libres pour déplacer le rendez-vous (`PublicSlots`, comme pour un type). Ils suivent le type d'origine (préavis, horizon, horaires) avec la durée et les tampons de la réservation ; l'horaire actuel ne bloque pas les créneaux voisins et n'est pas proposé.
+
+Erreurs : `404 not_found`, `403 reschedule_disabled` (déplacement désactivé ou prise de rendez-vous fermée), `409 too_late`, `409 too_many_changes`, `409 not_reschedulable` (type supprimé, événement retiré du calendrier), `400 invalid_range`, `429 rate_limited`.
+
+### `POST /api/public/booking/manage/:token/reschedule`
+
+Corps : `{ "start": "<un début renvoyé par la route précédente>" }`. Réponse `200` : le `PublicBooking` au nouvel horaire, avec `emailSent` (e-mail « rendez-vous déplacé » au client, avec l'événement à jour en pièce jointe). L'événement du calendrier est déplacé (même UID : il reste le même dans Apple Calendar, la visio garde son lien), la description note l'horaire précédent, Antoine reçoit un avis, et les rappels repartent pour le nouvel horaire. Le jeton utilisé reste valable.
+
+Erreurs : celles de la route précédente, plus `400 same_slot` (c'est déjà l'horaire du rendez-vous), `400 invalid` (créneau illisible), `409 slot_unavailable` (pris entre-temps : revenir au choix), `502 calendar_unavailable` (rien n'a changé, réessayer). Même verrou et même synchro préalable qu'une réservation : deux clients ne peuvent pas obtenir le même créneau.
 
 ## API privée
 
@@ -207,6 +224,12 @@ Session requise (cookie de connexion, comme le reste de l'API). Sans session : `
 - `mail.configured: false` : afficher l'avertissement ; tout fonctionne sauf l'envoi.
 - `mail.sentLast24h` / `mail.dailyLimit` : e-mails partis sur 24 heures et plafond. Plafond atteint : plus rien ne part, un avertissement le dit (compteur en mémoire, remis à zéro au redémarrage).
 - `settings.allDayBlocks` : vrai (défaut), une journée entière bloque toute la journée même marquée « disponible » (Apple Calendar marque ainsi celles qu'il crée) ; faux, seules les journées entières « occupé » bloquent.
+
+Réglages des rappels et des changements (dans `settings`) :
+
+- `reminderHours` : rappels envoyés au client, en heures avant le rendez-vous, parmi `72, 48, 24, 12, 4, 2, 1` (défaut `[24, 1]`, vide : aucun). Un passage par minute envoie ceux qui sont dus ; un rappel ne part qu'une fois par horaire, pas si le client a pris ou déplacé le rendez-vous après son moment, et un seul message part si plusieurs sont dus ensemble. Le rappel reprend le lieu ou le lien de la visio et un lien pour déplacer ou annuler. Si Antoine a déplacé l'événement dans son agenda, le rappel le signale, joint l'événement à jour, et la réservation n'est plus « à prévenir ».
+- `allowReschedule` : le client peut choisir lui-même un autre créneau (défaut `true`). Trois déplacements au plus par rendez-vous.
+- `changeNoticeHours` : annulation et déplacement en ligne possibles jusqu'à ce nombre d'heures avant le début, parmi `0, 1, 2, 4, 12, 24, 48` (défaut `0` : jusqu'au début).
 
 #### `PUT /api/booking/settings`
 
@@ -333,7 +356,9 @@ Réponse : `Booking[]`.
     "eventStart": null,
     "eventEnd": null,
     "notifiedStart": null,
-    "mailError": null
+    "mailError": null,
+    "remindersSent": [24],
+    "clientReschedules": 0
   }
 ]
 ```
@@ -341,9 +366,10 @@ Réponse : `Booking[]`.
 - `eventState` (réservations confirmées seulement, sinon `null`) :
   - `ok` : l'événement est dans le calendrier, à l'heure réservée.
   - `missing` : **« événement supprimé »**. Antoine l'a supprimé (par exemple dans Apple Calendar). La réservation reste confirmée et **le créneau reste pris** : proposer « Annuler la réservation » pour prévenir le client et libérer le créneau. Un événement seulement changé de calendrier n'est pas « supprimé » : il est retrouvé par son UID (`eventId` et `calendarId` sont mis à jour) et l'annulation le retire.
-  - `moved` : l'événement a été déplacé dans le temps. **La réservation suit** : `start` et `end` (repris dans `eventStart` et `eventEnd`) donnent le nouvel horaire, l'ancien créneau est libéré, le nouveau est protégé, et la page d'annulation du client montre le nouvel horaire. `notifiedStart` est le début que le client a reçu dans son dernier e-mail : il n'est pas prévenu automatiquement, « Renvoyer l'e-mail » lui annonce le nouvel horaire et ramène l'état à `ok`.
+  - `moved` : l'événement a été déplacé dans le temps. **La réservation suit** : `start` et `end` (repris dans `eventStart` et `eventEnd`) donnent le nouvel horaire, l'ancien créneau est libéré, le nouveau est protégé, et la page d'annulation du client montre le nouvel horaire. `notifiedStart` est le début que le client a reçu dans son dernier e-mail : il n'est pas prévenu sur le moment ; le prochain rappel lui annonce le nouvel horaire, et « Renvoyer l'e-mail » lui annonce le nouvel horaire et ramène l'état à `ok`.
 - `mailError` : dernier échec d'envoi d'e-mail pour cette réservation (texte à afficher), `null` si tout est parti. Sans SMTP : « E-mails non configurés : aucun message envoyé ».
 - `cancelledBy` : `client` ou `admin`.
+- `remindersSent` : rappels déjà partis pour l'horaire actuel (heures avant le début). `clientReschedules` : nombre de déplacements faits par le client lui-même.
 
 #### `POST /api/booking/bookings/:id/cancel`
 
