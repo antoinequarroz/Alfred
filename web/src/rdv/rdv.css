@@ -333,6 +333,8 @@ a.btn { text-decoration: none; color: inherit; }
 .bk-who { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .bk-who-name { font-size: 13.5px; font-weight: 600; overflow-wrap: anywhere; }
 .bk-who-name .bk-meta { font-weight: 450; }
+.bk-who-name .bk-person { color: inherit; text-decoration: none; }
+.bk-who-name .bk-person:hover { color: var(--accent-ink); text-decoration: underline; }
 .bk-contacts { display: flex; flex-wrap: wrap; gap: 2px 12px; }
 .bk-contacts a { color: var(--accent-ink); text-decoration: none; overflow-wrap: anywhere; }
 .bk-contacts a:hover { text-decoration: underline; }

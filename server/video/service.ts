@@ -1,4 +1,5 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
+import { uuidv7 } from '../ids.js';
 import type {
   PublicVideoRoom, VideoAdminState, VideoJoinInfo, VideoJoinResult, VideoQuality, VideoRoom, VideoRoomKind,
   VideoRoomStatus, VideoServerStatus, VideoSettings, VideoWaiter, VideoWaitStatus,
@@ -333,7 +334,7 @@ export class VideoService {
     let slug = newRoomSlug();
     while (this.bySlug(slug)) slug = newRoomSlug();
     return {
-      id: randomUUID(), slug, title, kind, booking_id: bookingId, starts_at: start, ends_at: end,
+      id: uuidv7(), slug, title, kind, booking_id: bookingId, starts_at: start, ends_at: end,
       created_at: this.now().toISOString(), closed_at: null,
     };
   }

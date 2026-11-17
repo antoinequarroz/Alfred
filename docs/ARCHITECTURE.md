@@ -106,6 +106,10 @@ Chaque visio est une « salle » avec un lien `https://alfred.antoinequarroz.ch/
 - **Réglages dans l'app** : Réglages > Visioconférence (activer, salle d'attente, participants, qualité, état du serveur). Rubrique « Visio » : nouvelle visio, salle permanente, visios à venir avec le nombre de personnes connectées.
 - **Ce qui manque encore.** Pas de serveur TURN sur le port 443 : un invité derrière un réseau d'entreprise qui ne laisse sortir que le web (443) ne pourra pas se connecter. Pas d'enregistrement. Sur le VPS actuel (2 cœurs partagés), viser 2 à 4 personnes.
 
+## Données, personnes et liens (phase 4)
+
+Migrations numérotées, espace, UUID v7, adresses `media://`, fiches Personnes et liens vers Cairn : voir [DONNEES.md](DONNEES.md).
+
 ## Sécurité
 
 - Un seul utilisateur. Mot de passe stocké sous forme d'empreinte scrypt, session par cookie `HttpOnly`, `Secure`, `SameSite=Lax`, blocage après cinq essais ratés.

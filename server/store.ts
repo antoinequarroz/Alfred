@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { uuidv7 } from './ids.js';
 import type { CalendarInfo, CalendarSource, Occurrence } from '../shared/types.js';
 import type { Db } from './db.js';
 import { expand, expandBusy, summarize, type BusyOccurrence } from './ics.js';
@@ -112,7 +113,7 @@ export class Store {
   ensureLocalCalendar(): void {
     const any = this.db.prepare('SELECT 1 FROM calendars LIMIT 1').get();
     if (any) return;
-    this.upsertCalendar({ id: `local:${randomUUID()}`, source: 'local', url: null, name: 'Personnel', color: DEFAULT_COLORS[0], read_only: 0, sort: 0 });
+    this.upsertCalendar({ id: `local:${uuidv7()}`, source: 'local', url: null, name: 'Personnel', color: DEFAULT_COLORS[0], read_only: 0, sort: 0 });
   }
 
   // --- événements --------------------------------------------------------
@@ -132,7 +133,7 @@ export class Store {
   /** Enregistre (ou remplace) une ressource. Lève une erreur si l'iCalendar est illisible. */
   saveEvent(ev: { id?: string; calendarId: string; href: string | null; etag: string | null; ics: string }): string {
     const s = summarize(ev.ics);
-    const id = ev.id ?? (ev.href ? eventIdForHref(ev.href) : randomUUID());
+    const id = ev.id ?? (ev.href ? eventIdForHref(ev.href) : uuidv7());
     this.db
       .prepare(
         `INSERT INTO events (id, calendar_id, href, etag, uid, ics, summary, start_ms, end_ms, recurring, recur_end_ms, busy, updated_at)

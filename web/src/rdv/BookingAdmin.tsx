@@ -652,7 +652,10 @@ function BookingRow({ b, timezone, mailConfigured, onCancel, onResend }: {
         <span className="bk-when-time">{timeIn(timezone, b.start)} – {timeIn(timezone, b.end)}</span>
       </div>
       <div className="bk-who">
-        <p className="bk-who-name">{b.name} <span className="bk-meta">· {b.typeName}</span></p>
+        <p className="bk-who-name">
+          {b.personId ? <a className="bk-person" href={`#personnes/${encodeURIComponent(b.personId)}`} title="Ouvrir sa fiche">{b.name}</a> : b.name}{' '}
+          <span className="bk-meta">· {b.typeName}</span>
+        </p>
         <p className="bk-meta bk-contacts">
           <a href={`mailto:${b.email}`}>{b.email}</a>
           {b.phone && <a href={`tel:${b.phone.replace(/[^\d+]/g, '')}`}>{b.phone}</a>}
