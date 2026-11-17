@@ -74,8 +74,10 @@ function BackgroundPicker({ value, onChange, onError }: { value: Background; onC
       const width = Math.min(316, window.innerWidth - 24);
       const left = Math.min(Math.max(12, rect.left + rect.width / 2 - width / 2), window.innerWidth - width - 12);
       const above = rect.top - 12;
-      // Pas assez de place au-dessus (petit écran) : le panneau se cale en haut de la fenêtre et défile.
-      setPlace({ left, width, bottom: window.innerHeight - above, maxHeight: Math.max(160, above - 12) });
+      // Pas assez de place au-dessus (petit écran) : le panneau se cale en haut de la fenêtre, quitte à couvrir le bouton, et défile.
+      const maxHeight = Math.min(Math.max(160, above - 12), window.innerHeight - 24);
+      const bottom = Math.min(window.innerHeight - above, window.innerHeight - 12 - maxHeight);
+      setPlace({ left, width, bottom, maxHeight });
     }
     setOpen((v) => !v);
   };
@@ -153,9 +155,10 @@ function BackgroundPicker({ value, onChange, onError }: { value: Background; onC
             </button>
           </div>
           <p className="vc-bg-note">Calculé sur cet appareil. Une image importée reste dans ce navigateur.</p>
-          <input ref={file} type="file" accept="image/*" hidden onChange={(e) => void onFile(e)} />
         </div>
       )}
+      {/* Toujours présent : le choix d'un fichier aboutit même si le panneau s'est refermé entre-temps (rotation du téléphone). */}
+      <input ref={file} type="file" accept="image/*" hidden onChange={(e) => void onFile(e)} />
     </div>
   );
 }
@@ -416,6 +419,8 @@ function Lobby({ room, onJoin, onPrefs, onCancel, waiting, busy, error }: {
     }, () => undefined);
   }, [videoTrack, audioTrack]);
 
+  const pendingRef = useRef(false);
+  pendingRef.current = busy || Boolean(waiting);
   // Arrière-plan sur l'aperçu : on voit ce que verront les autres avant d'entrer.
   useEffect(() => {
     if (!videoTrack) return;
@@ -423,7 +428,13 @@ function Lobby({ room, onJoin, onPrefs, onCancel, waiting, busy, error }: {
     setBackground(videoTrack, background).catch(() => {
       if (cancelled || background.kind === 'none') return;
       setBackgroundChoice(NO_BACKGROUND);
-      setMediaError(BLUR_FAILED);
+      // Entrée déjà demandée (connexion, salle d'attente) : la caméra est coupée plutôt que d'entrer en montrant la pièce.
+      if (pendingRef.current) {
+        setCamera(false);
+        setMediaError(BLUR_FAILED_CAMERA_OFF);
+      } else {
+        setMediaError(BLUR_FAILED);
+      }
     });
     return () => {
       cancelled = true;

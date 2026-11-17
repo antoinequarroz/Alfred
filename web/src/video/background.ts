@@ -76,7 +76,9 @@ export function backgroundWanted(): Background {
     if (v === 'blur') return { kind: 'blur' };
     if (v?.startsWith('image:')) {
       const bg: Background = { kind: 'image', id: v.slice(6) };
-      return backgroundSrc(bg) ? bg : NO_BACKGROUND;
+      // Image importée disparue : le choix est gardé, et son échec est dit (caméra laissée coupée) plutôt que
+      // de montrer la pièce sans prévenir.
+      return bg;
     }
     if (v === null && localStorage.getItem(LEGACY_BLUR_KEY) === '1') return { kind: 'blur' };
   } catch {
@@ -113,11 +115,17 @@ export async function importBackgroundImage(file: File): Promise<void> {
     if (!ctx) throw new Error('no-canvas');
     ctx.drawImage(bitmap, (W - w) / 2, (H - h) / 2, w, h);
     const data = canvas.toDataURL('image/jpeg', 0.82);
-    session = data;
     try {
       localStorage.setItem(CUSTOM_KEY, data);
+      session = null;
     } catch {
-      // stockage plein ou indisponible : l'image reste en mémoire pour cette visio
+      // Stockage plein ou indisponible : l'image reste en mémoire pour cette visio, et l'ancienne n'est plus proposée.
+      session = data;
+      try {
+        localStorage.removeItem(CUSTOM_KEY);
+      } catch {
+        // stockage indisponible
+      }
     }
   } finally {
     bitmap.close();
@@ -127,7 +135,7 @@ export async function importBackgroundImage(file: File): Promise<void> {
 /** Image importée pendant cette visite, si le stockage du navigateur l'a refusée. */
 let session: string | null = null;
 export function customImageNow(): string | null {
-  return customImage() ?? session;
+  return session ?? customImage();
 }
 
 /** L'arrière-plan n'a pas pu démarrer (à distinguer d'une caméra refusée ou absente). */
