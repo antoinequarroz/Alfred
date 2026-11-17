@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import type {
-  PublicVideoRoom, VideoAdminState, VideoJoinInfo, VideoQuality, VideoRoom, VideoRoomKind, VideoRoomStatus,
-  VideoServerStatus, VideoSettings,
+  PublicVideoRoom, VideoAdminState, VideoJoinInfo, VideoJoinResult, VideoQuality, VideoRoom, VideoRoomKind,
+  VideoRoomStatus, VideoServerStatus, VideoSettings, VideoWaiter, VideoWaitStatus,
 } from '../../shared/types.js';
 import type { Db } from '../db.js';
 import { LivekitClient, LivekitError } from './livekit.js';
@@ -48,6 +48,11 @@ export interface VideoOptions {
   hostName?: () => string;
   /** État et horaire actuels d'une réservation (une salle de rendez-vous suit son rendez-vous). */
   bookingLink?: (bookingId: string) => BookingLink | null;
+  /**
+   * Un invité arrive (notification à l'hôte) : il reçoit son jeton d'entrée ou, avec la salle
+   * d'attente, il demande à entrer (waiting vrai). Ne doit pas lever.
+   */
+  onGuestJoin?: (room: { slug: string; title: string }, guestName: string, waiting?: boolean) => void;
   backend?: VideoBackend;
   now?: () => Date;
 }
@@ -77,7 +82,43 @@ const TOKEN_TTL_SEC = 120;
 const PENDING_MS = 60_000;
 /** Une salle vide est fermée côté serveur de visio après 5 minutes (elle se recrée à la prochaine entrée). */
 const EMPTY_TIMEOUT_SEC = 300;
-const DEFAULTS: VideoSettings = { enabled: true, maxParticipants: 4, quality: 'standard' };
+/**
+ * Salle d'attente : un invité qui n'a plus donné signe de vie depuis ce délai est retiré de la file.
+ * Large, parce qu'un onglet en arrière-plan n'interroge plus Alfred qu'une fois par minute.
+ */
+const WAIT_STALE_MS = 90_000;
+/** Une fois admis, l'invité a ce délai pour venir chercher son jeton ; sa place est gardée d'ici là. */
+const ADMITTED_MS = 120_000;
+/** Un refus reste lisible ce délai, le temps que l'invité l'apprenne (même si sa page était en veille). */
+const DENIED_MS = 600_000;
+/** Personnes en attente au plus, par salle et en tout (mémoire bornée, file lisible pour l'hôte). */
+const WAIT_MAX_PER_ROOM = 12;
+const WAIT_MAX_TOTAL = 300;
+/** Demandes en attente au plus par adresse IP et par salle : la plus ancienne cède la place. */
+const WAIT_MAX_PER_IP = 3;
+/** La présence de l'hôte dans une salle est relue au plus toutes les 5 secondes. */
+const HOST_CACHE_MS = 5_000;
+const DEFAULTS: VideoSettings = { enabled: true, maxParticipants: 4, quality: 'standard', waitingRoom: true };
+
+/** Un invité qui patiente : il n'est pas connecté au serveur de visio tant que l'hôte ne l'a pas fait entrer. */
+interface Waiter {
+  /** Secret de l'invité : lui seul peut suivre sa demande. */
+  ticket: string;
+  /** Identité qu'il aura dans la salle ; c'est aussi la référence utilisée par l'hôte. */
+  identity: string;
+  name: string;
+  /** Salle visée (identifiant Alfred). */
+  roomId: string;
+  /** Adresse d'où vient la demande (une même adresse ne peut pas remplir la file). */
+  ip: string;
+  since: number;
+  seen: number;
+  state: 'waiting' | 'admitted' | 'denied';
+  /** Échéance de l'admission ou du refus (ms). */
+  until: number;
+  /** Le jeton d'entrée a déjà été remis une fois. */
+  picked?: boolean;
+}
 export const MAX_PARTICIPANTS = 8;
 /** Lettres et chiffres sans ambiguïté à l'écrit (ni l, ni 1, ni 0, ni o). */
 const SLUG_ALPHABET = 'abcdefghijkmnpqrstuvwxyz23456789';
@@ -121,10 +162,14 @@ export class VideoService {
   readonly timezone: string;
   private readonly hostName: () => string;
   private readonly bookingLink: (bookingId: string) => BookingLink | null;
+  private readonly onGuestJoin?: (room: { slug: string; title: string }, guestName: string, waiting?: boolean) => void;
   private readonly now: () => Date;
   private healthCache: { at: number; ok: boolean } | null = null;
   /** Jetons d'invités délivrés depuis peu, par salle : identité → échéance (ms). Ferme la course entre deux entrées simultanées. */
   private readonly pending = new Map<string, Map<string, number>>();
+  /** Salle d'attente, en mémoire : ticket → invité. Un redémarrage d'Alfred la vide (l'invité redemande à entrer). */
+  private readonly waiters = new Map<string, Waiter>();
+  private readonly hostCache = new Map<string, { at: number; present: boolean | null }>();
 
   constructor(opts: VideoOptions) {
     this.db = opts.db;
@@ -133,6 +178,7 @@ export class VideoService {
     this.timezone = opts.timezone;
     this.hostName = opts.hostName ?? (() => '');
     this.bookingLink = opts.bookingLink ?? (() => null);
+    this.onGuestJoin = opts.onGuestJoin;
     this.now = opts.now ?? (() => new Date());
     this.backend = opts.backend ?? (this.configured
       ? new LivekitClient(opts.server.internalUrl, opts.server.apiKey!, opts.server.apiSecret!)
@@ -165,6 +211,7 @@ export class VideoService {
         if (r.key === 'enabled' && typeof v === 'boolean') out.enabled = v;
         if (r.key === 'maxParticipants' && typeof v === 'number' && Number.isInteger(v) && v >= 2 && v <= MAX_PARTICIPANTS) out.maxParticipants = v;
         if (r.key === 'quality' && (v === 'standard' || v === 'eco')) out.quality = v;
+        if (r.key === 'waitingRoom' && typeof v === 'boolean') out.waitingRoom = v;
       } catch {
         // valeur illisible : défaut
       }
@@ -189,6 +236,10 @@ export class VideoService {
     if ('quality' in b) {
       if (b.quality === 'standard' || b.quality === 'eco') patch.quality = b.quality as VideoQuality;
       else fields.quality = 'Qualité : standard ou eco';
+    }
+    if ('waitingRoom' in b) {
+      if (typeof b.waitingRoom === 'boolean') patch.waitingRoom = b.waitingRoom;
+      else fields.waitingRoom = 'Valeur invalide';
     }
     if (Object.keys(fields).length > 0) throw new VideoError(400, 'invalid', Object.values(fields)[0], fields);
     const put = this.db.prepare('INSERT INTO video_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
@@ -267,6 +318,7 @@ export class VideoService {
       id: row.id, slug: row.slug, url: this.roomUrl(row.slug), title: row.title, kind: row.kind,
       startsAt: s.start, endsAt: s.end, createdAt: row.created_at, bookingId: row.booking_id,
       live: live ? (live.get(this.livekitName(row)) ?? 0) : null,
+      waiting: this.waitersOf(row.id).length,
     };
   }
 
@@ -377,6 +429,7 @@ export class VideoService {
 
   private close(row: RoomRow): void {
     this.db.prepare('UPDATE video_rooms SET closed_at = ? WHERE id = ? AND closed_at IS NULL').run(this.now().toISOString(), row.id);
+    for (const [ticket, w] of this.waiters) if (w.roomId === row.id) this.waiters.delete(ticket);
     // Les personnes encore connectées sont déconnectées, au mieux.
     void this.backend?.deleteRoom(this.livekitName(row)).catch(() => undefined);
   }
@@ -450,18 +503,28 @@ export class VideoService {
       endsAt: row.kind === 'instant' ? null : s.end,
       timezone: this.timezone,
       isHost,
+      waitingRoom: !isHost && this.getSettings().waitingRoom,
     };
   }
 
-  /** Jeton d'entrée dans une salle. L'hôte (session Alfred) a les droits d'administration de la salle. */
-  async join(slug: string, body: unknown, isHost: boolean): Promise<VideoJoinInfo> {
+  /** Salle ouverte désignée par son lien, ou l'erreur à montrer au visiteur. */
+  private openRoom(slug: string): RoomRow {
     const row = isRoomSlug(slug) ? this.bySlug(slug) : undefined;
     if (!row) throw new VideoError(404, 'not_found', 'Ce lien de visio n’existe pas.');
     const status = this.status(row);
     if (status === 'unavailable') throw new VideoError(503, 'unavailable', 'La visio n’est pas disponible pour le moment.');
     if (status === 'closed') throw new VideoError(410, 'closed', 'Cette visio a été annulée ou fermée.');
     if (status === 'ended') throw new VideoError(410, 'ended', 'Cette visio est terminée.');
+    return row;
+  }
 
+  /**
+   * Entrée dans une salle. L'hôte (session Alfred) reçoit tout de suite un jeton, avec les droits
+   * d'administration de la salle. Un invité reçoit un jeton, ou, si la salle d'attente est active,
+   * un ticket d'attente : il n'entrera que lorsque l'hôte l'aura admis.
+   */
+  async join(slug: string, body: unknown, isHost: boolean, ip = ''): Promise<VideoJoinResult> {
+    const row = this.openRoom(slug);
     const b = (body && typeof body === 'object' && !Array.isArray(body) ? body : {}) as Record<string, unknown>;
     let name: string;
     if (isHost) {
@@ -478,35 +541,66 @@ export class VideoService {
       name = n;
     }
     const settings = this.getSettings();
-    const backend = this.backend!;
-    const room = this.livekitName(row);
     // L'hôte garde la même identité : s'il rejoint depuis un autre appareil, l'ancienne connexion est remplacée.
     const identity = isHost ? 'host' : `invite-${randomBytes(6).toString('hex')}`;
+    if (!isHost && settings.waitingRoom) {
+      const nowMs = this.now().getTime();
+      this.pruneWaiters(nowMs);
+      const mine = this.waitersOf(row.id).filter((w) => w.ip === ip);
+      for (const old of mine.slice(0, Math.max(0, mine.length - WAIT_MAX_PER_IP + 1))) this.waiters.delete(old.ticket);
+      if (this.waitersOf(row.id).length >= WAIT_MAX_PER_ROOM || this.waiters.size >= WAIT_MAX_TOTAL) {
+        throw new VideoError(429, 'wait_full', 'Trop de personnes attendent déjà d’entrer. Réessayez dans un instant.');
+      }
+      const ticket = randomBytes(18).toString('base64url');
+      this.waiters.set(ticket, { ticket, identity, name, roomId: row.id, ip, since: nowMs, seen: nowMs, state: 'waiting', until: 0 });
+      const hostPresent = await this.hostPresent(row);
+      this.guestArrived(row, name, true);
+      return { waiting: true, ticket, hostPresent };
+    }
+    const room = this.livekitName(row);
     try {
       // Côté serveur de visio, la salle a le plafond dur : c'est Alfred qui applique le réglage (il peut
       // changer en cours de réunion, et une salle existante n'est pas modifiée par CreateRoom).
-      await backend.createRoom(room, MAX_PARTICIPANTS, EMPTY_TIMEOUT_SEC);
-      if (!isHost) {
-        // Une place reste toujours libre pour l'hôte : on compte les invités connectés et ceux qui
-        // viennent de recevoir un jeton sans être encore connectés (deux entrées simultanées, jetons accumulés).
-        const connected = new Set((await backend.listParticipants(room)).map((p) => p.identity).filter((id) => id !== 'host'));
-        const nowMs = this.now().getTime();
-        const waiting = this.pending.get(room) ?? new Map<string, number>();
-        for (const [id, until] of waiting) if (until <= nowMs || connected.has(id)) waiting.delete(id);
-        if (connected.size + waiting.size >= settings.maxParticipants - 1) {
-          throw new VideoError(409, 'full', `Cette visio est complète (${settings.maxParticipants} participants au plus).`);
-        }
-        waiting.set(identity, nowMs + PENDING_MS);
-        this.pending.set(room, waiting);
-        // Mémoire bornée : les salles sans entrée récente sont oubliées.
-        if (this.pending.size > 200) {
-          for (const [name, map] of this.pending) if ([...map.values()].every((until) => until <= nowMs)) this.pending.delete(name);
-        }
-      }
+      await this.backend!.createRoom(room, MAX_PARTICIPANTS, EMPTY_TIMEOUT_SEC);
+      if (!isHost) await this.takeSeat(room, identity, settings.maxParticipants, PENDING_MS);
     } catch (err) {
       if (err instanceof VideoError) throw err;
       throw new VideoError(503, 'server_unavailable', 'Le serveur de visio ne répond pas. Réessayez dans un instant.');
     }
+    if (!isHost) this.guestArrived(row, name, false);
+    return this.issue(room, identity, name, isHost, settings.quality);
+  }
+
+  private guestArrived(row: RoomRow, name: string, waiting: boolean): void {
+    try {
+      this.onGuestJoin?.({ slug: row.slug, title: row.title }, name, waiting);
+    } catch (err) {
+      console.error('[alfred] visio : avis d’arrivée d’un invité impossible :', err);
+    }
+  }
+
+  /**
+   * Réserve une place d'invité, ou refuse si la salle est complète. Une place reste toujours libre
+   * pour l'hôte : on compte les invités connectés et ceux qui ont reçu un jeton (ou une admission)
+   * sans être encore connectés (deux entrées simultanées, jetons accumulés).
+   */
+  private async takeSeat(room: string, identity: string, max: number, holdMs: number): Promise<void> {
+    const connected = new Set((await this.backend!.listParticipants(room)).map((p) => p.identity).filter((id) => id !== 'host'));
+    const nowMs = this.now().getTime();
+    const held = this.pending.get(room) ?? new Map<string, number>();
+    for (const [id, until] of held) if (until <= nowMs || connected.has(id)) held.delete(id);
+    if (connected.size + held.size >= max - 1) {
+      throw new VideoError(409, 'full', `Cette visio est complète (${max} participants au plus).`);
+    }
+    held.set(identity, nowMs + holdMs);
+    this.pending.set(room, held);
+    // Mémoire bornée : les salles sans entrée récente sont oubliées.
+    if (this.pending.size > 200) {
+      for (const [name, map] of this.pending) if ([...map.values()].every((until) => until <= nowMs)) this.pending.delete(name);
+    }
+  }
+
+  private issue(room: string, identity: string, name: string, isHost: boolean, quality: VideoQuality): VideoJoinInfo {
     const token = signAccessToken(this.server.apiKey!, this.server.apiSecret!, {
       identity,
       name,
@@ -522,6 +616,134 @@ export class VideoService {
         ...(isHost ? { roomAdmin: true } : {}),
       },
     });
-    return { url: this.server.publicUrl, token, identity, isHost, quality: settings.quality };
+    return { url: this.server.publicUrl, token, identity, isHost, quality };
+  }
+
+  // --- salle d'attente -----------------------------------------------------
+
+  /** Retire les invités partis sans prévenir et les admissions ou refus arrivés à échéance. */
+  private pruneWaiters(nowMs: number): void {
+    for (const [ticket, w] of this.waiters) {
+      if (w.state === 'waiting' ? nowMs - w.seen > WAIT_STALE_MS : nowMs > w.until) this.waiters.delete(ticket);
+    }
+  }
+
+  /** Invités qui patientent pour une salle, du plus ancien au plus récent. */
+  private waitersOf(roomId: string): Waiter[] {
+    const nowMs = this.now().getTime();
+    const out: Waiter[] = [];
+    for (const w of this.waiters.values()) {
+      if (w.roomId === roomId && w.state === 'waiting' && nowMs - w.seen <= WAIT_STALE_MS) out.push(w);
+    }
+    return out.sort((a, b) => a.since - b.since);
+  }
+
+  /** L'hôte est connecté à la salle ; null si le serveur de visio ne le dit pas. */
+  private async hostPresent(row: RoomRow): Promise<boolean | null> {
+    const nowMs = Date.now();
+    const cached = this.hostCache.get(row.id);
+    if (cached && nowMs - cached.at < HOST_CACHE_MS) return cached.present;
+    let present: boolean | null = null;
+    try {
+      present = (await this.backend!.listParticipants(this.livekitName(row))).some((p) => p.identity === 'host');
+    } catch {
+      present = null;
+    }
+    if (this.hostCache.size > 200) this.hostCache.clear();
+    this.hostCache.set(row.id, { at: nowMs, present });
+    return present;
+  }
+
+  private waiter(row: RoomRow, ticket: unknown): Waiter | undefined {
+    if (typeof ticket !== 'string' || ticket.length > 64) return undefined;
+    this.pruneWaiters(this.now().getTime());
+    const w = this.waiters.get(ticket);
+    return w && w.roomId === row.id ? w : undefined;
+  }
+
+  /**
+   * Où en est la demande d'un invité. Admis : il reçoit son jeton d'entrée ; si la réponse se perd,
+   * il peut le redemander pendant une minute (même identité, donc une seule place).
+   */
+  async waitStatus(slug: string, body: unknown): Promise<VideoWaitStatus> {
+    const row = this.openRoom(slug);
+    const w = this.waiter(row, (body as { ticket?: unknown } | null)?.ticket);
+    if (!w) throw new VideoError(404, 'wait_expired', 'Votre demande a expiré. Demandez à nouveau à entrer.');
+    w.seen = this.now().getTime();
+    if (w.state === 'denied') return { state: 'denied' };
+    if (w.state === 'waiting') return { state: 'waiting', hostPresent: await this.hostPresent(row) };
+    const room = this.livekitName(row);
+    try {
+      await this.backend!.createRoom(room, MAX_PARTICIPANTS, EMPTY_TIMEOUT_SEC);
+    } catch {
+      throw new VideoError(503, 'server_unavailable', 'Le serveur de visio ne répond pas. Réessayez dans un instant.');
+    }
+    // La demande et la place restent gardées le temps que l'invité se connecte.
+    if (!w.picked) {
+      w.picked = true;
+      w.until = this.now().getTime() + PENDING_MS;
+      const held = this.pending.get(room);
+      if (held?.has(w.identity)) held.set(w.identity, w.until);
+    }
+    return { state: 'admitted', join: this.issue(room, w.identity, w.name, false, this.getSettings().quality) };
+  }
+
+  /** L'invité renonce (bouton Annuler, page fermée) : il sort de la file tout de suite. */
+  leaveWait(slug: string, body: unknown): void {
+    const row = isRoomSlug(slug) ? this.bySlug(slug) : undefined;
+    if (!row) return;
+    const w = this.waiter(row, (body as { ticket?: unknown } | null)?.ticket);
+    if (!w) return;
+    // Un refus n'est pas effacé par l'invité : il reste lisible jusqu'à son échéance.
+    if (w.state === 'denied') return;
+    this.waiters.delete(w.ticket);
+    if (w.state === 'admitted') this.pending.get(this.livekitName(row))?.delete(w.identity);
+  }
+
+  private rowForHost(slug: string): RoomRow {
+    const row = isRoomSlug(slug) ? this.bySlug(slug) : undefined;
+    if (!row) throw new VideoError(404, 'not_found', 'Salle introuvable');
+    return row;
+  }
+
+  /** File d'attente d'une salle, pour l'hôte. */
+  waitingList(slug: string): VideoWaiter[] {
+    const row = this.rowForHost(slug);
+    return this.waitersOf(row.id).map((w) => ({ id: w.identity, name: w.name, since: new Date(w.since).toISOString() }));
+  }
+
+  /** L'hôte fait entrer un invité : sa place est réservée, il recevra son jeton à sa prochaine demande. */
+  async admit(slug: string, body: unknown): Promise<VideoWaiter[]> {
+    const row = this.rowForHost(slug);
+    this.openRoom(slug);
+    const id = (body as { id?: unknown } | null)?.id;
+    const w = this.waitersOf(row.id).find((x) => x.identity === id);
+    if (!w) throw new VideoError(404, 'wait_gone', 'Cette personne n’attend plus.');
+    const room = this.livekitName(row);
+    try {
+      await this.takeSeat(room, w.identity, this.getSettings().maxParticipants, ADMITTED_MS);
+    } catch (err) {
+      if (err instanceof VideoError) throw err;
+      throw new VideoError(503, 'server_unavailable', 'Le serveur de visio ne répond pas. Réessayez dans un instant.');
+    }
+    // L'invité a pu renoncer pendant l'appel au serveur de visio : sa place est rendue.
+    if (this.waiters.get(w.ticket) !== w || w.state !== 'waiting') {
+      this.pending.get(room)?.delete(w.identity);
+      throw new VideoError(404, 'wait_gone', 'Cette personne n’attend plus.');
+    }
+    w.state = 'admitted';
+    w.until = this.now().getTime() + ADMITTED_MS;
+    return this.waitingList(slug);
+  }
+
+  /** L'hôte refuse un invité : celui-ci l'apprend à sa prochaine demande. */
+  deny(slug: string, body: unknown): VideoWaiter[] {
+    const row = this.rowForHost(slug);
+    const id = (body as { id?: unknown } | null)?.id;
+    const w = this.waitersOf(row.id).find((x) => x.identity === id);
+    if (!w) throw new VideoError(404, 'wait_gone', 'Cette personne n’attend plus.');
+    w.state = 'denied';
+    w.until = this.now().getTime() + DENIED_MS;
+    return this.waitingList(slug);
   }
 }

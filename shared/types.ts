@@ -411,6 +411,8 @@ export interface VideoSettings {
   /** Participants au plus dans une salle, toi compris (2 à 8). */
   maxParticipants: number;
   quality: VideoQuality;
+  /** Salle d'attente : un invité n'entre que lorsque tu l'as fait entrer. */
+  waitingRoom: boolean;
 }
 
 export interface VideoServerStatus {
@@ -437,6 +439,8 @@ export interface VideoRoom {
   bookingId: string | null;
   /** Personnes connectées en ce moment (null : serveur de visio injoignable). */
   live: number | null;
+  /** Invités qui patientent en salle d'attente. */
+  waiting: number;
 }
 
 export interface VideoAdminState {
@@ -470,6 +474,8 @@ export interface PublicVideoRoom {
   timezone: string;
   /** Le visiteur est connecté à Alfred : il entre comme hôte. */
   isHost: boolean;
+  /** Le visiteur passera par la salle d'attente : l'hôte doit le faire entrer. */
+  waitingRoom: boolean;
 }
 
 export interface VideoJoinInfo {
@@ -479,4 +485,29 @@ export interface VideoJoinInfo {
   identity: string;
   isHost: boolean;
   quality: VideoQuality;
+}
+
+/** Réponse à une demande d'entrée quand la salle d'attente est active. */
+export interface VideoWaitInfo {
+  waiting: true;
+  /** Secret à présenter pour suivre la demande. */
+  ticket: string;
+  /** L'hôte est dans la salle ; null si on ne sait pas. */
+  hostPresent: boolean | null;
+}
+
+export type VideoJoinResult = VideoJoinInfo | VideoWaitInfo;
+
+/** Suivi d'une demande en salle d'attente. */
+export type VideoWaitStatus =
+  | { state: 'waiting'; hostPresent: boolean | null }
+  | { state: 'denied' }
+  | { state: 'admitted'; join: VideoJoinInfo };
+
+/** Un invité qui patiente, vu par l'hôte. */
+export interface VideoWaiter {
+  id: string;
+  name: string;
+  /** Instant ISO de sa demande. */
+  since: string;
 }
