@@ -152,3 +152,35 @@ Alfred est passé de `alfred.antoinequarroz.ch` à `alfred.postmelo.ch` le 17 no
 3. **Alfred** : `ALFRED_PUBLIC_URL` dans `/opt/alfred/.env` (et `LIVEKIT_PUBLIC_URL` s'il est renseigné), puis redémarrer le conteneur `alfred`. Les nouveaux e-mails et liens de visio prennent la nouvelle adresse.
 4. **Ce qui ne bouge pas** : les UID des fichiers `.ics` envoyés aux clients (`BOOKING_UID_DOMAIN` dans `server/booking/mail.ts`) restent sur l'ancien domaine, sinon un déplacement ou une annulation créerait un doublon dans leur calendrier.
 5. **Apps installées** : l'app iPhone/Mac et ses notifications sont liées à l'adresse. Il faut se reconnecter, réinstaller l'app depuis la nouvelle adresse et réactiver les notifications.
+
+## Se connecter avec le compte PostMelo
+
+Alfred accepte la connexion avec le compte de la suite (service `postmelo-compte`, https://compte.postmelo.ch,
+OpenID Connect). Le mot de passe d'Alfred reste valable : c'est l'**accès de secours** si le service de compte
+est en panne. Il se remet à zéro avec `ssh -t antoine-vps 'bash /opt/alfred/deploy/configurer.sh'`.
+
+1. Un secret partagé, généré sur le VPS sans l'afficher : `openssl rand -base64 32`.
+2. Côté compte (`.env` du service de compte), puis redémarrer le conteneur `compte` :
+   ```env
+   ALFRED_URL=https://alfred.postmelo.ch
+   ALFRED_CLIENT_SECRET=<le secret>
+   ```
+3. Côté Alfred (`/opt/alfred/.env`), puis `docker compose up -d alfred` :
+   ```env
+   COMPTE_URL=https://compte.postmelo.ch
+   COMPTE_CLIENT_SECRET=<le même secret>
+   # facultatif : COMPTE_CLIENT_ID (alfred par défaut), APP_URL (ALFRED_PUBLIC_URL par défaut)
+   # facultatif : COMPTE_AUTORISES=e-mail1,e-mail2 (en plus des administrateurs de la suite)
+   ```
+4. Dans « Personnes et accès » du compte, ouvrir Alfred à ton compte.
+
+Qui entre : les **administrateurs** de la suite, plus les e-mails ou identifiants de `COMPTE_AUTORISES`.
+Le service de compte refuse déjà les personnes à qui l'outil n'est pas ouvert ; cette liste est une seconde barrière,
+parce qu'Alfred contient un agenda personnel.
+
+Au démarrage, le journal dit `connexion avec le compte PostMelo : https://compte.postmelo.ch/api/auth`.
+Retour en arrière : retirer `COMPTE_URL` du `.env` et relancer ; la page revient au mot de passe seul.
+
+Limites : « Se déconnecter » ne ferme que la session d'Alfred (pas celle du compte). L'app installée sur iPhone
+(écran d'accueil) passe par une fenêtre Safari pour la connexion : si elle ne revient pas connectée, le mot de passe
+de secours fonctionne toujours.

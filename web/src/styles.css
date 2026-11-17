@@ -337,6 +337,8 @@ kbd {
 .login input[type='password']:focus { outline: none; border-color: var(--accent-ink); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
 .login input[type='password']:hover { border-color: color-mix(in srgb, var(--line) 55%, var(--faint)); }
 .login .btn.wide { height: 38px; font-size: 14px; }
+.login a.btn { text-decoration: none; justify-content: center; }
+.login-fallback { margin-top: -2px; }
 
 @keyframes rise { from { opacity: 0; transform: translateY(8px) scale(0.985); } }
 @keyframes fade { from { opacity: 0; } }

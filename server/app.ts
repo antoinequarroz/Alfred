@@ -12,6 +12,7 @@ import { ConnectionError, type ConnectionsService } from './connections.js';
 import { DEFAULT_CONNECTION_LIMITS, registerConnectionRoutes, type ConnectionLimits } from './connections-routes.js';
 import { IcsError } from './ics.js';
 import { verifyPassword } from './password.js';
+import { finishSignIn, PENDING_COOKIE, PENDING_MAX_AGE, startSignIn, type Person, type settings as compteSettings } from './compte.js';
 import { registerPushRoutes } from './push/routes.js';
 import { PushError, type PushService } from './push/service.js';
 import { PeopleError, PeopleService } from './people.js';
@@ -46,6 +47,16 @@ export interface AppDeps {
   push?: PushService;
   /** Annuaire des personnes et liens. Par défaut : construit sur la même base, Cairn à son adresse habituelle. */
   people?: PeopleService;
+  /**
+   * Connexion avec le compte PostMelo (OpenID Connect). null ou absent : seulement le mot de passe.
+   * allowed : e-mails ou identifiants admis en plus des administrateurs de la suite.
+   */
+  compte?: { settings: ReturnType<typeof compteSettings>; allowed: string[] };
+}
+
+/** Alfred est personnel : le compte doit être administrateur de la suite, ou nommé dans la liste. */
+export function compteMayEnter(person: Pick<Person, 'id' | 'email' | 'role'>, allowed: string[]): boolean {
+  return person.role === 'admin' || allowed.includes(person.email.toLowerCase()) || allowed.includes(person.id.toLowerCase());
 }
 
 class BadRequest extends Error {}
@@ -188,6 +199,53 @@ export function createApp(deps: AppDeps): Hono {
     return c.json({ ok: true });
   });
 
+  // --- connexion avec le compte PostMelo -------------------------------------
+  // Deux allers-retours de navigateur (pas de fetch) : /start envoie vers le service de compte,
+  // qui renvoie sur /callback avec un code échangé ici contre l'identité de la personne.
+
+  const compte = deps.compte?.settings ?? null;
+  const compteAllowed = deps.compte?.allowed ?? [];
+  const PENDING_PATH = '/api/auth/compte';
+  const backToLogin = (c: Context, message: string) => c.redirect(`/?compte_erreur=${encodeURIComponent(message)}`, 302);
+  const compteMessage = (err: unknown) => {
+    console.warn('[alfred] connexion PostMelo :', err instanceof Error ? err.message : String(err));
+    // Les messages de server/compte.ts sont écrits pour la personne ; une panne réseau ne l'est pas.
+    return err instanceof Error && err.constructor === Error ? err.message : 'Service de compte injoignable, utilise le mot de passe de secours';
+  };
+
+  app.get('/api/auth/compte/start', async (c) => {
+    if (!compte) return c.json({ error: 'Connexion par compte non configurée' }, 404);
+    try {
+      const { url, cookie } = await startSignIn({}, compte);
+      setCookie(c, PENDING_COOKIE, cookie, { httpOnly: true, secure: deps.secureCookies, sameSite: 'Lax', path: PENDING_PATH, maxAge: PENDING_MAX_AGE });
+      return c.redirect(url, 302);
+    } catch (err) {
+      return backToLogin(c, compteMessage(err));
+    }
+  });
+
+  app.get('/api/auth/compte/callback', async (c) => {
+    if (!compte) return c.json({ error: 'Connexion par compte non configurée' }, 404);
+    const pending = getCookie(c, PENDING_COOKIE);
+    deleteCookie(c, PENDING_COOKIE, { path: PENDING_PATH });
+    let person: Person & { next: string };
+    try {
+      person = await finishSignIn(c.req.url, pending, compte);
+    } catch (err) {
+      return backToLogin(c, compteMessage(err));
+    }
+    if (!compteMayEnter(person, compteAllowed)) {
+      console.warn(`[alfred] connexion PostMelo refusée pour ${person.email}`);
+      return backToLogin(c, `Le compte ${person.email} n'a pas accès à Alfred`);
+    }
+    store.purgeSessions();
+    const session = store.createSession(deps.sessionDays);
+    setCookie(c, COOKIE, session.id, {
+      httpOnly: true, secure: deps.secureCookies, sameSite: 'Lax', path: '/', expires: session.expires,
+    });
+    return c.redirect(person.next, 302);
+  });
+
   app.post('/api/logout', (c) => {
     const sid = getCookie(c, COOKIE);
     if (sid) store.deleteSession(sid);
@@ -195,7 +253,7 @@ export function createApp(deps: AppDeps): Hono {
     return c.json({ ok: true });
   });
 
-  app.get('/api/me', (c) => c.json({ authenticated: authed(c) }));
+  app.get('/api/me', (c) => c.json({ authenticated: authed(c), compte: Boolean(compte) }));
 
   app.use('/api/*', async (c, next) => {
     if (!authed(c)) return c.json({ error: 'Non connecté' }, 401);

@@ -6,7 +6,8 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import { createApp } from './app.js';
 import { BookingService } from './booking/service.js';
 import { CaldavSync } from './caldav.js';
-import { allowPrivateHosts, config, connectionEnv, secretKeyEnv, videoEnv } from './config.js';
+import { allowPrivateHosts, compteAllowed, compteEnv, config, connectionEnv, secretKeyEnv, videoEnv } from './config.js';
+import { settings as compteSettings } from './compte.js';
 import { ConnectionsService } from './connections.js';
 import { openDb } from './db.js';
 import { PeopleService } from './people.js';
@@ -26,6 +27,10 @@ if (!passwordHash) {
   passwordHash = await hashPassword('alfred');
   console.warn('[alfred] mode dev : mot de passe « alfred »');
 }
+
+const compte = compteSettings(compteEnv);
+if (compte) console.log(`[alfred] connexion avec le compte PostMelo : ${compte.issuer}`);
+else if (compteEnv.COMPTE_URL) console.warn('[alfred] COMPTE_URL sans COMPTE_CLIENT_SECRET valable (32 caractères au moins) : connexion par compte désactivée');
 
 const store = new Store(openDb(config.dataDir));
 const secrets = new SecretBox({ dataDir: config.dataDir, envKey: secretKeyEnv });
@@ -67,6 +72,7 @@ connections.mailContext = () => ({ publicName: booking.getSettings().publicName,
 const people = new PeopleService({ db: store.db, store, booking, cairnUrl: config.cairnUrl });
 const app = createApp({
   store, service, caldav, passwordHash, booking, connections, video, push, people,
+  compte: { settings: compte, allowed: compteAllowed },
   secureCookies: config.production,
   sessionDays: config.sessionDays,
 });

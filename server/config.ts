@@ -96,3 +96,22 @@ export const secretKeyEnv = process.env.ALFRED_SECRET_KEY || undefined;
  * de bouclage et privées et un serveur CalDAV en http (tests locaux contre Radicale et un faux SMTP).
  */
 export const allowPrivateHosts = process.env.ALFRED_ALLOW_PRIVATE_HOSTS === '1';
+
+/**
+ * Connexion avec le compte PostMelo (OpenID Connect, service antoinequarroz/postmelo-compte).
+ * Sans COMPTE_URL ni COMPTE_CLIENT_SECRET, Alfred garde seulement son mot de passe.
+ * Le mot de passe local reste toujours accepté : c'est l'accès de secours si le service de compte est en panne.
+ */
+export const compteEnv = {
+  COMPTE_URL: process.env.COMPTE_URL,
+  COMPTE_CLIENT_ID: process.env.COMPTE_CLIENT_ID || 'alfred',
+  COMPTE_CLIENT_SECRET: process.env.COMPTE_CLIENT_SECRET,
+  APP_URL: process.env.APP_URL || config.publicUrl,
+};
+
+/**
+ * Qui peut entrer dans Alfred avec son compte : les administrateurs de la suite, plus les e-mails ou
+ * identifiants listés dans COMPTE_AUTORISES (séparés par des virgules). Alfred est un outil personnel.
+ */
+export const compteAllowed = (process.env.COMPTE_AUTORISES ?? '')
+  .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
