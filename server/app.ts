@@ -8,6 +8,7 @@ import type { EditScope, EventInput, RepeatRule } from '../shared/types.js';
 import { DEFAULT_BOOKING_LIMITS, registerAdminBookingRoutes, registerPublicBookingRoutes, type BookingLimits } from './booking/routes.js';
 import { BookingError, BookingService } from './booking/service.js';
 import { ConflictError, RemoteError, type CaldavSync } from './caldav.js';
+import { CALLBACK_PATH, finishSignIn, PENDING_COOKIE, PENDING_MAX_AGE, START_PATH, startSignIn, type Settings as CompteSettings } from './compte.js';
 import { ConnectionError, type ConnectionsService } from './connections.js';
 import { DEFAULT_CONNECTION_LIMITS, registerConnectionRoutes, type ConnectionLimits } from './connections-routes.js';
 import { IcsError } from './ics.js';
@@ -32,6 +33,8 @@ export interface AppDeps {
   passwordHash: string;
   secureCookies: boolean;
   sessionDays: number;
+  /** Connexion par le Compte Postmelo (OpenID Connect). Absente : seul le mot de passe d'Alfred ouvre l'app. */
+  compte?: CompteSettings | null;
   /** Prise de rendez-vous. Par défaut : un moteur sans envoi d'e-mails, en Europe/Zurich. */
   booking?: BookingService;
   /** Limites de débit de la partie publique (valeurs par défaut sinon). */
@@ -188,6 +191,43 @@ export function createApp(deps: AppDeps): Hono {
     return c.json({ ok: true });
   });
 
+  // --- connexion par le Compte Postmelo ---------------------------------------
+  // Le service de compte décide qui entre (il refuse de donner une identité si Alfred n'est pas
+  // ouvert à la personne) : une identité reçue ouvre donc la même session que le mot de passe.
+
+  const compte = deps.compte ?? null;
+  const backToLogin = (c: Context, message: string) => c.redirect(`/?connexion=${encodeURIComponent(message)}`);
+
+  app.get(START_PATH, async (c) => {
+    if (!compte) return c.json({ error: 'Introuvable' }, 404);
+    try {
+      const { url, cookie } = await startSignIn({}, compte);
+      setCookie(c, PENDING_COOKIE, cookie, { httpOnly: true, secure: deps.secureCookies, sameSite: 'Lax', path: '/', maxAge: PENDING_MAX_AGE });
+      return c.redirect(url);
+    } catch (err) {
+      console.error('[alfred] compte :', err instanceof Error ? err.message : err);
+      return backToLogin(c, 'Le Compte Postmelo ne répond pas. Réessaie, ou utilise le mot de passe.');
+    }
+  });
+
+  app.get(CALLBACK_PATH, async (c) => {
+    if (!compte) return c.json({ error: 'Introuvable' }, 404);
+    const pending = getCookie(c, PENDING_COOKIE);
+    deleteCookie(c, PENDING_COOKIE, { path: '/' });
+    try {
+      const person = await finishSignIn(c.req.url, pending, compte);
+      store.purgeSessions();
+      const session = store.createSession(deps.sessionDays);
+      setCookie(c, COOKIE, session.id, {
+        httpOnly: true, secure: deps.secureCookies, sameSite: 'Lax', path: '/', expires: session.expires,
+      });
+      console.log(`[alfred] connexion par le Compte Postmelo : ${person.email}`);
+      return c.redirect(person.next);
+    } catch (err) {
+      return backToLogin(c, err instanceof Error ? err.message : 'La connexion a échoué');
+    }
+  });
+
   app.post('/api/logout', (c) => {
     const sid = getCookie(c, COOKIE);
     if (sid) store.deleteSession(sid);
@@ -195,7 +235,7 @@ export function createApp(deps: AppDeps): Hono {
     return c.json({ ok: true });
   });
 
-  app.get('/api/me', (c) => c.json({ authenticated: authed(c) }));
+  app.get('/api/me', (c) => c.json({ authenticated: authed(c), compte: Boolean(compte) }));
 
   app.use('/api/*', async (c, next) => {
     if (!authed(c)) return c.json({ error: 'Non connecté' }, 401);

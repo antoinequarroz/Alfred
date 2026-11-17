@@ -15,7 +15,7 @@ function request<T>(method: string, path: string, body?: unknown): Promise<T> {
 }
 
 export const api = {
-  me: () => request<{ authenticated: boolean }>('GET', '/api/me'),
+  me: () => request<{ authenticated: boolean; compte?: boolean }>('GET', '/api/me'),
   login: (password: string) => request<{ ok: true }>('POST', '/api/login', { password }),
   logout: () => request<{ ok: true }>('POST', '/api/logout'),
   calendars: () => request<CalendarInfo[]>('GET', '/api/calendars'),

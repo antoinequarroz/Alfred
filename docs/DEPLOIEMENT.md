@@ -77,6 +77,31 @@ Tout se règle dans Alfred, rubrique **Rendez-vous** de la barre latérale :
 
 La page publique reste fermée tant que l'interrupteur n'est pas activé. Un lien direct vers un type existe aussi : `/rdv/<identifiant>`.
 
+### Se connecter avec le Compte Postmelo (facultatif)
+
+Alfred peut s'ouvrir avec le Compte Postmelo (`https://compte.postmelo.ch`), comme Lamio. Le mot de passe d'Alfred reste un secours.
+
+1. Créer un secret : `openssl rand -base64 32`.
+2. Dans le `.env` du service de compte (`~/compte/.env`), puis redémarrer le conteneur `compte` :
+
+   ```env
+   ALFRED_URL=https://alfred.antoinequarroz.ch
+   ALFRED_CLIENT_SECRET=<le secret>
+   ```
+
+3. Dans le `.env` d'Alfred, puis `docker compose -f deploy/docker-compose.yml up -d` :
+
+   ```env
+   COMPTE_URL=https://compte.postmelo.ch
+   COMPTE_CLIENT_SECRET=<le même secret>
+   ```
+
+`ALFRED_URL` côté compte doit être exactement `ALFRED_PUBLIC_URL` côté Alfred : le retour se fait sur `<adresse>/api/auth/compte/callback`. Au démarrage, Alfred écrit « connexion par le Compte Postmelo active » dans ses journaux.
+
+C'est le service de compte qui décide qui entre : les administrateurs toujours, les membres seulement si Alfred leur est ouvert (Compte Postmelo > Personnes et accès). Alfred n'a qu'un seul espace : une personne qui entre voit tout le calendrier et les réglages.
+
+Retour en arrière : vider les deux lignes d'Alfred et relancer. Se déconnecter d'Alfred ne ferme pas la session du compte.
+
 ## 3. Exposer en HTTPS
 
 Ajouter le contenu de [`deploy/Caddyfile.snippet`](../deploy/Caddyfile.snippet) au Caddyfile existant, puis recharger Caddy :
