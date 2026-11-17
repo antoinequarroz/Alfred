@@ -22,7 +22,7 @@ services:
       options: { max-size: "5m", max-file: "2" }
 
   # Serveur de visio. La signalisation (7880) reste sur le réseau Docker : Caddy y envoie
-  # alfred.antoinequarroz.ch/rtc. Seuls l'audio et la vidéo sont exposés : 7882/udp, et 7881/tcp en repli.
+  # alfred.postmelo.ch/rtc. Seuls l'audio et la vidéo sont exposés : 7882/udp, et 7881/tcp en repli.
   # Limites strictes : la visio ne doit jamais gêner les autres sites du VPS.
   livekit:
     image: livekit/livekit-server:v1.13.11

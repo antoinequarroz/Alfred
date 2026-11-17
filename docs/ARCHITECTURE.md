@@ -88,7 +88,7 @@ Une page publique laisse un client choisir un type de rendez-vous puis un créne
 
 ## La visioconférence (v2)
 
-Chaque visio est une « salle » avec un lien `https://alfred.antoinequarroz.ch/v/<slug>`. L'invité l'ouvre dans son navigateur, sans compte ni installation ; Antoine, connecté à Alfred, y entre comme hôte.
+Chaque visio est une « salle » avec un lien `https://alfred.postmelo.ch/v/<slug>`. L'invité l'ouvre dans son navigateur, sans compte ni installation ; Antoine, connecté à Alfred, y entre comme hôte.
 
 ```
  Navigateur ──HTTPS──► Caddy ──► alfred (jetons, salles, réglages)

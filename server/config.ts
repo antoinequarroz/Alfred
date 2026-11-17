@@ -45,7 +45,7 @@ export const config = {
     from: mailFrom,
   },
   /** Adresse publique d'Alfred, pour les liens dans les e-mails (sans barre finale). */
-  publicUrl: (process.env.ALFRED_PUBLIC_URL || 'https://alfred.antoinequarroz.ch').replace(/\/+$/, ''),
+  publicUrl: (process.env.ALFRED_PUBLIC_URL || 'https://alfred.postmelo.ch').replace(/\/+$/, ''),
   /** Adresse de Cairn : ses liens de notes deviennent des adresses media://cairn/note/<id>. */
   cairnUrl: (process.env.CAIRN_URL || 'https://cairn.antoinequarroz.ch').replace(/\/+$/, ''),
 };

@@ -215,6 +215,17 @@ export interface MailContext {
 }
 
 /**
+ * Domaine des UID iCalendar des rendez-vous. Il ne doit JAMAIS changer, même si l'adresse d'Alfred
+ * change (passage à alfred.postmelo.ch en novembre 2026) : le calendrier du client reconnaît un
+ * rendez-vous à son UID, et un nouvel UID ferait un doublon au lieu d'une mise à jour.
+ */
+export const BOOKING_UID_DOMAIN = 'alfred.antoinequarroz.ch';
+
+export function bookingIcsUid(bookingId: string): string {
+  return `rdv-${bookingId}@${BOOKING_UID_DOMAIN}`;
+}
+
+/**
  * Pièce jointe iCalendar pour le client : simple publication (METHOD:PUBLISH),
  * pas une invitation. Ni organisateur ni participant, donc aucune réponse attendue.
  */
@@ -227,13 +238,7 @@ export function buildBookingIcs(b: BookingMailData, ctx: MailContext): string {
   const tz = vtimezoneComponent(ctx.timezone);
   if (tz) vcal.addSubcomponent(tz);
   const vevent = new ICAL.Component('vevent');
-  let host = 'alfred';
-  try {
-    host = new URL(ctx.publicUrl).hostname || host;
-  } catch {
-    // adresse publique invalide : identifiant générique
-  }
-  vevent.updatePropertyWithValue('uid', `rdv-${b.id}@${host}`);
+  vevent.updatePropertyWithValue('uid', bookingIcsUid(b.id));
   vevent.updatePropertyWithValue('dtstamp', ICAL.Time.fromJSDate(new Date(), true));
   const setTime = (name: string, iso: string) => {
     const time = timeInZone(new Date(iso), ctx.timezone);

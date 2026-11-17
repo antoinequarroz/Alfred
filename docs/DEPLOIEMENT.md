@@ -4,7 +4,7 @@ Alfred tourne dans un seul conteneur, limité à 256 Mo de RAM, derrière le Cad
 
 ## 1. Avant de commencer
 
-1. **DNS** : créer un enregistrement `A` pour `alfred.antoinequarroz.ch` vers l'IP du VPS.
+1. **DNS** : créer un enregistrement `A` pour `alfred.postmelo.ch` vers l'IP du VPS.
 2. **Mot de passe d'application iCloud** : sur [account.apple.com](https://account.apple.com) > Connexion et sécurité > Mots de passe pour les apps, en créer un nommé « Alfred ». Il a la forme `abcd-efgh-ijkl-mnop`.
 3. **Mot de passe d'Alfred** : en choisir un long, puis générer son empreinte :
 
@@ -61,7 +61,7 @@ SMTP_USER=info@antoinequarroz.ch
 SMTP_PASSWORD=…               # mot de passe de la boîte, ou mot de passe d'application Infomaniak
 MAIL_FROM="Antoine Quarroz <info@antoinequarroz.ch>"
 MAIL_NOTIFY_TO=               # qui reçoit les avis (défaut : l'adresse de MAIL_FROM)
-ALFRED_PUBLIC_URL=https://alfred.antoinequarroz.ch
+ALFRED_PUBLIC_URL=https://alfred.postmelo.ch
 ```
 
 Puis `docker compose -f deploy/docker-compose.yml up -d --build`. Sans identifiants, ni dans l'app ni dans le `.env`, la prise de rendez-vous fonctionne mais n'envoie aucun e-mail (un avertissement s'affiche dans l'admin, avec un lien vers le formulaire).
@@ -73,7 +73,7 @@ Tout se règle dans Alfred, rubrique **Rendez-vous** de la barre latérale :
 1. **Types** : créer au moins un type (nom, durée, lieu, délais).
 2. **Horaires** : vérifier les plages hebdomadaires et les calendriers qui bloquent les créneaux.
 3. **Réglages** : nom affiché, texte d'accueil, calendrier où créer les rendez-vous ; la carte « E-mails » règle le SMTP et « Envoyer un e-mail d'essai » le vérifie.
-4. Basculer l'interrupteur « Ouvrir la prise de rendez-vous », puis copier le lien public (`https://alfred.antoinequarroz.ch/rdv`).
+4. Basculer l'interrupteur « Ouvrir la prise de rendez-vous », puis copier le lien public (`https://alfred.postmelo.ch/rdv`).
 
 La page publique reste fermée tant que l'interrupteur n'est pas activé. Un lien direct vers un type existe aussi : `/rdv/<identifiant>`.
 
@@ -85,7 +85,7 @@ Ajouter le contenu de [`deploy/Caddyfile.snippet`](../deploy/Caddyfile.snippet) 
 docker exec antoinequarroz-caddy caddy reload --config /etc/caddy/Caddyfile   # adapter le chemin si besoin
 ```
 
-Ouvrir https://alfred.antoinequarroz.ch et se connecter. Les calendriers iCloud apparaissent après la première synchro (quelques secondes à une minute selon le nombre d'événements).
+Ouvrir https://alfred.postmelo.ch et se connecter. Les calendriers iCloud apparaissent après la première synchro (quelques secondes à une minute selon le nombre d'événements).
 
 ### La visio
 
@@ -93,7 +93,7 @@ Le serveur de visio (LiveKit) est un second conteneur du même fichier compose, 
 
 1. **Clés et démarrage** : `bash /opt/alfred/deploy/visio.sh`. Sans question : crée les clés partagées (dans `.env` et `.env.livekit`, lisibles par toi seul), relève l'adresse publique du VPS, démarre les deux conteneurs. Relançable.
 2. **Pare-feu** : ouvrir l'audio et la vidéo, `sudo ufw allow 7882/udp` et `sudo ufw allow 7881/tcp`. Rien d'autre n'est exposé.
-3. **Caddy** : dans le bloc `alfred.antoinequarroz.ch`, envoyer `/rtc*` vers `alfred-livekit:7880` (voir [`deploy/Caddyfile.snippet`](../deploy/Caddyfile.snippet)). Sauvegarder le Caddyfile avant, valider (`caddy validate`), puis recharger.
+3. **Caddy** : dans le bloc `alfred.postmelo.ch`, envoyer `/rtc*` vers `alfred-livekit:7880` (voir [`deploy/Caddyfile.snippet`](../deploy/Caddyfile.snippet)). Sauvegarder le Caddyfile avant, valider (`caddy validate`), puis recharger.
 4. **Vérifier** : Alfred > Réglages > Visioconférence affiche « Serveur de visio en ligne ». Rubrique Visio > « Nouvelle visio », puis ouvrir le lien depuis un téléphone en 4G.
 
 Tout le reste (activer, nombre de participants, qualité) se règle dans l'app. Pour arrêter la visio sans toucher à Alfred : `docker stop alfred-livekit` (les liens répondent « indisponible »).
@@ -142,3 +142,13 @@ Puis ouvrir Réglages : aucun message « à ressaisir » ne doit apparaître, et
 - **Un serveur refusé comme « adresse interne ou privée »** : c'est voulu, Alfred ne se connecte pas au réseau interne du VPS pour un serveur saisi dans l'app. Un serveur interne légitime se déclare dans le `.env`.
 - **Connexion refusée en boucle** : vérifier que `ALFRED_PASSWORD_HASH` commence par `scrypt:` et tient sur une seule ligne dans le `.env`.
 - **Trop d'essais** : le blocage se lève après 15 minutes, ou tout de suite avec `docker restart alfred`.
+
+## Changer de domaine
+
+Alfred est passé de `alfred.antoinequarroz.ch` à `alfred.postmelo.ch` le 17 novembre 2026. Pour refaire un tel changement :
+
+1. **DNS** : un enregistrement `A` pour le nouveau nom vers l'IP du VPS (garder l'ancien).
+2. **Caddy** : un bloc pour le nouveau nom (copie de l'ancien, `/rtc*` compris), et l'ancien bloc remplacé par une redirection permanente (`redir https://<nouveau>{uri} permanent`), pour que les liens déjà envoyés (gestion de rendez-vous, visios) continuent de marcher. Voir [`deploy/Caddyfile.snippet`](../deploy/Caddyfile.snippet).
+3. **Alfred** : `ALFRED_PUBLIC_URL` dans `/opt/alfred/.env` (et `LIVEKIT_PUBLIC_URL` s'il est renseigné), puis redémarrer le conteneur `alfred`. Les nouveaux e-mails et liens de visio prennent la nouvelle adresse.
+4. **Ce qui ne bouge pas** : les UID des fichiers `.ics` envoyés aux clients (`BOOKING_UID_DOMAIN` dans `server/booking/mail.ts`) restent sur l'ancien domaine, sinon un déplacement ou une annulation créerait un doublon dans leur calendrier.
+5. **Apps installées** : l'app iPhone/Mac et ses notifications sont liées à l'adresse. Il faut se reconnecter, réinstaller l'app depuis la nouvelle adresse et réactiver les notifications.
