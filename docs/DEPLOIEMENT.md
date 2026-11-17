@@ -132,7 +132,15 @@ bash /opt/alfred/deploy/sauvegarde.sh                 # sauvegarde immédiate, p
 bash /opt/alfred/deploy/sauvegarde.sh --desinstaller  # retire la tâche, garde les archives
 ```
 
-**Ces archives restent sur le VPS** : elles protègent d'une erreur ou d'une mise à jour ratée, pas de la perte du serveur. Pour une copie ailleurs, le plus simple et gratuit est de les rapatrier sur le Mac (`rsync -a antoine-vps:/opt/sauvegardes/alfred/ ~/Sauvegardes/Alfred/`, à lancer chaque jour par launchd) ; un stockage objet suisse (Infomaniak Swiss Backup, ~1 à 3 €/mois) est l'autre option. Les archives contiennent la clé de déchiffrement : à garder dans un dossier privé.
+**Copie sur le Mac.** Les archives du VPS protègent d'une erreur ou d'une mise à jour ratée, pas de la perte du serveur. [`deploy/mac/rapatrier-sauvegardes.sh`](../deploy/mac/rapatrier-sauvegardes.sh) les copie chaque jour sur le Mac, dans `~/Sauvegardes/Alfred` (gardées 90 jours, au moins les 7 dernières). Il passe par `ssh antoine-vps` (la clé SSH du Mac, sans mot de passe à taper) et ne supprime rien sur le VPS. Si le VPS ne répond pas ou si la dernière sauvegarde a plus de 2 jours, une notification macOS s'affiche. Journal : `~/Sauvegardes/Alfred/rapatriement.log`.
+
+```bash
+bash deploy/mac/rapatrier-sauvegardes.sh --installer     # sur le Mac : tâche launchd chaque jour à 9 h (rattrapée au réveil) + script copié dans ~/Library/Application Support/Alfred
+bash deploy/mac/rapatrier-sauvegardes.sh                 # copie immédiate
+bash deploy/mac/rapatrier-sauvegardes.sh --desinstaller  # retire la tâche, garde les copies
+```
+
+Les archives contiennent la clé de déchiffrement des mots de passe enregistrés dans l'app : le dossier est en 700 et les fichiers en 600. Un stockage objet suisse (Infomaniak Swiss Backup, ~1 à 3 €/mois) reste possible plus tard si le Mac ne suffit pas.
 
 ### Restaurer
 
