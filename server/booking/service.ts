@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { expand, newUid, type BusyOccurrence } from '../ics.js';
 import {
   CHANGE_NOTICE_CHOICES, REMINDER_HOURS_CHOICES,
-  type Booking, type BookingAdminState, type BookingConfirmation, type BookingHoursRange, type BookingMode, type BookingSettings,
+  type AllDayPreviewItem, type Booking, type BookingAdminState, type BookingConfirmation, type BookingHoursRange, type BookingMode, type BookingSettings,
   type BookingType, type PublicBooking, type PublicBookingInfo, type PublicBookingType, type PublicSlots,
 } from '../../shared/types.js';
 import { ConflictError, type CaldavSync } from '../caldav.js';
@@ -257,6 +257,13 @@ export class BookingService {
     if ('allDayBlocks' in body) {
       if (typeof body.allDayBlocks === 'boolean') next.allDayBlocks = body.allDayBlocks;
       else fields.allDayBlocks = 'Valeur attendue : vrai ou faux';
+    }
+    if ('allDayIgnore' in body) {
+      const list = body.allDayIgnore;
+      if (Array.isArray(list) && list.length <= 30 && list.every((w) => typeof w === 'string' && w.trim().length <= 50 && !CONTROL_RE.test(w))) {
+        const seen = new Set<string>();
+        next.allDayIgnore = (list as string[]).map((w) => w.trim()).filter((w) => w && !seen.has(normalizeWord(w)) && seen.add(normalizeWord(w)));
+      } else fields.allDayIgnore = 'Mots-clés : 30 au plus, 50 caractères chacun';
     }
     if ('reminderHours' in body) {
       const list = body.reminderHours;
@@ -513,22 +520,50 @@ export class BookingService {
   private agendaBusy(fromMs: number, toMs: number): BusyOccurrence[] {
     const today = localDateOf(this.now().getTime(), this.timezone);
     const horizon = this.data.listTypes().reduce((max, t) => Math.max(max, t.horizonDays), 0);
-    const allDayBlocks = this.getSettings().allDayBlocks;
-    const key = `${this.store.version}|${today}|${horizon}|${allDayBlocks ? 1 : 0}`;
+    const { allDayBlocks, allDayIgnore } = this.getSettings();
+    const key = `${this.store.version}|${today}|${horizon}|${allDayBlocks ? 1 : 0}|${JSON.stringify(allDayIgnore)}`;
     if (this.busyCache?.key !== key) {
       const start = startOfLocalDay(today, this.timezone) - DAY_MS;
       const end = startOfLocalDay(addDays(today, horizon + 1), this.timezone) + DAY_MS;
-      this.busyCache = { key, fromMs: start, toMs: end, list: this.readBusy(start, end, allDayBlocks) };
+      this.busyCache = { key, fromMs: start, toMs: end, list: this.readBusy(start, end, allDayBlocks, allDayIgnore) };
     }
     if (fromMs >= this.busyCache.fromMs && toMs <= this.busyCache.toMs) return this.busyCache.list;
-    return this.readBusy(fromMs, toMs, allDayBlocks);
+    return this.readBusy(fromMs, toMs, allDayBlocks, allDayIgnore);
   }
 
-  private readBusy(fromMs: number, toMs: number, allDayBlocks: boolean): BusyOccurrence[] {
-    const list = this.store.busyOccurrences(new Date(fromMs), new Date(toMs));
+  private readBusy(fromMs: number, toMs: number, allDayBlocks: boolean, allDayIgnore: string[]): BusyOccurrence[] {
+    const ignored = keywordMatcher(allDayIgnore);
+    const list = this.store.busyOccurrences(new Date(fromMs), new Date(toMs), ignored);
     // Apple Calendar marque « disponible » les journées entières qu'il crée (congés compris) :
     // selon le réglage, une journée entière bloque quelle que soit cette marque.
     return allDayBlocks ? list.map((o) => (o.allDay && o.transparent ? { ...o, transparent: false } : o)) : list;
+  }
+
+  /**
+   * Journées entières à venir (jusqu'à l'horizon de réservation le plus lointain) des calendriers
+   * bloquants, et si chacune bloque avec les réglages actuels. Réservé à l'admin : contient les titres.
+   */
+  allDayPreview(): { horizonDays: number; items: AllDayPreviewItem[] } {
+    const today = localDateOf(this.now().getTime(), this.timezone);
+    const horizonDays = this.data.listTypes().reduce((max, t) => Math.max(max, t.horizonDays), 0) || 60;
+    const last = addDays(today, horizonDays);
+    const { allDayBlocks, allDayIgnore } = this.getSettings();
+    const ignored = keywordMatcher(allDayIgnore);
+    const items: AllDayPreviewItem[] = [];
+    const from = new Date(startOfLocalDay(today, this.timezone) - DAY_MS);
+    const to = new Date(startOfLocalDay(addDays(last, 1), this.timezone) + DAY_MS);
+    for (const o of this.store.allDayBusy(from, to)) {
+      if (o.end <= today || o.start > last) continue;
+      let blocks = true;
+      let reason = 'Marquée « occupé »';
+      const word = ignored(o.title);
+      if (o.cancelled) { blocks = false; reason = 'Annulée'; }
+      else if (word) { blocks = false; reason = `Titre avec « ${word} »`; }
+      else if (o.transparent && !allDayBlocks) { blocks = false; reason = 'Marquée « disponible »'; }
+      else if (o.transparent) reason = 'Journée entière (réglage « bloque toujours »)';
+      items.push({ eventId: o.eventId, calendarId: o.calendarId, title: o.title, start: o.start, end: o.end, blocks, reason });
+    }
+    return { horizonDays, items };
   }
 
   /**
@@ -1203,4 +1238,19 @@ export class BookingService {
     await this.sendMails(id, messages, sending);
     return this.toBooking(this.requireBooking(id));
   }
+}
+
+/** Mot comparé sans majuscules ni accents ni espaces en trop. */
+function normalizeWord(w: string): string {
+  return w.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+/** Renvoie le premier mot-clé contenu dans un titre (sans majuscules ni accents), sinon une chaîne vide. */
+function keywordMatcher(words: string[]): (title: string) => string {
+  const list = words.map((w) => [w, normalizeWord(w)] as const).filter(([, n]) => n.length > 0);
+  if (list.length === 0) return () => '';
+  return (title) => {
+    const t = normalizeWord(title);
+    return list.find(([, n]) => t.includes(n))?.[0] ?? '';
+  };
 }

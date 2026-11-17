@@ -59,6 +59,15 @@ interface TypeRow {
   sort: number;
 }
 
+function parseKeywords(json: string): string[] {
+  try {
+    const list: unknown = JSON.parse(json);
+    return Array.isArray(list) ? list.filter((w): w is string => typeof w === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 const MODES: BookingMode[] = ['cabinet', 'telephone', 'visio', 'autre'];
 
 function toType(r: TypeRow): BookingType {
@@ -98,6 +107,7 @@ export class BookingStore {
       calendarId: map.get('calendar_id') || null,
       slotStepMin: step === 15 || step === 60 ? step : (30 as BookingStep),
       allDayBlocks: map.get('all_day_blocks') !== '0',
+      allDayIgnore: map.has('all_day_ignore') ? parseKeywords(map.get('all_day_ignore')!) : ['anniversaire'],
       reminderHours: (REMINDER_HOURS_CHOICES as readonly number[]).filter((h) => reminders.includes(h)),
       allowReschedule: map.get('allow_reschedule') !== '0',
       changeNoticeHours: (CHANGE_NOTICE_CHOICES as readonly number[]).includes(notice) ? notice : 0,
@@ -113,6 +123,7 @@ export class BookingStore {
       set.run('calendar_id', s.calendarId ?? '');
       set.run('slot_step_min', String(s.slotStepMin));
       set.run('all_day_blocks', s.allDayBlocks ? '1' : '0');
+      set.run('all_day_ignore', JSON.stringify(s.allDayIgnore));
       set.run('reminder_hours', s.reminderHours.join(','));
       set.run('allow_reschedule', s.allowReschedule ? '1' : '0');
       set.run('change_notice_hours', String(s.changeNoticeHours));

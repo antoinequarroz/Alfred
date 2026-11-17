@@ -1,4 +1,5 @@
 import type {
+  AllDayPreviewItem,
   Booking, BookingAdminState, BookingHoursRange, BookingSettings, BookingType, BookingTypeInput,
   CalendarInfo, CaldavSaveResult, CaldavSettingsInput, ConnectionsState, ConnectionTest, EditScope, EventInput, Occurrence, PublicSlots,
   SmtpSaveResult, SmtpSettingsInput, SyncStatus, VideoAdminState, VideoRoom, VideoRoomInput, VideoSettings,
@@ -47,6 +48,7 @@ export const bookingApi = {
   hours: () => request<BookingHoursRange[]>('GET', '/api/booking/hours'),
   saveHours: (hours: BookingHoursRange[]) => request<BookingHoursRange[]>('PUT', '/api/booking/hours', hours),
   calendars: () => request<CalendarInfo[]>('GET', '/api/booking/calendars'),
+  allDay: () => request<{ horizonDays: number; items: AllDayPreviewItem[] }>('GET', '/api/booking/all-day'),
   setCalendarBlocks: (id: string, blocksBooking: boolean) =>
     request<CalendarInfo>('PATCH', `/api/booking/calendars/${encodeURIComponent(id)}`, { blocksBooking }),
   bookings: (scope: 'upcoming' | 'past') => request<Booking[]>('GET', `/api/booking/bookings?scope=${scope}&limit=200`),

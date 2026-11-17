@@ -96,6 +96,11 @@ export interface BookingSettings {
    */
   allDayBlocks: boolean;
   /**
+   * Mots du titre d'une journée entière qui ne bloque jamais (anniversaire, fête…), quelle que soit
+   * sa marque « occupé / disponible ». Comparés sans majuscules ni accents. Par défaut : « anniversaire ».
+   */
+  allDayIgnore: string[];
+  /**
    * Rappels envoyés au client avant le rendez-vous, en heures (parmi REMINDER_HOURS_CHOICES),
    * du plus tôt au plus tard. Vide : aucun rappel. Par défaut : 24 h et 1 h.
    */
@@ -137,6 +142,21 @@ export interface BookingHoursRange {
   weekday: number;
   startMin: number;
   endMin: number;
+}
+
+/** Journée entière à venir d'un calendrier bloquant, pour l'aperçu des réglages. */
+export interface AllDayPreviewItem {
+  eventId: string;
+  calendarId: string;
+  title: string;
+  /** Date AAAA-MM-JJ du premier jour. */
+  start: string;
+  /** Date AAAA-MM-JJ exclusive. */
+  end: string;
+  /** Vrai : la journée est indisponible à la réservation. */
+  blocks: boolean;
+  /** Pourquoi elle bloque ou non, en français. */
+  reason: string;
 }
 
 export interface BookingAdminState {

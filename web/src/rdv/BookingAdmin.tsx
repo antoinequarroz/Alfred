@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   CHANGE_NOTICE_CHOICES, REMINDER_HOURS_CHOICES,
   type Booking, type BookingAdminState, type BookingHoursRange, type BookingMode, type BookingSettings, type BookingStep, type BookingType,
-  type BookingTypeInput, type CalendarInfo,
+  type AllDayPreviewItem, type BookingTypeInput, type CalendarInfo,
 } from '../../../shared/types';
 import { ApiError, bookingApi } from '../api';
 import { AlertIcon, CheckIcon, Chevron, CloseIcon, CopyIcon, ExternalIcon, MenuIcon, PlusIcon } from '../icons';
@@ -423,9 +423,29 @@ function HoursCard({ hours, draft, setDraft, onSaved, notify }: {
   );
 }
 
-function BlockingCard({ calendars, allDayBlocks, onChange, onAllDay }: {
-  calendars: CalendarInfo[]; allDayBlocks: boolean; onChange: (c: CalendarInfo, blocks: boolean) => void; onAllDay: (blocks: boolean) => void;
+function BlockingCard({ calendars, settings, version, onChange, onSettings }: {
+  calendars: CalendarInfo[]; settings: BookingSettings; version: unknown;
+  onChange: (c: CalendarInfo, blocks: boolean) => void; onSettings: (patch: Partial<BookingSettings>) => Promise<void>;
 }) {
+  const [words, setWords] = useState(settings.allDayIgnore.join(', '));
+  const [preview, setPreview] = useState<{ horizonDays: number; items: AllDayPreviewItem[] } | null>(null);
+  const saved = settings.allDayIgnore.join(', ');
+  useEffect(() => setWords(saved), [saved]);
+  useEffect(() => {
+    let live = true;
+    bookingApi.allDay().then((p) => { if (live) setPreview(p); }, () => { if (live) setPreview(null); });
+    return () => { live = false; };
+  }, [version, saved, settings.allDayBlocks, calendars]);
+  const parsed = words.split(',').map((w) => w.trim()).filter(Boolean);
+  const dirty = parsed.join(', ') !== saved;
+  const saveWords = () => { if (dirty) void onSettings({ allDayIgnore: parsed }); };
+  const calName = (id: string) => calendars.find((c) => c.id === id)?.name ?? '';
+  const blocking = preview?.items.filter((i) => i.blocks).length ?? 0;
+  const fmt = (d: string) => new Date(`${d}T12:00:00Z`).toLocaleDateString('fr-CH', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
+  const lastDay = (i: AllDayPreviewItem) => {
+    const end = new Date(Date.parse(`${i.end}T12:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+    return end > i.start ? `${fmt(i.start)} – ${fmt(end)}` : fmt(i.start);
+  };
   return (
     <Card title="Calendriers qui bloquent les créneaux" sub="Un événement d’un calendrier coché rend le créneau indisponible, même si le calendrier est masqué. Les événements marqués « disponible » ne bloquent pas.">
       {calendars.length === 0 ? <p className="bk-empty">Aucun calendrier pour l’instant.</p> : (
@@ -441,7 +461,7 @@ function BlockingCard({ calendars, allDayBlocks, onChange, onAllDay }: {
       )}
       <div className="bk-option">
         <label className="check">
-          <input type="checkbox" checked={allDayBlocks} onChange={(e) => onAllDay(e.target.checked)} />
+          <input type="checkbox" checked={settings.allDayBlocks} onChange={(e) => void onSettings({ allDayBlocks: e.target.checked })} />
           Une journée entière bloque toujours toute la journée
         </label>
         <p className="bk-hint">
@@ -449,6 +469,37 @@ function BlockingCard({ calendars, allDayBlocks, onChange, onAllDay }: {
           Décoche-la si tes journées entières sont surtout des rappels, ou décoche plus haut le calendrier qui les porte (anniversaires, jours fériés).
         </p>
       </div>
+      <div className="bk-option">
+        <Fld label="Journées entières qui ne bloquent jamais" hint="Mots du titre, séparés par des virgules (sans tenir compte des majuscules ni des accents). Ex. : anniversaire, fête, rappel.">
+          {(id) => (
+            <div className="bk-words">
+              <input id={id} type="text" value={words} maxLength={600} placeholder="anniversaire, fête" onChange={(e) => setWords(e.target.value)}
+                onBlur={saveWords} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); saveWords(); } }} />
+              {dirty && <button className="btn primary" onMouseDown={(e) => e.preventDefault()} onClick={saveWords}>Enregistrer</button>}
+            </div>
+          )}
+        </Fld>
+      </div>
+      {preview && (
+        <div className="bk-option">
+          <strong className="bk-allday-title">
+            {preview.items.length === 0
+              ? `Aucune journée entière dans les ${preview.horizonDays} prochains jours`
+              : `Dans les ${preview.horizonDays} prochains jours : ${blocking} journée${blocking > 1 ? 's' : ''} entière${blocking > 1 ? 's' : ''} sur ${preview.items.length} bloque${blocking > 1 ? 'nt' : ''}`}
+          </strong>
+          {preview.items.length > 0 && (
+            <ul className="bk-allday">
+              {preview.items.map((i) => (
+                <li key={`${i.eventId}|${i.start}`} className={i.blocks ? 'blocks' : 'free'}>
+                  <span className="bk-allday-when">{lastDay(i)}</span>
+                  <span className="bk-allday-name" title={calName(i.calendarId)}>{i.title || 'Sans titre'}</span>
+                  <span className="bk-allday-why">{i.blocks ? 'Bloque' : 'Libre'} · {i.reason}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
     </Card>
   );
 }
@@ -770,16 +821,6 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
     }
   };
 
-  const setAllDayBlocks = async (allDayBlocks: boolean) => {
-    setState((s) => (s ? { ...s, settings: { ...s.settings, allDayBlocks } } : s));
-    try {
-      setState(await bookingApi.saveSettings({ allDayBlocks }));
-    } catch (err) {
-      notify(message(err));
-      void reload();
-    }
-  };
-
   const saveSettings = async (patch: Partial<BookingSettings>) => {
     setState((s) => (s ? { ...s, settings: { ...s.settings, ...patch } } : s));
     try {
@@ -925,7 +966,7 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
               {tab === 'hours' && (
                 <>
                   <HoursCard hours={hours} draft={hoursDraft} setDraft={setHoursDraft} onSaved={(h) => { setHours(h); void reload(); }} notify={notify} />
-                  <BlockingCard calendars={calendars} allDayBlocks={state.settings.allDayBlocks} onChange={(c, v) => void setBlocks(c, v)} onAllDay={(v) => void setAllDayBlocks(v)} />
+                  <BlockingCard calendars={calendars} settings={state.settings} version={hours} onChange={(c, v) => void setBlocks(c, v)} onSettings={saveSettings} />
                 </>
               )}
               {tab === 'settings' && (
