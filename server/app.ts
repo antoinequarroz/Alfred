@@ -12,6 +12,8 @@ import { ConnectionError, type ConnectionsService } from './connections.js';
 import { DEFAULT_CONNECTION_LIMITS, registerConnectionRoutes, type ConnectionLimits } from './connections-routes.js';
 import { IcsError } from './ics.js';
 import { verifyPassword } from './password.js';
+import { registerPushRoutes } from './push/routes.js';
+import { PushError, type PushService } from './push/service.js';
 import { PeopleError, PeopleService } from './people.js';
 import { registerPeopleRoutes } from './people-routes.js';
 import { ForbiddenError, NotFoundError, type CalendarService } from './service.js';
@@ -40,6 +42,8 @@ export interface AppDeps {
   /** Visioconférence. Par défaut : un service sans serveur de visio (non configuré). */
   video?: VideoService;
   videoLimits?: Partial<VideoLimits>;
+  /** Notifications sur les appareils (Web Push). Sans elles, les routes /api/push n'existent pas. */
+  push?: PushService;
   /** Annuaire des personnes et liens. Par défaut : construit sur la même base, Cairn à son adresse habituelle. */
   people?: PeopleService;
 }
@@ -133,6 +137,7 @@ export function createApp(deps: AppDeps): Hono {
 
   app.onError((err, c) => {
     if (err instanceof HTTPException) return c.json({ error: 'Requête refusée' }, err.status);
+    if (err instanceof PushError) return c.json({ error: err.message, code: err.code }, err.status);
     if (err instanceof VideoError) return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}) }, err.status);
     if (err instanceof PeopleError) return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}) }, err.status);
     if (err instanceof BookingError) return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}) }, err.status);
@@ -247,6 +252,10 @@ export function createApp(deps: AppDeps): Hono {
   // --- visioconférence -------------------------------------------------------
 
   registerAdminVideoRoutes(app, video);
+
+  // --- notifications ---------------------------------------------------------
+
+  if (deps.push) registerPushRoutes(app, deps.push);
 
   // --- connexions (SMTP, CalDAV) --------------------------------------------
 

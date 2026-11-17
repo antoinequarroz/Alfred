@@ -106,6 +106,13 @@ Chaque visio est une « salle » avec un lien `https://alfred.antoinequarroz.ch/
 - **Réglages dans l'app** : Réglages > Visioconférence (activer, salle d'attente, participants, qualité, état du serveur). Rubrique « Visio » : nouvelle visio, salle permanente, visios à venir avec le nombre de personnes connectées.
 - **Ce qui manque encore.** Pas de serveur TURN sur le port 443 : un invité derrière un réseau d'entreprise qui ne laisse sortir que le web (443) ne pourra pas se connecter. Pas d'enregistrement. Sur le VPS actuel (2 cœurs partagés), viser 2 à 4 personnes.
 
+## Les notifications (apps Mac et iPhone)
+
+Alfred s'installe comme une app (PWA) sur l'iPhone et le Mac et envoie des notifications Web Push : nouveau
+rendez-vous, annulation par un client, rappel, invité arrivé en visio. Code dans `server/push/` (RFC 8291 et
+VAPID avec `node:crypto`, planificateur qui relit `bookings` toutes les 30 s), service worker `web/public/sw.js`,
+carte Réglages > Notifications. Détails, limites et options natives : [APPS.md](APPS.md).
+
 ## Données, personnes et liens (phase 4)
 
 Migrations numérotées, espace, UUID v7, adresses `media://`, fiches Personnes et liens vers Cairn : voir [DONNEES.md](DONNEES.md).
