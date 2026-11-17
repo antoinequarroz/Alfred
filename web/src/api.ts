@@ -2,6 +2,7 @@ import type {
   Booking, BookingAdminState, BookingHoursRange, BookingSettings, BookingType, BookingTypeInput,
   CalendarInfo, CaldavSaveResult, CaldavSettingsInput, ConnectionsState, ConnectionTest, EditScope, EventInput, Occurrence, PublicSlots,
   SmtpSaveResult, SmtpSettingsInput, SyncStatus, VideoAdminState, VideoRoom, VideoRoomInput, VideoSettings,
+  LinkInfo, PersonDetail, PersonSummary,
 } from '../../shared/types';
 
 import { ApiError, requestJson } from './http';
@@ -74,4 +75,16 @@ export const videoApi = {
   personalRoom: (renew = false) => request<VideoRoom>('POST', '/api/video/personal', { renew }),
   endMeeting: (id: string) => request<{ ok: true }>('POST', `/api/video/rooms/${encodeURIComponent(id)}/end`, {}),
   deleteRoom: (id: string) => request<{ ok: true }>('DELETE', `/api/video/rooms/${encodeURIComponent(id)}`),
+};
+
+/** Fiches Personnes et liens vers les autres modules (notes Cairn…). */
+export type LinkSource = { from: string } | { eventId: string };
+
+export const peopleApi = {
+  list: (q = '') => request<PersonSummary[]>('GET', `/api/people${q ? `?q=${encodeURIComponent(q)}` : ''}`),
+  get: (id: string) => request<PersonDetail>('GET', `/api/people/${encodeURIComponent(id)}`),
+  links: (source: LinkSource) =>
+    request<LinkInfo[]>('GET', `/api/links?${'from' in source ? `from=${encodeURIComponent(source.from)}` : `eventId=${encodeURIComponent(source.eventId)}`}`),
+  addLink: (source: LinkSource, target: string, title = '') => request<LinkInfo>('POST', '/api/links', { ...source, target, title }),
+  removeLink: (id: string) => request<{ ok: true }>('DELETE', `/api/links/${encodeURIComponent(id)}`),
 };
