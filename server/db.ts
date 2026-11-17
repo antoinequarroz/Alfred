@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { ensureSpaceColumns, migrateUp } from './migrations.js';
 
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
@@ -138,7 +139,10 @@ CREATE INDEX IF NOT EXISTS video_rooms_booking ON video_rooms(booking_id) WHERE 
 /** Horaires proposés à la première ouverture : lundi à vendredi, 09:00-12:00 et 13:30-17:30. */
 const DEFAULT_HOURS: [number, number][] = [[9 * 60, 12 * 60], [13 * 60 + 30, 17 * 60 + 30]];
 
-/** Migrations idempotentes : colonnes ajoutées après coup et valeurs initiales. */
+/**
+ * Schéma de départ : colonnes ajoutées après coup et valeurs initiales, rejouables. Les
+ * changements suivants sont des migrations numérotées (server/migrations.ts).
+ */
 function migrate(db: DatabaseSync): void {
   const addColumn = (table: string, column: string, definition: string) => {
     const columns = db.prepare(`PRAGMA table_info(${table})`).all() as unknown as { name: string }[];
@@ -188,6 +192,9 @@ export function openDb(dataDir: string): Db {
   const db = new DatabaseSync(path);
   db.exec(SCHEMA);
   migrate(db);
+  // Phase 4 : migrations numérotées (espaces, personnes, liens…), voir server/migrations.ts.
+  migrateUp(db);
+  ensureSpaceColumns(db);
   return db;
 }
 

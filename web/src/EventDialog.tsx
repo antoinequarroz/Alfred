@@ -4,6 +4,7 @@ import { videoApi } from './api';
 import { addDays, combine, dateKey, parseDateKey, timeKey } from './dates';
 import { ExternalIcon, VideoIcon } from './icons';
 import { draftError, REPEAT_LABELS, type Draft } from './model';
+import { LinksPanel } from './people/Links';
 
 interface Props {
   initial: Draft;
@@ -162,6 +163,13 @@ export function EventDialog({ initial, calendars, busy, onSave, onDelete, onClos
             </div>
 
             <textarea rows={3} placeholder="Notes" value={d.description} onChange={(e) => set({ description: e.target.value })} />
+
+            {d.occ && (
+              <div className="row links-row">
+                <span className="label">Notes Cairn</span>
+                <LinksPanel source={{ eventId: d.occ.eventId }} compact />
+              </div>
+            )}
 
             {error && <p className="form-error" role="alert">{error}</p>}
             {locked && <p className="muted">Ce calendrier est en lecture seule : l’événement ne peut pas être modifié ici.</p>}

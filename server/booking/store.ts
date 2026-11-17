@@ -3,6 +3,7 @@ import {
   type BookingHoursRange, type BookingMode, type BookingSettings, type BookingStatus, type BookingStep, type BookingType,
 } from '../../shared/types.js';
 import { tx, type Db } from '../db.js';
+import { DEFAULT_SPACE_ID, upsertPerson } from '../migrations.js';
 
 export interface BookingRow {
   id: string;
@@ -36,6 +37,8 @@ export interface BookingRow {
   reminder_ref?: string | null;
   /** Déplacements faits par le client lui-même. */
   client_reschedules?: number;
+  /** Fiche de la personne dans l'annuaire (people). Absent avant la migration 2. */
+  person_id?: string | null;
 }
 
 /** Heures de rappel lues dans la colonne reminders_sent. */
@@ -183,17 +186,29 @@ export class BookingStore {
 
   // --- réservations --------------------------------------------------------
 
+  /** Enregistre la réservation et la rattache à la fiche de la personne (créée au besoin, reconnue par son e-mail). */
   insertBooking(b: BookingRow): void {
-    this.db
-      .prepare(
-        `INSERT INTO bookings (id, type_id, type_name, location, buffer_before_min, buffer_after_min, event_id, event_uid, calendar_id,
-           start_utc, end_utc, name, email, phone, message, status, token_hash, created_at, cancelled_at, cancelled_by, mail_error,
-           notified_start)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(b.id, b.type_id, b.type_name, b.location, b.buffer_before_min, b.buffer_after_min, b.event_id, b.event_uid, b.calendar_id,
-        b.start_utc, b.end_utc, b.name, b.email, b.phone, b.message, b.status, b.token_hash, b.created_at, b.cancelled_at,
-        b.cancelled_by, b.mail_error, b.notified_start);
+    tx(this.db, () => {
+      const personId = upsertPerson(this.db, { spaceId: DEFAULT_SPACE_ID, email: b.email, name: b.name, phone: b.phone, at: b.created_at });
+      b.person_id = personId;
+      this.db
+        .prepare(
+          `INSERT INTO bookings (id, type_id, type_name, location, buffer_before_min, buffer_after_min, event_id, event_uid, calendar_id,
+             start_utc, end_utc, name, email, phone, message, status, token_hash, created_at, cancelled_at, cancelled_by, mail_error,
+             notified_start, person_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(b.id, b.type_id, b.type_name, b.location, b.buffer_before_min, b.buffer_after_min, b.event_id, b.event_uid, b.calendar_id,
+          b.start_utc, b.end_utc, b.name, b.email, b.phone, b.message, b.status, b.token_hash, b.created_at, b.cancelled_at,
+          b.cancelled_by, b.mail_error, b.notified_start, personId);
+    });
+  }
+
+  /** Réservations d'une personne (toutes, annulées comprises), les plus récentes d'abord. */
+  listForPerson(personId: string, spaceId: string = DEFAULT_SPACE_ID): BookingRow[] {
+    return this.db
+      .prepare('SELECT * FROM bookings WHERE person_id = ? AND space_id = ? ORDER BY start_utc DESC')
+      .all(personId, spaceId) as unknown as BookingRow[];
   }
 
   getBooking(id: string): BookingRow | undefined {
