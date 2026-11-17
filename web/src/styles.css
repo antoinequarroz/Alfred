@@ -259,20 +259,22 @@ kbd {
 }
 
 .logo {
-  display: inline-grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  border-radius: var(--r);
-  background: var(--logo-bg);
-  color: var(--logo-ink);
-  font-weight: 700;
-  font-size: 12.5px;
-  letter-spacing: 0;
+  position: relative;
+  display: inline-block;
+  width: 24px;
+  height: 24px;
   flex: none;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 1px 2px rgba(0, 0, 0, 0.25);
 }
-.logo.big { width: 44px; height: 44px; border-radius: 12px; font-size: 23px; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 1px 2px rgba(0, 0, 0, 0.25), 0 10px 22px -8px rgba(10, 16, 40, 0.45); }
+.logo.big { width: 48px; height: 48px; }
+.logo img { position: absolute; inset: 0; width: 100%; height: 100%; }
+/* Pictos du kit d'identité Postmelo : seule la variante du thème effectif s'affiche. */
+.logo-dark { display: none; }
+:root[data-theme='dark'] .logo-light { display: none; }
+:root[data-theme='dark'] .logo-dark { display: block; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .logo-light { display: none; }
+  :root:not([data-theme='light']) .logo-dark { display: block; }
+}
 
 .muted { color: var(--muted); }
 

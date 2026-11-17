@@ -1,9 +1,9 @@
 // Service worker minimal : l'interface s'ouvre instantanément (et hors ligne),
 // les données passent toujours par le réseau.
-const CACHE = 'alfred-shell-v3';
+const CACHE = 'alfred-shell-v4';
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(['/', '/manifest.webmanifest', '/icon.svg'])).then(() => self.skipWaiting()));
+  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(['/', '/manifest.webmanifest', '/favicon.ico'])).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (event) => {
