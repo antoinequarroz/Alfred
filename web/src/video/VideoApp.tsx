@@ -10,7 +10,10 @@ import {
   UsersIcon, VideoIcon, VideoOffIcon,
 } from '../icons';
 import { MoonIcon, SunIcon, useTheme } from '../theme';
-import { BlurFailure, blurSupported, blurWanted, publishBlurredCamera, rememberBlur, setBlur } from './blur';
+import {
+  BACKGROUND_IMAGES, BackgroundFailure, CUSTOM_ID, NO_BACKGROUND, backgroundSupported, backgroundWanted, customImageNow,
+  importBackgroundImage, publishCameraWithBackground, rememberBackground, sameBackground, setBackground, type Background,
+} from './background';
 import '../rdv/rdv.css';
 import './video.css';
 
@@ -50,8 +53,112 @@ function mediaErrorText(err: unknown): string | null {
   return null;
 }
 
-const BLUR_FAILED = 'Le flou d’arrière-plan n’a pas pu démarrer sur cet appareil.';
-const BLUR_FAILED_CAMERA_OFF = 'Le flou d’arrière-plan n’a pas pu démarrer : la caméra reste coupée. Touchez à nouveau la caméra pour l’ouvrir sans flou.';
+const BLUR_FAILED = 'L’arrière-plan choisi n’a pas pu démarrer sur cet appareil.';
+const BLUR_FAILED_CAMERA_OFF = 'L’arrière-plan choisi n’a pas pu démarrer : la caméra reste coupée. Touchez à nouveau la caméra pour l’ouvrir sans arrière-plan.';
+
+/**
+ * Choix de l'arrière-plan : la pièce telle quelle, floutée, ou remplacée par un fond proposé ou par
+ * une image de la personne (gardée dans son navigateur). S'ouvre au-dessus du bouton.
+ */
+function BackgroundPicker({ value, onChange, onError }: { value: Background; onChange: (bg: Background) => void; onError: (message: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [custom, setCustom] = useState(customImageNow);
+  const [importing, setImporting] = useState(false);
+  const wrap = useRef<HTMLDivElement>(null);
+  const file = useRef<HTMLInputElement>(null);
+  // Le panneau est placé par rapport à la fenêtre (au-dessus du bouton) : l'aperçu, arrondi, le rognerait.
+  const [place, setPlace] = useState<React.CSSProperties>({});
+  const toggle = () => {
+    const rect = wrap.current?.getBoundingClientRect();
+    if (rect) {
+      const width = Math.min(316, window.innerWidth - 24);
+      const left = Math.min(Math.max(12, rect.left + rect.width / 2 - width / 2), window.innerWidth - width - 12);
+      const above = rect.top - 12;
+      // Pas assez de place au-dessus (petit écran) : le panneau se cale en haut de la fenêtre et défile.
+      setPlace({ left, width, bottom: window.innerHeight - above, maxHeight: Math.max(160, above - 12) });
+    }
+    setOpen((v) => !v);
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      if (wrap.current && !wrap.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    const close = () => setOpen(false);
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('resize', close);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', close);
+    };
+  }, [open]);
+
+  const pick = (bg: Background) => {
+    onChange(bg);
+    setOpen(false);
+  };
+  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const chosen = e.target.files?.[0];
+    e.target.value = '';
+    if (!chosen) return;
+    setImporting(true);
+    try {
+      await importBackgroundImage(chosen);
+      setCustom(customImageNow());
+      pick({ kind: 'image', id: CUSTOM_ID });
+    } catch {
+      onError('Cette image n’a pas pu être lue. Essayez avec une photo JPEG ou PNG.');
+    } finally {
+      setImporting(false);
+    }
+  };
+  const is = (bg: Background) => sameBackground(value, bg);
+  const active = value.kind !== 'none';
+  return (
+    <div className="vc-bg" ref={wrap}>
+      <button type="button" className={`vc-round${active ? ' on' : ''}`} onClick={toggle} aria-expanded={open} aria-haspopup="dialog" aria-label="Arrière-plan" title="Arrière-plan">
+        <BlurIcon />
+      </button>
+      {open && (
+        <div className="vc-bg-panel" role="dialog" aria-label="Arrière-plan" style={place}>
+          <p className="vc-bg-title">Arrière-plan</p>
+          <div className="vc-bg-grid">
+            <button type="button" className={`vc-bg-opt${is(NO_BACKGROUND) ? ' sel' : ''}`} aria-pressed={is(NO_BACKGROUND)} onClick={() => pick(NO_BACKGROUND)}>
+              <span className="vc-bg-thumb none"><VideoIcon /></span><span>Aucun</span>
+            </button>
+            <button type="button" className={`vc-bg-opt${is({ kind: 'blur' }) ? ' sel' : ''}`} aria-pressed={is({ kind: 'blur' })} onClick={() => pick({ kind: 'blur' })}>
+              <span className="vc-bg-thumb blur"><BlurIcon /></span><span>Flou</span>
+            </button>
+            {BACKGROUND_IMAGES.map((img) => {
+              const bg: Background = { kind: 'image', id: img.id };
+              return (
+                <button key={img.id} type="button" className={`vc-bg-opt${is(bg) ? ' sel' : ''}`} aria-pressed={is(bg)} onClick={() => pick(bg)}>
+                  <span className="vc-bg-thumb" style={{ backgroundImage: `url(${img.src})` }} /><span>{img.label}</span>
+                </button>
+              );
+            })}
+            {custom && (
+              <button type="button" className={`vc-bg-opt${is({ kind: 'image', id: CUSTOM_ID }) ? ' sel' : ''}`} aria-pressed={is({ kind: 'image', id: CUSTOM_ID })} onClick={() => pick({ kind: 'image', id: CUSTOM_ID })}>
+                <span className="vc-bg-thumb" style={{ backgroundImage: `url(${custom})` }} /><span>Mon image</span>
+              </button>
+            )}
+            <button type="button" className="vc-bg-opt" disabled={importing} onClick={() => file.current?.click()}>
+              <span className="vc-bg-thumb add">+</span><span>{importing ? 'Lecture…' : custom ? 'Changer' : 'Importer'}</span>
+            </button>
+          </div>
+          <p className="vc-bg-note">Calculé sur cet appareil. Une image importée reste dans ce navigateur.</p>
+          <input ref={file} type="file" accept="image/*" hidden onChange={(e) => void onFile(e)} />
+        </div>
+      )}
+    </div>
+  );
+}
 
 /** Deux notes brèves : quelqu'un attend d'entrer. Sans effet si le navigateur bloque le son. */
 function chime(): void {
@@ -188,8 +295,8 @@ interface Prefs {
   microphone: boolean;
   cameraId?: string;
   microphoneId?: string;
-  /** Flou d'arrière-plan demandé. */
-  blur: boolean;
+  /** Arrière-plan demandé : aucun, flou ou image. */
+  background: Background;
 }
 
 /** L'invité patiente : l'hôte est-il déjà dans la salle (null : on ne sait pas). */
@@ -225,7 +332,7 @@ function Lobby({ room, onJoin, onPrefs, onCancel, waiting, busy, error }: {
   const [microphoneId, setMicrophoneId] = useState<string | undefined>();
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [level, setLevel] = useState(0);
-  const [blur, setBlurOn] = useState(blurWanted);
+  const [background, setBackgroundChoice] = useState<Background>(backgroundWanted);
 
   // Aperçu de la caméra : refait à chaque changement d'appareil ou de choix.
   useEffect(() => {
@@ -309,30 +416,28 @@ function Lobby({ room, onJoin, onPrefs, onCancel, waiting, busy, error }: {
     }, () => undefined);
   }, [videoTrack, audioTrack]);
 
-  // Flou sur l'aperçu : on voit ce que verront les autres avant d'entrer.
+  // Arrière-plan sur l'aperçu : on voit ce que verront les autres avant d'entrer.
   useEffect(() => {
-    if (!videoTrack || !blur) return;
+    if (!videoTrack) return;
     let cancelled = false;
-    const started = setBlur(videoTrack, true).catch(() => {
-      if (cancelled) return;
-      setBlurOn(false);
+    setBackground(videoTrack, background).catch(() => {
+      if (cancelled || background.kind === 'none') return;
+      setBackgroundChoice(NO_BACKGROUND);
       setMediaError(BLUR_FAILED);
     });
     return () => {
       cancelled = true;
-      // Retiré seulement une fois posé : un clic rapide ne laisse pas le flou actif à tort.
-      void started.then(() => setBlur(videoTrack, false)).catch(() => undefined);
     };
-  }, [videoTrack, blur]);
+  }, [videoTrack, background]);
 
   const prefs = (): Prefs => ({
-    name: name.trim(), camera, microphone, blur,
+    name: name.trim(), camera, microphone, background,
     cameraId: cameraId ?? openedCameraId,
     microphoneId: microphoneId ?? audioTrack?.mediaStreamTrack.getSettings().deviceId,
   });
   const prefsRef = useRef(prefs);
   prefsRef.current = prefs;
-  useEffect(() => onPrefs(prefsRef.current()), [onPrefs, camera, microphone, blur, cameraId, openedCameraId, microphoneId, videoTrack, audioTrack]);
+  useEffect(() => onPrefs(prefsRef.current()), [onPrefs, camera, microphone, background, cameraId, openedCameraId, microphoneId, videoTrack, audioTrack]);
 
   const when = whenLabel(room);
   const submit = (e: React.FormEvent) => {
@@ -364,10 +469,8 @@ function Lobby({ room, onJoin, onPrefs, onCancel, waiting, busy, error }: {
               <button type="button" className={`vc-round${camera ? '' : ' off'}`} onClick={() => setCamera((v) => !v)} aria-pressed={!camera} aria-label={camera ? 'Couper la caméra' : 'Activer la caméra'}>
                 {camera ? <VideoIcon /> : <VideoOffIcon />}
               </button>
-              {blurSupported && camera && (
-                <button type="button" className={`vc-round${blur ? ' on' : ''}`} onClick={() => { rememberBlur(!blur); setBlurOn(!blur); }} aria-pressed={blur} aria-label={blur ? 'Retirer le flou d’arrière-plan' : 'Flouter l’arrière-plan'} title={blur ? 'Retirer le flou' : 'Flouter l’arrière-plan'}>
-                  <BlurIcon />
-                </button>
+              {backgroundSupported && camera && (
+                <BackgroundPicker value={background} onChange={(bg) => { rememberBackground(bg); setBackgroundChoice(bg); }} onError={setMediaError} />
               )}
             </div>
             {microphone && <span className="vc-level" aria-hidden="true"><span style={{ transform: `scaleX(${level})` }} /></span>}
@@ -446,7 +549,7 @@ interface ChatLine {
   mine: boolean;
 }
 
-function Call({ room, info, publicRoom, initialBlur, onLeave }: { room: Room; info: VideoJoinInfo; publicRoom: PublicVideoRoom; initialBlur: boolean; onLeave: (reason: 'left' | 'ended' | 'replaced' | 'lost') => void }) {
+function Call({ room, info, publicRoom, initialBackground, onLeave }: { room: Room; info: VideoJoinInfo; publicRoom: PublicVideoRoom; initialBackground: Background; onLeave: (reason: 'left' | 'ended' | 'replaced' | 'lost') => void }) {
   const [, setVersion] = useState(0);
   const refresh = useCallback(() => setVersion((v) => v + 1), []);
   const [speakers, setSpeakers] = useState<Set<string>>(new Set());
@@ -459,7 +562,7 @@ function Call({ room, info, publicRoom, initialBlur, onLeave }: { room: Room; in
   const [confirmEnd, setConfirmEnd] = useState(false);
   // Caméra demandée en dernier : certains navigateurs ne disent pas laquelle est active.
   const [facing, setFacing] = useState<'user' | 'environment'>('user');
-  const [blur, setBlurOn] = useState(initialBlur);
+  const [background, setBackgroundChoice] = useState<Background>(initialBackground);
   const [waiters, setWaiters] = useState<VideoWaiter[]>([]);
   const [admitting, setAdmitting] = useState<string | null>(null);
   const chatId = useRef(0);
@@ -601,33 +704,45 @@ function Call({ room, info, publicRoom, initialBlur, onLeave }: { room: Room; in
     }
   };
 
-  // Caméra : si le flou est demandé, il est posé avant que l'image parte vers les autres.
+  // Caméra : si un arrière-plan est demandé, il est posé avant que l'image parte vers les autres.
   const toggleCamera = () => run('cam', async () => {
     if (camOn) return local.setCameraEnabled(false);
     const existing = local.getTrackPublication(Track.Source.Camera)?.track as LocalVideoTrack | undefined;
-    if (!blur || existing) return local.setCameraEnabled(true);
+    if (background.kind === 'none' || existing) return local.setCameraEnabled(true);
     try {
-      await publishBlurredCamera(local, { resolution: (info.quality === 'eco' ? VideoPresets.h360 : VideoPresets.h720).resolution });
+      await publishCameraWithBackground(local, { resolution: (info.quality === 'eco' ? VideoPresets.h360 : VideoPresets.h720).resolution }, background);
     } catch (err) {
-      if (!(err instanceof BlurFailure)) throw err;
-      // Jamais d'image nette à la place du flou demandé : la caméra reste coupée, un second clic l'ouvre sans flou.
-      setBlurOn(false);
+      if (!(err instanceof BackgroundFailure)) throw err;
+      // Jamais la pièce réelle à la place de l'arrière-plan demandé : la caméra reste coupée, un second clic l'ouvre sans.
+      setBackgroundChoice(NO_BACKGROUND);
       setToast(BLUR_FAILED_CAMERA_OFF);
     }
   });
 
-  const toggleBlur = () => run('blur', async () => {
+  const changeBackground = (next: Background) => run('background', async () => {
     const track = local.getTrackPublication(Track.Source.Camera)?.track as LocalVideoTrack | undefined;
-    const next = !blur;
-    rememberBlur(next);
-    setBlurOn(next);
+    const previous = background;
+    rememberBackground(next);
+    setBackgroundChoice(next);
     if (!track) return;
     try {
-      await setBlur(track, next);
+      await setBackground(track, next);
     } catch {
-      setBlurOn(false);
-      await setBlur(track, false).catch(() => undefined);
-      setToast(BLUR_FAILED);
+      // Le nouveau choix n'a pas démarré : on garde l'arrière-plan précédent s'il tient encore, sinon la caméra est coupée
+      // plutôt que de montrer la pièce sans que la personne l'ait décidé.
+      if (next.kind === 'none') return;
+      if (previous.kind !== 'none' && track.getProcessor()) {
+        setBackgroundChoice(previous);
+        await setBackground(track, previous).catch(() => undefined);
+        setToast(BLUR_FAILED);
+      } else if (previous.kind === 'none') {
+        setBackgroundChoice(NO_BACKGROUND);
+        setToast(BLUR_FAILED);
+      } else {
+        setBackgroundChoice(NO_BACKGROUND);
+        await local.setCameraEnabled(false).catch(() => undefined);
+        setToast(BLUR_FAILED_CAMERA_OFF);
+      }
     }
   });
 
@@ -755,10 +870,8 @@ function Call({ room, info, publicRoom, initialBlur, onLeave }: { room: Room; in
           {isTouch && camOn && (
             <button className="vc-round" onClick={() => void flip()} aria-label="Changer de caméra" title="Changer de caméra"><FlipIcon /></button>
           )}
-          {blurSupported && camOn && (
-            <button className={`vc-round${blur ? ' on' : ''}`} onClick={() => void toggleBlur()} aria-pressed={blur} aria-label={blur ? 'Retirer le flou d’arrière-plan' : 'Flouter l’arrière-plan'} title={blur ? 'Retirer le flou' : 'Flouter l’arrière-plan'}>
-              <BlurIcon />
-            </button>
+          {backgroundSupported && camOn && (
+            <BackgroundPicker value={background} onChange={(bg) => void changeBackground(bg)} onError={setToast} />
           )}
           {canShareScreen && (
             <button className={`vc-round${sharing ? ' on' : ''}`} onClick={() => void run('screen', () => local.setScreenShareEnabled(!sharing, { audio: true }))} aria-pressed={sharing} aria-label={sharing ? 'Arrêter le partage d’écran' : 'Partager l’écran'} title={sharing ? 'Arrêter le partage' : 'Partager l’écran'}>
@@ -813,7 +926,7 @@ type Phase =
   | { kind: 'loading' }
   | { kind: 'error'; title: string; text: string }
   | { kind: 'lobby' }
-  | { kind: 'call'; room: Room; info: VideoJoinInfo; blur: boolean }
+  | { kind: 'call'; room: Room; info: VideoJoinInfo; background: Background }
   | { kind: 'left'; reason: 'left' | 'ended' | 'replaced' | 'lost' | 'refused' };
 
 export function VideoApp() {
@@ -823,7 +936,7 @@ export function VideoApp() {
   const [joinError, setJoinError] = useState<string | null>(null);
   const [wait, setWait] = useState<({ ticket: string } & Waiting) | null>(null);
   const roomRef = useRef<Room | null>(null);
-  const prefsRef = useRef<Prefs>({ name: '', camera: true, microphone: true, blur: false });
+  const prefsRef = useRef<Prefs>({ name: '', camera: true, microphone: true, background: NO_BACKGROUND });
   const waitRef = useRef(wait);
   waitRef.current = wait;
   const onPrefs = useCallback((p: Prefs) => { prefsRef.current = p; }, []);
@@ -885,19 +998,19 @@ export function VideoApp() {
       roomRef.current = room;
       // Caméra et micro : un refus n'empêche pas d'entrer (on peut écouter et parler par messages).
       const problems: string[] = [];
-      let blur = prefs.blur && blurSupported;
+      let background: Background = backgroundSupported ? prefs.background : NO_BACKGROUND;
       const local = room.localParticipant;
       if (prefs.microphone) await local.setMicrophoneEnabled(true, { deviceId: prefs.microphoneId }).catch(() => problems.push('micro'));
       if (prefs.camera) {
         // Flou demandé : il est posé avant la publication, aucune image nette ne part vers les autres.
         // S'il ne démarre pas, la caméra reste coupée : à la personne de décider si elle l'ouvre sans flou.
-        const opening = blur
-          ? publishBlurredCamera(local, { deviceId: prefs.cameraId, resolution: (eco ? VideoPresets.h360 : VideoPresets.h720).resolution })
+        const opening = background.kind !== 'none'
+          ? publishCameraWithBackground(local, { deviceId: prefs.cameraId, resolution: (eco ? VideoPresets.h360 : VideoPresets.h720).resolution }, background)
           : local.setCameraEnabled(true, { deviceId: prefs.cameraId });
         await opening.catch((err: unknown) => {
-          if (err instanceof BlurFailure) {
-            blur = false;
-            problems.push('flou d’arrière-plan (caméra laissée coupée)');
+          if (err instanceof BackgroundFailure) {
+            background = NO_BACKGROUND;
+            problems.push('arrière-plan choisi (caméra laissée coupée)');
           } else {
             problems.push('caméra');
           }
@@ -912,7 +1025,7 @@ export function VideoApp() {
         });
         return true;
       }
-      setPhase({ kind: 'call', room, info, blur });
+      setPhase({ kind: 'call', room, info, background });
       if (problems.length > 0) setJoinError(`Impossible d’ouvrir : ${problems.join(' et ')}.`);
       return true;
     } catch (err) {
@@ -1066,7 +1179,7 @@ export function VideoApp() {
   if (phase.kind === 'call' && publicRoom) {
     return (
       <>
-        <Call room={phase.room} info={phase.info} publicRoom={publicRoom} initialBlur={phase.blur} onLeave={onLeave} />
+        <Call room={phase.room} info={phase.info} publicRoom={publicRoom} initialBackground={phase.background} onLeave={onLeave} />
         {joinError && <div className="toast" role="alert" onClick={() => setJoinError(null)}><AlertIcon />{joinError}</div>}
       </>
     );
