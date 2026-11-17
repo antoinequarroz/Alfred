@@ -226,57 +226,59 @@ export function VideoScreen({ onMenu, onSettings }: { onMenu: () => void; onSett
                 </div>
               </section>
 
-              <Card
-                title="Ma salle permanente"
-                sub="Un lien fixe, toujours le même, à donner à tes contacts ou à mettre dans ta signature."
-                action={personal ? <Live n={personal.live} waiting={personal.waiting} /> : undefined}
-              >
-                {personal ? (
-                  <>
-                    <div className="bk-link">
-                      <code className="bk-url">{personal.url}</code>
-                      <CopyButton text={personal.url} notify={notify} />
-                      <a className="btn primary" href={personal.url} target="_blank" rel="noopener"><ExternalIcon />Entrer</a>
-                    </div>
-                    <p className="bk-hint">
-                      Toute personne qui a ce lien peut entrer dans la salle.{' '}
-                      <button type="button" className="cx-link" disabled={busy} onClick={() => {
-                        if (window.confirm('Créer un nouveau lien ? L’ancien ne fonctionnera plus.')) void act(() => videoApi.personalRoom(true), 'Nouveau lien créé : l’ancien ne fonctionne plus.');
-                      }}>Changer de lien</button>
-                    </p>
-                  </>
-                ) : (
-                  <div><button className="btn" disabled={busy || !state.available} onClick={() => void act(() => videoApi.personalRoom())}>Créer ma salle permanente</button></div>
-                )}
-              </Card>
+              <div className="bk-pair">
+                <Card
+                  title="Ma salle permanente"
+                  sub="Un lien fixe, toujours le même, à donner à tes contacts ou à mettre dans ta signature."
+                  action={personal ? <Live n={personal.live} waiting={personal.waiting} /> : undefined}
+                >
+                  {personal ? (
+                    <>
+                      <div className="bk-link">
+                        <code className="bk-url">{personal.url}</code>
+                        <CopyButton text={personal.url} notify={notify} />
+                        <a className="btn primary" href={personal.url} target="_blank" rel="noopener"><ExternalIcon />Entrer</a>
+                      </div>
+                      <p className="bk-hint">
+                        Toute personne qui a ce lien peut entrer dans la salle.{' '}
+                        <button type="button" className="cx-link" disabled={busy} onClick={() => {
+                          if (window.confirm('Créer un nouveau lien ? L’ancien ne fonctionnera plus.')) void act(() => videoApi.personalRoom(true), 'Nouveau lien créé : l’ancien ne fonctionne plus.');
+                        }}>Changer de lien</button>
+                      </p>
+                    </>
+                  ) : (
+                    <div><button className="btn" disabled={busy || !state.available} onClick={() => void act(() => videoApi.personalRoom())}>Créer ma salle permanente</button></div>
+                  )}
+                </Card>
 
-              <Card title="Visios ouvertes et à venir" sub="Rendez-vous « En visio », événements avec une visio, réunions instantanées récentes.">
-                {state.rooms.length === 0 ? (
-                  <p className="bk-empty">Aucune visio prévue. Les rendez-vous « En visio » pris en ligne apparaîtront ici avec leur lien.</p>
-                ) : (
-                  <ul className="bk-list">
-                    {state.rooms.map((r) => (
-                      <li key={r.id} className="vd-room">
-                        <div className="vd-room-main">
-                          <p className="vd-room-title">{r.title} <Live n={r.live} waiting={r.waiting} /></p>
-                          <p className="bk-meta">{KIND_LABEL[r.kind]}{whenLabel(r) ? ` · ${whenLabel(r)}` : ''}</p>
-                        </div>
-                        <div className="bk-row-actions">
-                          <CopyButton text={r.url} notify={notify} label="Lien" />
-                          <a className="btn" href={r.url} target="_blank" rel="noopener"><ExternalIcon />Entrer</a>
-                          {r.live ? (
-                            <button className="btn danger ghost" disabled={busy} onClick={() => void act(() => videoApi.endMeeting(r.id), 'Visio terminée pour tout le monde.')}>Terminer</button>
-                          ) : r.kind !== 'booking' ? (
-                            <button className="btn danger ghost" disabled={busy} onClick={() => {
-                              if (window.confirm('Supprimer cette visio ? Son lien ne fonctionnera plus.')) void act(() => videoApi.deleteRoom(r.id));
-                            }}>Supprimer</button>
-                          ) : null}
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </Card>
+                <Card title="Visios ouvertes et à venir" sub="Rendez-vous « En visio », événements avec une visio, réunions instantanées récentes.">
+                  {state.rooms.length === 0 ? (
+                    <p className="bk-empty">Aucune visio prévue. Les rendez-vous « En visio » pris en ligne apparaîtront ici avec leur lien.</p>
+                  ) : (
+                    <ul className="bk-list">
+                      {state.rooms.map((r) => (
+                        <li key={r.id} className="vd-room">
+                          <div className="vd-room-main">
+                            <p className="vd-room-title">{r.title} <Live n={r.live} waiting={r.waiting} /></p>
+                            <p className="bk-meta">{KIND_LABEL[r.kind]}{whenLabel(r) ? ` · ${whenLabel(r)}` : ''}</p>
+                          </div>
+                          <div className="bk-row-actions">
+                            <CopyButton text={r.url} notify={notify} label="Lien" />
+                            <a className="btn" href={r.url} target="_blank" rel="noopener"><ExternalIcon />Entrer</a>
+                            {r.live ? (
+                              <button className="btn danger ghost" disabled={busy} onClick={() => void act(() => videoApi.endMeeting(r.id), 'Visio terminée pour tout le monde.')}>Terminer</button>
+                            ) : r.kind !== 'booking' ? (
+                              <button className="btn danger ghost" disabled={busy} onClick={() => {
+                                if (window.confirm('Supprimer cette visio ? Son lien ne fonctionnera plus.')) void act(() => videoApi.deleteRoom(r.id));
+                              }}>Supprimer</button>
+                            ) : null}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </Card>
+              </div>
 
               <p className="cx-foot">
                 <VideoIcon />

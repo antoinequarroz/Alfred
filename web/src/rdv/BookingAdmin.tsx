@@ -964,13 +964,13 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
               )}
               {tab === 'types' && <TypesTab types={types} reload={reload} notify={notify} />}
               {tab === 'hours' && (
-                <>
+                <div className="bk-pair">
                   <HoursCard hours={hours} draft={hoursDraft} setDraft={setHoursDraft} onSaved={(h) => { setHours(h); void reload(); }} notify={notify} />
                   <BlockingCard calendars={calendars} settings={state.settings} version={hours} onChange={(c, v) => void setBlocks(c, v)} onSettings={saveSettings} />
-                </>
+                </div>
               )}
               {tab === 'settings' && (
-                <>
+                <div className="bk-pair">
                   <SettingsCard state={state} calendars={calendars} draft={settingsDraft} setDraft={setSettingsDraft} onSaved={setState} notify={notify} />
                   <RemindersCard settings={state.settings} mailConfigured={state.mail.configured} onChange={(patch) => void saveSettings(patch)} />
                   {connections.state ? (
@@ -999,7 +999,7 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
                   ) : connections.error ? (
                     <div className="bk-card"><p className="form-error" role="alert">{connections.error}</p><button className="btn" onClick={() => void connections.reload()}>Réessayer</button></div>
                   ) : null}
-                </>
+                </div>
               )}
             </>
           )}
