@@ -119,7 +119,7 @@ export function registerPublicBookingRoutes(app: Hono, booking: BookingService, 
     limited(c, cancel) ?? c.json(await booking.cancelByToken(c.req.param('token'))),
   );
 
-  app.all('/api/public/*', (c) => c.json({ error: 'Introuvable', code: 'not_found' }, 404));
+  // La route « introuvable » des /api/public/* est posée par createApp, après les routes publiques de la visio.
 }
 
 /** Routes privées : /api/booking/*. À enregistrer après le contrôle de session. */

@@ -6,13 +6,14 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import { createApp } from './app.js';
 import { BookingService } from './booking/service.js';
 import { CaldavSync } from './caldav.js';
-import { allowPrivateHosts, config, connectionEnv, secretKeyEnv } from './config.js';
+import { allowPrivateHosts, config, connectionEnv, secretKeyEnv, videoEnv } from './config.js';
 import { ConnectionsService } from './connections.js';
 import { openDb } from './db.js';
 import { SecretBox } from './secrets.js';
 import { hashPassword } from './password.js';
 import { CalendarService } from './service.js';
 import { Store } from './store.js';
+import { VideoService } from './video/service.js';
 
 let passwordHash = config.passwordHash;
 if (!passwordHash) {
@@ -38,13 +39,23 @@ if (!caldav.configured && !connectionsState.caldav.accountLocked) store.ensureLo
 
 const service = new CalendarService(store, caldav, config.timezone);
 const mailer = connections.mailer;
+// La visio et la prise de rendez-vous se connaissent : une salle de rendez-vous suit sa réservation,
+// et une réservation « En visio » reçoit le lien d'une salle.
+let bookingRef: BookingService | null = null;
+const video = new VideoService({
+  db: store.db, server: videoEnv, publicUrl: config.publicUrl, timezone: config.timezone,
+  hostName: () => bookingRef?.getSettings().publicName ?? config.mail.from.name,
+  bookingLink: (id) => bookingRef?.videoLink(id) ?? null,
+});
 const booking = new BookingService({
+  video,
   store, calendar: service, caldav, timezone: config.timezone, mailer, mailProblem: () => connections.smtpProblem(),
   publicUrl: config.publicUrl, defaultPublicName: config.mail.from.name,
 });
+bookingRef = booking;
 connections.mailContext = () => ({ publicName: booking.getSettings().publicName, timezone: config.timezone, publicUrl: config.publicUrl });
 const app = createApp({
-  store, service, caldav, passwordHash, booking, connections,
+  store, service, caldav, passwordHash, booking, connections, video,
   secureCookies: config.production,
   sessionDays: config.sessionDays,
 });
@@ -81,6 +92,9 @@ console.log(caldav.configured
 console.log(mailer.configured
   ? `[alfred] e-mails de la prise de RDV via ${connectionsState.smtp.host.value}:${connectionsState.smtp.port.value}, expéditeur ${mailer.from} (identifiants ${SOURCES[connectionsState.smtp.password.source]})`
   : '[alfred] envoi d’e-mails non configuré : la prise de RDV fonctionne sans envoyer d’e-mails (réglable dans l’app)');
+console.log(video.configured
+  ? `[alfred] visio : serveur ${videoEnv.internalUrl}, adresse publique ${videoEnv.publicUrl}`
+  : '[alfred] visio non configurée (LIVEKIT_API_KEY / LIVEKIT_API_SECRET absents)');
 for (const notice of connectionsState.notices) console.warn(`[alfred] ${notice}`);
 // Un réglage de l'app passe avant le .env : le dire, pour qui modifie le .env et ne voit aucun effet.
 if (connectionEnv.caldav.password && connectionsState.caldav.password.source === 'app') {

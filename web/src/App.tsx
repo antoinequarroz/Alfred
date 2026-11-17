@@ -3,7 +3,7 @@ import type { CalendarInfo, EditScope, SyncStatus } from '../../shared/types';
 import { api, ApiError } from './api';
 import { addDays, addMonths, capitalize, fmt, startOfDay, startOfWeek } from './dates';
 import { EventDialog, ScopeDialog } from './EventDialog';
-import { CalendarIcon, Chevron, ClockIcon, GearIcon, MenuIcon, PlusIcon } from './icons';
+import { CalendarIcon, Chevron, ClockIcon, GearIcon, MenuIcon, PlusIcon, VideoIcon } from './icons';
 import { draftFromOcc, draftToInput, movedInput, newDraft, toOcc, type CalendarMap, type Draft, type Occ } from './model';
 import { MiniMonth, monthGrid, MonthView } from './MonthView';
 import { MoonIcon, SunIcon, ThemeSwitch, useTheme } from './theme';
@@ -15,10 +15,13 @@ const BookingAdmin = lazy(() => import('./rdv/BookingAdmin').then((m) => ({ defa
 // L'écran « Réglages » (connexions iCloud et e-mails) aussi.
 const ConnectionsScreen = lazy(() => import('./settings/ConnectionsScreen').then((m) => ({ default: m.ConnectionsScreen })));
 
-type Section = 'calendar' | 'booking' | 'settings';
-const SECTION_HASH: Record<Section, string> = { calendar: '', booking: '#rendez-vous', settings: '#reglages' };
+// La rubrique « Visio » aussi.
+const VideoScreen = lazy(() => import('./video/VideoScreen').then((m) => ({ default: m.VideoScreen })));
+
+type Section = 'calendar' | 'booking' | 'video' | 'settings';
+const SECTION_HASH: Record<Section, string> = { calendar: '', booking: '#rendez-vous', video: '#visio', settings: '#reglages' };
 // « #rendez-vous/reglages » ouvre la rubrique Rendez-vous sur son onglet Réglages.
-const sectionFromHash = (): Section => (location.hash.startsWith('#rendez-vous') ? 'booking' : location.hash === '#reglages' ? 'settings' : 'calendar');
+const sectionFromHash = (): Section => (location.hash.startsWith('#rendez-vous') ? 'booking' : location.hash === '#visio' ? 'video' : location.hash === '#reglages' ? 'settings' : 'calendar');
 
 type View = 'day' | 'week' | 'month';
 const VIEW_LABELS: Record<View, string> = { day: 'Jour', week: 'Semaine', month: 'Mois' };
@@ -285,6 +288,10 @@ export function App({ onLogout }: { onLogout: () => void }) {
             <ClockIcon />
             <span>Rendez-vous</span>
           </button>
+          <button className={section === 'video' ? 'active' : ''} aria-current={section === 'video' ? 'page' : undefined} onClick={() => setSection('video')}>
+            <VideoIcon />
+            <span>Visio</span>
+          </button>
           <button className={section === 'settings' ? 'active' : ''} aria-current={section === 'settings' ? 'page' : undefined} onClick={() => setSection('settings')}>
             <GearIcon />
             <span>Réglages</span>
@@ -335,6 +342,10 @@ export function App({ onLogout }: { onLogout: () => void }) {
       {section === 'booking' ? (
         <Suspense fallback={<main className="main" />}>
           <BookingAdmin onMenu={() => setMenuOpen(true)} onCalendarChanged={() => { void loadMeta(); void loadEventsRef.current(); }} />
+        </Suspense>
+      ) : section === 'video' ? (
+        <Suspense fallback={<main className="main" />}>
+          <VideoScreen onMenu={() => setMenuOpen(true)} onSettings={() => setSection('settings')} />
         </Suspense>
       ) : section === 'settings' ? (
         <Suspense fallback={<main className="main" />}>

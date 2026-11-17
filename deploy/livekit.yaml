@@ -1,0 +1,19 @@
+# Serveur de visio d'Alfred (LiveKit), réglé pour un petit VPS partagé.
+# Les clés (LIVEKIT_KEYS) et l'adresse publique (NODE_IP) viennent de /opt/alfred/.env.livekit,
+# écrit par deploy/visio.sh.
+port: 7880            # signalisation (WebSocket), jointe par Caddy sur le réseau Docker : jamais exposée
+rtc:
+  # Tout le trafic audio/vidéo passe par un seul port UDP, avec repli en TCP pour les réseaux
+  # qui bloquent l'UDP. Deux ports à ouvrir, pas une plage.
+  udp_port: 7882
+  tcp_port: 7881
+  use_external_ip: false   # l'adresse annoncée est NODE_IP
+room:
+  # Une salle n'existe que si Alfred l'a créée (à chaque entrée) : un ancien jeton ne peut pas
+  # rouvrir une salle fermée.
+  auto_create: false
+  empty_timeout: 300       # une salle vide est libérée après 5 minutes
+  departure_timeout: 60
+  max_participants: 8      # plafond dur ; le réglage de l'app (2 à 8) s'applique salle par salle
+logging:
+  level: info

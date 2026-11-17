@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CalendarInfo, EditScope, RepeatRule } from '../../shared/types';
+import { videoApi } from './api';
 import { addDays, combine, dateKey, parseDateKey, timeKey } from './dates';
+import { ExternalIcon, VideoIcon } from './icons';
 import { draftError, REPEAT_LABELS, type Draft } from './model';
 
 interface Props {
@@ -16,6 +18,7 @@ export function EventDialog({ initial, calendars, busy, onSave, onDelete, onClos
   const [d, setD] = useState(initial);
   const [error, setError] = useState<string | null>(null);
   const [ask, setAsk] = useState<'save' | 'delete' | null>(null);
+  const [videoBusy, setVideoBusy] = useState(false);
   const titleRef = useRef<HTMLInputElement>(null);
   const editing = d.occ !== null;
   const recurring = d.occ?.recurring ?? false;
@@ -49,6 +52,27 @@ export function EventDialog({ initial, calendars, busy, onSave, onDelete, onClos
     const duration = combine(d.endDate, d.endTime).getTime() - combine(d.startDate, d.startTime).getTime();
     const end = new Date(combine(startDate, startTime).getTime() + (Number.isFinite(duration) ? Math.max(0, duration) : 3_600_000));
     set({ startDate, startTime, endDate: dateKey(end), endTime: timeKey(end) });
+  };
+
+  // Lien d'une salle Alfred déjà présent dans le lieu ou les notes.
+  const videoLink = /https?:\/\/[^\s]+\/v\/[a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4}/.exec(`${d.location}\n${d.description}`)?.[0] ?? null;
+
+  /** Crée une salle de visio pour cet événement ; son lien devient le lieu (ou s'ajoute aux notes). */
+  const addVideo = async () => {
+    const err = draftError(d);
+    if (err) return setError(err);
+    setVideoBusy(true);
+    try {
+      const start = d.allDay ? combine(d.startDate, '00:00') : combine(d.startDate, d.startTime);
+      const end = d.allDay ? addDays(combine(d.endDate, '00:00'), 1) : combine(d.endDate, d.endTime);
+      const room = await videoApi.createRoom({ title: d.title.trim() || 'Visio', start: start.toISOString(), end: end.toISOString() });
+      if (!d.location.trim()) set({ location: room.url });
+      else set({ description: d.description.trim() ? `${d.description.trim()}\nVisio : ${room.url}` : `Visio : ${room.url}` });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'La visio n’a pas pu être créée');
+    } finally {
+      setVideoBusy(false);
+    }
   };
 
   const submit = (e: React.FormEvent) => {
@@ -126,6 +150,15 @@ export function EventDialog({ initial, calendars, busy, onSave, onDelete, onClos
             <div className="row">
               <span className="label">Lieu</span>
               <input type="text" value={d.location} onChange={(e) => set({ location: e.target.value })} placeholder="Adresse ou lien" maxLength={500} />
+            </div>
+
+            <div className="row">
+              <span className="label">Visio</span>
+              {videoLink ? (
+                <a className="btn" href={videoLink} target="_blank" rel="noopener"><ExternalIcon />Rejoindre la visio</a>
+              ) : (
+                <button type="button" className="btn" disabled={videoBusy || locked} onClick={() => void addVideo()}><VideoIcon />{videoBusy ? 'Création…' : 'Ajouter une visio Alfred'}</button>
+              )}
             </div>
 
             <textarea rows={3} placeholder="Notes" value={d.description} onChange={(e) => set({ description: e.target.value })} />

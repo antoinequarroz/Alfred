@@ -74,6 +74,18 @@ export const connectionEnv = {
   },
 };
 
+/**
+ * Serveur de visio (LiveKit). Les clés sont posées à l'installation (deploy/configurer.sh les
+ * génère) et partagées avec le conteneur alfred-livekit. Sans elles, la visio est indisponible.
+ * L'adresse publique par défaut est celle d'Alfred en wss : Caddy y envoie /rtc vers LiveKit.
+ */
+export const videoEnv = {
+  apiKey: raw('LIVEKIT_API_KEY'),
+  apiSecret: process.env.LIVEKIT_API_SECRET || undefined,
+  internalUrl: raw('LIVEKIT_INTERNAL_URL') ?? 'http://alfred-livekit:7880',
+  publicUrl: raw('LIVEKIT_PUBLIC_URL') ?? config.publicUrl.replace(/^http/, 'ws'),
+};
+
 /** Clé de chiffrement des secrets enregistrés dans l'app (facultative, voir server/secrets.ts). */
 export const secretKeyEnv = process.env.ALFRED_SECRET_KEY || undefined;
 

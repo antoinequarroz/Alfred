@@ -104,6 +104,26 @@ CREATE TABLE IF NOT EXISTS connection_settings (
   secret     INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL
 );
+
+-- Visioconférence (v2) : réglages (clé, valeur JSON) et salles. Le lien d'une salle est
+-- /v/<slug> ; le slug, aléatoire, sert de clé d'entrée aux invités.
+CREATE TABLE IF NOT EXISTS video_settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS video_rooms (
+  id          TEXT PRIMARY KEY,
+  slug        TEXT NOT NULL UNIQUE,
+  title       TEXT NOT NULL,
+  kind        TEXT NOT NULL,             -- 'instant' | 'event' | 'booking' | 'permanent'
+  booking_id  TEXT,                      -- réservation liée (kind = 'booking')
+  starts_at   TEXT,                      -- instants ISO UTC, NULL pour la salle permanente
+  ends_at     TEXT,
+  created_at  TEXT NOT NULL,
+  closed_at   TEXT                       -- fermée (annulation, suppression, lien renouvelé)
+);
+CREATE INDEX IF NOT EXISTS video_rooms_booking ON video_rooms(booking_id) WHERE booking_id IS NOT NULL;
 `;
 
 /** Horaires proposés à la première ouverture : lundi à vendredi, 09:00-12:00 et 13:30-17:30. */

@@ -618,6 +618,11 @@ function BookingFlow() {
             </Notice>
           )}
           <Recap typeName={b.typeName} start={b.start} end={b.end} timezone={b.timezone} location={b.locationLabel} mode={type?.mode} name={b.name} />
+          {b.videoUrl && (
+            <Notice kind="info" action={<a className="btn primary" href={b.videoUrl} target="_blank" rel="noopener">Ouvrir la visio</a>}>
+              À l’heure du rendez-vous, rejoignez la visio depuis ce lien (aussi dans l’e-mail). Rien à installer.
+            </Notice>
+          )}
           <div className="rdv-actions">
             <button type="button" className="btn" onClick={restart}>Prendre un autre rendez-vous</button>
             <a className="rdv-link danger" href={cancelPath}>Annuler ce rendez-vous</a>
