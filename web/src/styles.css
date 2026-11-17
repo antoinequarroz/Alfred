@@ -800,6 +800,30 @@ kbd {
 
 /* --- Tablette et mobile -------------------------------------------------- */
 
+/* --- Mise en page de la suite Media ------------------------------------------
+   Comme Cairn, Lamio et Metricove : la zone principale est UN panneau posé à 8 px des bords,
+   l'en-tête de page est à l'intérieur (séparé par un filet), et le contenu des rubriques
+   est centré dans une colonne à largeur de lecture. Sur mobile, la mise en page d'origine reste. */
+@media (min-width: 861px) {
+  .main {
+    margin: 8px 8px 8px 0;
+    padding: 0;
+    background: color-mix(in srgb, var(--panel) 72%, transparent);
+    -webkit-backdrop-filter: blur(24px);
+    backdrop-filter: blur(24px);
+    border: 1px solid var(--panel-line);
+    border-radius: 16px;
+    box-shadow: var(--panel-shadow);
+    overflow: hidden;
+  }
+  .toolbar { flex: none; min-height: 68px; padding: 0 16px 0 28px; border-bottom: 1px solid var(--panel-line); }
+  .week, .month { background: transparent; border: 0; border-radius: 0; box-shadow: none; }
+  .main .bk-scroll { padding: 24px 28px 40px; }
+  .main .bk { width: 100%; max-width: 1480px; margin: 0 auto; }
+  /* Dans le panneau, les cartes se détachent par un fond plein plutôt que par une seconde ombre. */
+  .bk-card { background: var(--surface); box-shadow: 0 1px 2px rgba(22, 30, 60, 0.04); }
+}
+
 @media (max-width: 860px) {
   :root { --control: 34px; }
   .sidebar {
