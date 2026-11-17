@@ -6,6 +6,7 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import { createApp } from './app.js';
 import { BookingService } from './booking/service.js';
 import { CaldavSync } from './caldav.js';
+import { settings as compteSettings } from './compte.js';
 import { allowPrivateHosts, config, connectionEnv, secretKeyEnv, videoEnv } from './config.js';
 import { ConnectionsService } from './connections.js';
 import { openDb } from './db.js';
@@ -65,8 +66,10 @@ const push = new PushService({
 pushRef = push;
 connections.mailContext = () => ({ publicName: booking.getSettings().publicName, timezone: config.timezone, publicUrl: config.publicUrl });
 const people = new PeopleService({ db: store.db, store, booking, cairnUrl: config.cairnUrl });
+// Compte Postmelo : actif seulement avec COMPTE_URL et COMPTE_CLIENT_SECRET. L'adresse de retour est celle d'Alfred.
+const compte = compteSettings({ ...process.env, APP_URL: process.env.APP_URL?.trim() || config.publicUrl });
 const app = createApp({
-  store, service, caldav, passwordHash, booking, connections, video, push, people,
+  store, service, caldav, passwordHash, booking, connections, video, push, people, compte,
   secureCookies: config.production,
   sessionDays: config.sessionDays,
 });
@@ -110,6 +113,8 @@ console.log(mailer.configured
 console.log(video.configured
   ? `[alfred] visio : serveur ${videoEnv.internalUrl}, adresse publique ${videoEnv.publicUrl}`
   : '[alfred] visio non configurée (LIVEKIT_API_KEY / LIVEKIT_API_SECRET absents)');
+if (compte) console.log(`[alfred] connexion par le Compte Postmelo active (${compte.issuer}, retour ${compte.redirectUri})`);
+else if (process.env.COMPTE_URL?.trim()) console.warn('[alfred] COMPTE_URL est réglé mais la connexion par le Compte Postmelo reste inactive : COMPTE_CLIENT_SECRET manque ou fait moins de 32 caractères');
 for (const notice of connectionsState.notices) console.warn(`[alfred] ${notice}`);
 // Un réglage de l'app passe avant le .env : le dire, pour qui modifie le .env et ne voit aucun effet.
 if (connectionEnv.caldav.password && connectionsState.caldav.password.source === 'app') {

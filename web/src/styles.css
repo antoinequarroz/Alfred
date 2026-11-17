@@ -337,6 +337,9 @@ kbd {
 .login input[type='password']:focus { outline: none; border-color: var(--accent-ink); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
 .login input[type='password']:hover { border-color: color-mix(in srgb, var(--line) 55%, var(--faint)); }
 .login .btn.wide { height: 38px; font-size: 14px; }
+.login a.btn.wide { width: 100%; display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
+.login-or { width: 100%; display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12.5px; margin: 4px 0 0; }
+.login-or::before, .login-or::after { content: ''; flex: 1; height: 1px; background: var(--line); }
 
 @keyframes rise { from { opacity: 0; transform: translateY(8px) scale(0.985); } }
 @keyframes fade { from { opacity: 0; } }
