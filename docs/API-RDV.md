@@ -130,7 +130,7 @@ Réponse `201` (`BookingConfirmation`) :
     "status": "confirmed",
     "cancellable": true
   },
-  "cancelUrl": "https://alfred.antoinequarroz.ch/rdv/annulation/Jq3…43 caractères",
+  "cancelUrl": "https://alfred.postmelo.ch/rdv/annulation/Jq3…43 caractères",
   "emailSent": true
 }
 ```
@@ -209,7 +209,7 @@ Session requise (cookie de connexion, comme le reste de l'API). Sans session : `
   },
   "effectiveCalendarId": "caldav:Q2x…",
   "timezone": "Europe/Zurich",
-  "publicPageUrl": "https://alfred.antoinequarroz.ch/rdv",
+  "publicPageUrl": "https://alfred.postmelo.ch/rdv",
   "mail": { "configured": false, "from": "Antoine Quarroz <info@antoinequarroz.ch>", "notifyTo": "info@antoinequarroz.ch", "sentLast24h": 0, "dailyLimit": 200 },
   "warnings": [
     "L’envoi d’e-mails n’est pas configuré : les réservations fonctionnent, mais aucun e-mail ne part. Il se règle dans Rendez-vous > Réglages.",

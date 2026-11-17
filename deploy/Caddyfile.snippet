@@ -1,6 +1,6 @@
-# À ajouter au Caddyfile existant, une fois le DNS alfred.antoinequarroz.ch créé.
+# À ajouter au Caddyfile existant, une fois le DNS alfred.postmelo.ch créé.
 # Caddy tourne en conteneur : il joint Alfred par son nom sur le réseau Docker partagé.
-alfred.antoinequarroz.ch {
+alfred.postmelo.ch {
 	encode zstd gzip
 	# Visio : la signalisation WebSocket de LiveKit (/rtc) va au serveur de visio, tout le reste à Alfred.
 	handle /rtc* {
@@ -9,4 +9,10 @@ alfred.antoinequarroz.ch {
 	handle {
 		reverse_proxy alfred:3200
 	}
+}
+
+# Ancienne adresse (avant PostMelo, novembre 2026) : redirection permanente, chemin compris,
+# pour que les liens déjà envoyés (rendez-vous, gestion, visios) continuent de marcher.
+alfred.antoinequarroz.ch {
+	redir https://alfred.postmelo.ch{uri} permanent
 }

@@ -26,7 +26,7 @@ export interface VideoServerConfig {
   apiSecret?: string;
   /** Adresse interne de l'API (réseau Docker), par exemple http://alfred-livekit:7880. */
   internalUrl: string;
-  /** Adresse WebSocket publique donnée aux navigateurs, par exemple wss://alfred.antoinequarroz.ch. */
+  /** Adresse WebSocket publique donnée aux navigateurs, par exemple wss://alfred.postmelo.ch. */
   publicUrl: string;
 }
 
