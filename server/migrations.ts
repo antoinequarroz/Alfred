@@ -1,4 +1,6 @@
+import { summarize } from './ics.js';
 import { uuidv7 } from './ids.js';
+import { INSTANT_COLUMNS, isInstant, toInstant } from './instants.js';
 import { ALL_SPACES, SPACELESS_TABLES, type Sql } from './sql.js';
 
 // Migrations numérotées (phase 4 : données prêtes pour la suite Media).
@@ -213,7 +215,77 @@ export const MIGRATIONS: Migration[] = [
       db.exec('DROP TABLE outbox');
     },
   },
+  {
+    version: 6,
+    name: 'instants',
+    up(db) {
+      // Un seul format d'instant (texte ISO UTC, voir server/instants.ts) et le fuseau à côté de
+      // chaque heure locale. Les colonnes en millisecondes restent, écrites mais plus lues, pour
+      // que l'image précédente d'Alfred fonctionne encore sans restaurer la base.
+      for (const c of ['start_at', 'end_at', 'recur_end_at', 'modified_at', 'tzid']) db.exec(`ALTER TABLE events ADD COLUMN ${c} TEXT`);
+      const events = db.all<{ id: string; ics: string; start_ms: number; end_ms: number; recur_end_ms: number | null; updated_at: number }>(
+        `SELECT id, ics, start_ms, end_ms, recur_end_ms, updated_at FROM events ORDER BY id ${ALL_SPACES}`);
+      for (const e of events) {
+        let tzid: string | null = null;
+        try {
+          tzid = summarize(e.ics).tzid;
+        } catch {
+          // iCalendar illisible : l'événement est déjà ignoré à l'affichage, il garde un fuseau vide.
+        }
+        db.run(`UPDATE events SET start_at = ?, end_at = ?, recur_end_at = ?, modified_at = ?, tzid = ? WHERE id = ? ${ALL_SPACES}`,
+          toInstant(Number(e.start_ms)), toInstant(Number(e.end_ms)), e.recur_end_ms === null ? null : toInstant(Number(e.recur_end_ms)),
+          toInstant(Number(e.updated_at)), tzid, e.id);
+      }
+      db.exec('CREATE INDEX events_span ON events(space_id, start_at, end_at)');
+
+      db.exec('ALTER TABLE sessions ADD COLUMN expires_at TEXT');
+      for (const s of db.all<{ id: string; expires_ms: number }>(`SELECT id, expires_ms FROM sessions ${ALL_SPACES}`)) {
+        db.run(`UPDATE sessions SET expires_at = ? WHERE id = ? ${ALL_SPACES}`, toInstant(Number(s.expires_ms)), s.id);
+      }
+
+      // Horaires d'ouverture : minutes depuis minuit dans ce fuseau.
+      db.exec(`ALTER TABLE booking_hours ADD COLUMN tzid TEXT NOT NULL DEFAULT '${defaultTimezone()}'`);
+
+      // Les colonnes déjà en texte ISO : toutes mises au format exact (millisecondes, Z).
+      normalizeInstants(db);
+    },
+    down(db) {
+      db.exec('ALTER TABLE booking_hours DROP COLUMN tzid');
+      db.exec('ALTER TABLE sessions DROP COLUMN expires_at');
+      db.exec('DROP INDEX events_span');
+      for (const c of ['tzid', 'modified_at', 'recur_end_at', 'end_at', 'start_at']) db.exec(`ALTER TABLE events DROP COLUMN ${c}`);
+    },
+  },
 ];
+
+/** Fuseau d'Alfred tel que le lit server/config.ts, pour les lignes écrites avant ALFRED-296. */
+function defaultTimezone(): string {
+  const tz = process.env.ALFRED_TIMEZONE || process.env.TZ || 'Europe/Zurich';
+  return /^[A-Za-z_]+(?:\/[A-Za-z0-9_+-]+)*$/.test(tz) ? tz : 'Europe/Zurich';
+}
+
+/** Réécrit au format canonique tout instant texte qui ne l'est pas (sans millisecondes, avec décalage…). */
+export function normalizeInstants(db: Sql): number {
+  let fixed = 0;
+  const present = new Set(db.tables());
+  for (const [table, columns] of Object.entries(INSTANT_COLUMNS)) {
+    if (!present.has(table)) continue;
+    const have = db.columns(table);
+    const key = have.includes('id') ? 'id' : have.includes('token_hash') ? 'token_hash' : have.includes('seq') ? 'seq' : have.includes('key') ? 'key' : have.includes('version') ? 'version' : null;
+    for (const column of columns) {
+      if (!have.includes(column) || !key) continue;
+      const rows = db.all<Record<string, unknown>>(`SELECT ${key} AS k, ${column} AS v FROM ${table} WHERE ${column} IS NOT NULL ${ALL_SPACES}`);
+      for (const r of rows) {
+        if (isInstant(r.v)) continue;
+        const ms = Date.parse(String(r.v));
+        if (!Number.isFinite(ms)) continue; // illisible : laissé tel quel plutôt qu'inventé
+        db.run(`UPDATE ${table} SET ${column} = ? WHERE ${key} = ? ${ALL_SPACES}`, new Date(ms).toISOString(), r.k as string | number);
+        fixed++;
+      }
+    }
+  }
+  return fixed;
+}
 
 /**
  * Crée ou met à jour la fiche d'une personne d'après ce qu'elle vient de donner (réservation).

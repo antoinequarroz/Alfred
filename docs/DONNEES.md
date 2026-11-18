@@ -11,6 +11,8 @@ le socle. Référence : le document Linear « Architecture de données d'Alfred 
 | Un espace partout | Table `spaces` (une ligne : l'espace « Personnel ») et colonne `space_id` sur toutes les tables, y compris celles qu'une autre branche ajoutera (rattrapées à chaque démarrage). **Toutes** les requêtes filtrent dessus et toutes les insertions l'écrivent ; en test, une garde refuse toute requête sur une table d'espace qui ne mentionne pas `space_id`. |
 | Requêtes portables | `server/sql.ts` : couche d'accès commune (`get`, `all`, `run`, `exec`, `tx`) servie par SQLite (production) et PostgreSQL (`server/pg.ts`). Plus de SQL propre à SQLite dans le code métier (un test le vérifie). Toute la suite de tests tourne aussi sur PostgreSQL. |
 | Journal d'événements | Table `outbox` au format commun, écrite dans la même transaction que le fait. Les notifications la lisent. Voir [JOURNAL.md](JOURNAL.md). |
+| Un seul format d'instant | Texte ISO 8601 UTC avec millisecondes (`2026-11-18T21:45:00.000Z`), partout : voir « Dates et fuseaux » plus bas. |
+| Export ouvert | Export complet JSON (versionné, sans secrets) et .ics depuis Réglages > Données, import dans un Alfred vide. Voir [EXPORT.md](EXPORT.md). |
 | Identifiants universels | Les nouveaux objets reçoivent un UUID v7 (`server/ids.ts`). Les anciens identifiants restent valables, les UID iCalendar ne changent pas. |
 | Adresses stables | `media://alfred/<type>/<id>` : `person`, `booking`, `event` (par UID iCalendar, qui survit à iCloud et aux changements de calendrier)… `GET /api/v1/resolve?address=` dit ce que désigne une adresse. |
 | Personnes | Table `people` : une fiche par e-mail normalisé (minuscules, sans espaces) et par espace. Chaque réservation pointe vers sa fiche (`bookings.person_id`) et garde sa copie figée du nom, de l'e-mail et du téléphone. Rubrique « Personnes » dans l'app. |
@@ -28,6 +30,7 @@ l'adresse de la note et le lien pour l'ouvrir.
 | 3 | liens | table `links` | retire la table |
 | 4 | acomptes | table `payment_holds`, colonnes de paiement | retire les colonnes et la table |
 | 5 | journal | tables `outbox` et `outbox_readers` | retire les tables |
+| 6 | instants | `events.start_at/end_at/recur_end_at/modified_at/tzid`, `sessions.expires_at`, `booking_hours.tzid`, textes ISO mis au format exact | retire les colonnes |
 
 Règle : une migration n'enlève ni ne renomme rien de ce que lit le code précédent. Remettre
 l'image précédente d'Alfred fonctionne donc sans restaurer la base.
@@ -38,6 +41,29 @@ lecture seule :
 ```bash
 docker run --rm -v /opt/alfred/data:/src:ro alfred:phase4 node dist/server/scripts/essai-migration.js /src/alfred.db
 ```
+
+## Dates et fuseaux
+
+Un seul format d'instant dans la base : le texte ISO 8601 en UTC, avec millisecondes et `Z`
+(`toISOString()`). Il a toujours la même longueur, donc l'ordre alphabétique est l'ordre
+chronologique et les comparaisons marchent pareil sous SQLite et PostgreSQL. `server/instants.ts`
+donne `toInstant()` et la liste de toutes les colonnes d'instant (`INSTANT_COLUMNS`) ; un test
+vérifie que toute la base respecte le format et qu'aucune colonne d'instant n'échappe à la liste.
+
+Une heure locale n'est jamais stockée sans son fuseau IANA :
+
+- `booking_hours.tzid` : les minutes des horaires d'ouverture se comptent dans ce fuseau (celui
+  d'Alfred au moment de l'enregistrement). Les créneaux sont calculés dans ce fuseau ; si Alfred
+  change de fuseau, les Réglages le signalent.
+- `events.tzid` : fuseau de l'heure de début, celui que suivent les répétitions (`UTC` pour une
+  heure en UTC, vide pour une journée entière ou une heure « flottante »). L'iCalendar d'origine
+  reste la référence, avec son VTIMEZONE.
+
+Les anciennes colonnes en millisecondes (`events.start_ms`, `end_ms`, `recur_end_ms`,
+`updated_at`, `sessions.expires_ms`) ne sont plus lues. Elles sont encore écrites pour que
+l'image précédente d'Alfred reste utilisable sans restaurer ; si elle a tourné, ses écritures sont
+recopiées dans les colonnes ISO au démarrage suivant. Elles pourront être retirées par une
+migration quand le retour arrière avant la migration 6 ne sera plus utile.
 
 ## Couche d'accès et espaces
 
@@ -79,7 +105,6 @@ Chaque base ouverte par un test devient un schéma neuf de cette base PostgreSQL
 
 ## Reste à faire (phase 4)
 
-- Dates : un seul format d'instant (`events.start_ms` en millisecondes, `bookings.start_utc` en texte ISO), fuseau explicite (ANT-296).
 - Une seule table de réglages (ANT-298), à faire après la fusion des PR 4 et 6 qui en ajoutent.
-- Participants visio et invités iCloud reliés aux Personnes (ANT-300), distribution du journal (ALFRED-308), API v1 complète, export (E4.3).
+- Participants visio et invités iCloud reliés aux Personnes (ANT-300), distribution du journal (ALFRED-308), API v1 complète.
 - Côté Cairn : bouton « Note de réunion » qui crée la note et le lien d'un coup (ANT-175).
