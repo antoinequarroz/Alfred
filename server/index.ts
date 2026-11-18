@@ -10,6 +10,7 @@ import { settings as compteSettings } from './compte.js';
 import { allowPrivateHosts, config, connectionEnv, secretKeyEnv, videoEnv } from './config.js';
 import { ConnectionsService } from './connections.js';
 import { openDb } from './db.js';
+import { PaymentsService } from './payments/service.js';
 import { PeopleService } from './people.js';
 import { SecretBox } from './secrets.js';
 import { hashPassword } from './password.js';
@@ -52,8 +53,9 @@ const video = new VideoService({
   bookingLink: (id) => bookingRef?.videoLink(id) ?? null,
   onGuestJoin: (room, name, waiting) => void pushRef?.guestArrived(room, name, waiting).catch((err) => console.error('[alfred] notifications :', err)),
 });
+const payments = new PaymentsService({ db: store.db, secrets, pendingCount: () => bookingRef?.pendingPayments() ?? 0 });
 const booking = new BookingService({
-  video,
+  video, payments,
   store, calendar: service, caldav, timezone: config.timezone, mailer, mailProblem: () => connections.smtpProblem(),
   publicUrl: config.publicUrl, defaultPublicName: config.mail.from.name,
 });
@@ -69,7 +71,7 @@ const people = new PeopleService({ db: store.db, store, booking, cairnUrl: confi
 // Compte Postmelo : actif seulement avec COMPTE_URL et COMPTE_CLIENT_SECRET. L'adresse de retour est celle d'Alfred.
 const compte = compteSettings({ ...process.env, APP_URL: process.env.APP_URL?.trim() || config.publicUrl });
 const app = createApp({
-  store, service, caldav, passwordHash, booking, connections, video, push, people, compte,
+  store, service, caldav, passwordHash, booking, connections, video, push, people, compte, payments,
   secureCookies: config.production,
   sessionDays: config.sessionDays,
 });
@@ -103,6 +105,10 @@ setInterval(() => void caldav.sync(), config.caldav.syncIntervalSeconds * 1000).
 // Rappels aux clients avant leurs rendez-vous : un passage par minute (rien ne part sans SMTP ni rappel réglé).
 setTimeout(() => void booking.sendDueReminders(), 30_000).unref();
 setInterval(() => void booking.sendDueReminders(), 60_000).unref();
+// Paiements d'acompte en cours : vérifiés auprès de Stripe toutes les 30 s (le client a pu
+// payer puis fermer la page sans revenir sur Alfred). Rien n'est appelé s'il n'y en a aucun.
+void booking.sweepPayments();
+setInterval(() => void booking.sweepPayments(), 30_000).unref();
 const SOURCES = { app: 'réglés dans l’app', env: 'du fichier .env', default: 'par défaut', none: 'absents' } as const;
 console.log(caldav.configured
   ? `[alfred] synchro CalDAV toutes les ${config.caldav.syncIntervalSeconds} s avec ${connectionsState.caldav.url.value} (identifiants ${SOURCES[connectionsState.caldav.password.source]})`
@@ -113,6 +119,9 @@ console.log(mailer.configured
 console.log(video.configured
   ? `[alfred] visio : serveur ${videoEnv.internalUrl}, adresse publique ${videoEnv.publicUrl}`
   : '[alfred] visio non configurée (LIVEKIT_API_KEY / LIVEKIT_API_SECRET absents)');
+console.log(payments.configured
+  ? `[alfred] paiement en ligne : Stripe (${payments.state().mode === 'live' ? 'mode réel' : 'mode test'}), ${payments.paymentMethods.join(' + ')}`
+  : '[alfred] paiement en ligne non configuré (réglable dans l’app : Rendez-vous > Réglages)');
 if (compte) console.log(`[alfred] connexion par le Compte Postmelo active (${compte.issuer}, retour ${compte.redirectUri})`);
 else if (process.env.COMPTE_URL?.trim()) console.warn('[alfred] COMPTE_URL est réglé mais la connexion par le Compte Postmelo reste inactive : COMPTE_CLIENT_SECRET manque ou fait moins de 32 caractères');
 for (const notice of connectionsState.notices) console.warn(`[alfred] ${notice}`);

@@ -174,7 +174,7 @@ describe('prise de rendez-vous : accès', () => {
     // La session ne change rien à ce que voit la partie publique.
     const withCookie = (await (await ctx.admin('/api/public/booking')).json()) as PublicBookingInfo;
     expect(withCookie).toEqual(await (await ctx.json('/api/public/booking')).json());
-    expect(Object.keys(withCookie.types[0]).sort()).toEqual(['description', 'durationMin', 'horizonDays', 'locationLabel', 'mode', 'name', 'phoneRequired', 'slug']);
+    expect(Object.keys(withCookie.types[0]).sort()).toEqual(['currency', 'depositCents', 'description', 'durationMin', 'horizonDays', 'locationLabel', 'mode', 'name', 'phoneRequired', 'slug']);
   });
 
   it('refuse une réservation ou une annulation venue d’un autre site', async () => {
@@ -361,7 +361,7 @@ describe('prise de rendez-vous : types', () => {
     await ctx.admin('/api/booking/settings', 'PUT', { enabled: true });
     const info = (await (await ctx.json('/api/public/booking')).json()) as PublicBookingInfo;
     expect(info.types).toEqual([
-      { slug: 'premiere-seance-decouverte', name: 'Première séance (découverte)', durationMin: 45, description: '', mode: 'cabinet', locationLabel: 'Au cabinet', phoneRequired: false, horizonDays: 60 },
+      { slug: 'premiere-seance-decouverte', name: 'Première séance (découverte)', durationMin: 45, description: '', mode: 'cabinet', locationLabel: 'Au cabinet', phoneRequired: false, horizonDays: 60, depositCents: 0, currency: 'CHF' },
     ]);
   });
 
@@ -593,7 +593,7 @@ describe('prise de rendez-vous : réservation', () => {
     expect(confirmation.booking).toEqual({
       typeName: 'Consultation', start: MONDAY_9, end: '2026-11-16T08:30:00.000Z', timezone: 'Europe/Zurich',
       locationLabel: 'Rue du Lac 1, Sion', name: 'Élodie Müller', status: 'confirmed', cancellable: true, videoUrl: null,
-      reschedulable: true, changeUntil: MONDAY_9, mode: 'cabinet', durationMin: 30, horizonDays: 60,
+      reschedulable: true, changeUntil: MONDAY_9, mode: 'cabinet', durationMin: 30, horizonDays: 60, deposit: null,
     });
     expect(confirmation.emailSent).toBe(true);
     expect(confirmation.cancelUrl).toMatch(/^https:\/\/alfred\.example\.ch\/rdv\/gerer\/[A-Za-z0-9_-]{43}$/);

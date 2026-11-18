@@ -130,6 +130,8 @@ export interface BookingType {
   bufferAfterMin: number;
   minNoticeHours: number;
   horizonDays: number;
+  /** Acompte à payer en ligne à la réservation, en centimes (CHF) ; 0 = pas de paiement. */
+  depositCents: number;
   active: boolean;
   sort: number;
 }
@@ -222,6 +224,21 @@ export interface Booking {
   clientReschedules: number;
   /** Fiche Personne du client (annuaire), null pour une réservation antérieure sans e-mail. */
   personId?: string | null;
+  /** Acompte payé en ligne, null si le rendez-vous n'en avait pas. */
+  payment: BookingPayment | null;
+}
+
+/** paid : encaissé ; refunded : remboursé ; refund_failed : remboursement demandé mais refusé ou en panne. */
+export type PaymentStatus = 'paid' | 'refunded' | 'refund_failed';
+
+export interface BookingPayment {
+  amountCents: number;
+  currency: string;
+  status: PaymentStatus;
+  /** Dernier refus de remboursement, en clair. */
+  error: string | null;
+  /** Lien vers le paiement dans le tableau de bord Stripe. */
+  dashboardUrl: string | null;
 }
 
 // --- partie publique --------------------------------------------------------
@@ -238,6 +255,10 @@ export interface PublicBookingType {
   phoneRequired: boolean;
   /** Nombre de jours à l'avance jusqu'où des créneaux sont proposés (borne du calendrier de la page). */
   horizonDays: number;
+  /** Acompte à payer en ligne à la réservation, en centimes ; 0 = aucun. */
+  depositCents: number;
+  /** Devise de l'acompte (CHF). */
+  currency: string;
 }
 
 export interface PublicBookingInfo {
@@ -299,6 +320,19 @@ export interface PublicBooking {
   videoUrl: string | null;
   /** Réponse à une annulation ou à un déplacement seulement : vrai si l'e-mail au client est parti. */
   emailSent?: boolean;
+  /** Acompte payé en ligne, et ce qu'il devient si le client annule maintenant. */
+  deposit?: PublicDeposit | null;
+}
+
+export interface PublicDeposit {
+  amountCents: number;
+  currency: string;
+  /** Vrai si une annulation maintenant rembourse l'acompte. */
+  refundOnCancel: boolean;
+  /** Délai minimal (heures avant le rendez-vous) pour être remboursé, null si jamais remboursé automatiquement. */
+  refundHours: number | null;
+  /** Après une annulation : l'acompte a été remboursé. */
+  refunded?: boolean;
 }
 
 export interface BookingConfirmation {
@@ -307,6 +341,57 @@ export interface BookingConfirmation {
   cancelUrl: string;
   /** Faux si l'e-mail de confirmation n'a pas pu partir : afficher le récapitulatif et le lien. */
   emailSent: boolean;
+  /**
+   * Rendez-vous avec acompte : le créneau est retenu, rien n'est confirmé tant que le paiement
+   * n'a pas abouti. Le navigateur part vers cette page de paiement (Stripe) ; le client revient
+   * ensuite sur /rdv/paiement/<ref>.
+   */
+  payment?: { url: string; ref: string; amountCents: number; currency: string; expiresAt: string };
+}
+
+/** Suivi d'un paiement d'acompte, vu du client revenu de la page de paiement. */
+export interface PublicPaymentStatus {
+  /**
+   * pending : en attente du paiement ; processing : payé, rendez-vous en cours d'enregistrement ;
+   * confirmed : rendez-vous confirmé ; expired : non payé, créneau libéré.
+   */
+  status: 'pending' | 'processing' | 'confirmed' | 'expired';
+  amountCents: number;
+  currency: string;
+  /** Récapitulatif (status = confirmed : le rendez-vous enregistré). */
+  booking: PublicBooking;
+  /** status = confirmed : faux si l'e-mail de confirmation n'est pas (encore) parti. */
+  emailSent: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Paiement en ligne (Stripe), réglé dans l'app. Voir docs/API-RDV.md.
+
+export interface PaymentSettingsState {
+  /** Vrai quand une clé Stripe lisible est enregistrée : les acomptes peuvent être encaissés. */
+  configured: boolean;
+  /** Clé enregistrée mais indéchiffrable (clé de chiffrement changée) : à ressaisir. */
+  unreadable: boolean;
+  /** Mode de la clé : test (aucun vrai paiement) ou live. null sans clé. */
+  mode: 'test' | 'live' | null;
+  /** Quatre derniers caractères de la clé, pour la reconnaître. */
+  keyHint: string | null;
+  /** TWINT proposé en plus de la carte (à activer aussi dans le tableau de bord Stripe). */
+  twint: boolean;
+  /** Le client qui annule au moins tant d'heures avant est remboursé ; null : jamais automatiquement. */
+  refundHours: number | null;
+  currency: string;
+  /** Dernier essai de la clé. */
+  lastTest: ConnectionTest | null;
+  /** Paiements commencés, pas encore aboutis (créneaux retenus). */
+  pendingCount: number;
+}
+
+export interface PaymentSettingsInput {
+  /** Nouvelle clé secrète (sk_… ou rk_…) ; absente ou vide : inchangée. */
+  secretKey?: string;
+  twint?: boolean;
+  refundHours?: number | null;
 }
 
 // ---------------------------------------------------------------------------

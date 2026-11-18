@@ -19,6 +19,8 @@ import { PeopleError, PeopleService } from './people.js';
 import { registerPeopleRoutes } from './people-routes.js';
 import { ForbiddenError, NotFoundError, type CalendarService } from './service.js';
 import { toCalendarInfo, type Store } from './store.js';
+import { PaymentSettingsError, type PaymentsService } from './payments/service.js';
+import { registerPaymentRoutes } from './payments/routes.js';
 import { DEFAULT_VIDEO_LIMITS, registerAdminVideoRoutes, registerPublicVideoRoutes, type VideoLimits } from './video/routes.js';
 import { VideoError, VideoService } from './video/service.js';
 
@@ -45,6 +47,8 @@ export interface AppDeps {
   /** Visioconférence. Par défaut : un service sans serveur de visio (non configuré). */
   video?: VideoService;
   videoLimits?: Partial<VideoLimits>;
+  /** Paiement en ligne des acomptes (Stripe). Sans lui, les routes /api/payments n'existent pas. */
+  payments?: PaymentsService;
   /** Notifications sur les appareils (Web Push). Sans elles, les routes /api/push n'existent pas. */
   push?: PushService;
   /** Annuaire des personnes et liens. Par défaut : construit sur la même base, Cairn à son adresse habituelle. */
@@ -142,6 +146,7 @@ export function createApp(deps: AppDeps): Hono {
     if (err instanceof HTTPException) return c.json({ error: 'Requête refusée' }, err.status);
     if (err instanceof PushError) return c.json({ error: err.message, code: err.code }, err.status);
     if (err instanceof VideoError) return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}) }, err.status);
+    if (err instanceof PaymentSettingsError) return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}) }, err.status);
     if (err instanceof PeopleError) return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}) }, err.status);
     if (err instanceof BookingError) return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}) }, err.status);
     if (err instanceof ConnectionError) {
@@ -298,6 +303,8 @@ export function createApp(deps: AppDeps): Hono {
   if (deps.push) registerPushRoutes(app, deps.push);
 
   // --- connexions (SMTP, CalDAV) --------------------------------------------
+
+  if (deps.payments) registerPaymentRoutes(app, deps.payments);
 
   if (deps.connections) registerConnectionRoutes(app, deps.connections, { ...DEFAULT_CONNECTION_LIMITS, ...deps.connectionLimits });
 

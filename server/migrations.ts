@@ -133,6 +133,56 @@ export const MIGRATIONS: Migration[] = [
       db.exec('DROP TABLE links');
     },
   },
+  {
+    version: 4,
+    name: 'acomptes',
+    up(db) {
+      // Paiement des acomptes (Stripe Checkout). Une réservation avec acompte commence par une
+      // retenue : le créneau est bloqué pendant le paiement, la réservation n'est créée qu'une
+      // fois le paiement abouti.
+      db.exec(`CREATE TABLE payment_holds (
+          id                TEXT PRIMARY KEY,
+          space_id          TEXT NOT NULL DEFAULT '${DEFAULT_SPACE_ID}',
+          ref_hash          TEXT NOT NULL UNIQUE,   -- SHA-256 de la référence de retour (/rdv/paiement/<ref>)
+          status            TEXT NOT NULL,          -- 'pending' | 'paid' | 'completed' | 'expired'
+          type_id           TEXT,
+          type_name         TEXT NOT NULL,
+          mode              TEXT NOT NULL,
+          location          TEXT NOT NULL DEFAULT '',  -- précision du type (brute), comme booking_types.location
+          buffer_before_min INTEGER NOT NULL DEFAULT 0,
+          buffer_after_min  INTEGER NOT NULL DEFAULT 0,
+          start_utc         TEXT NOT NULL,
+          end_utc           TEXT NOT NULL,
+          name              TEXT NOT NULL,
+          email             TEXT NOT NULL,
+          phone             TEXT NOT NULL DEFAULT '',
+          message           TEXT NOT NULL DEFAULT '',
+          token_hash        TEXT NOT NULL,          -- empreinte du jeton d'annulation de la future réservation
+          cancel_token      TEXT,                   -- jeton en clair, le temps d'envoyer la confirmation ; effacé ensuite
+          amount_cents      INTEGER NOT NULL,
+          currency          TEXT NOT NULL,
+          checkout_id       TEXT,                   -- session Stripe Checkout
+          payment_intent    TEXT,
+          booking_id        TEXT,
+          created_at        TEXT NOT NULL,
+          expires_at        TEXT NOT NULL,          -- fin de validité de la page de paiement
+          last_error        TEXT
+      )`);
+      db.exec('CREATE INDEX payment_holds_status ON payment_holds(status)');
+      // Montant par type, et paiement de chaque réservation (NULL : pas d'acompte).
+      db.exec('ALTER TABLE booking_types ADD COLUMN deposit_cents INTEGER NOT NULL DEFAULT 0');
+      db.exec('ALTER TABLE bookings ADD COLUMN payment_amount_cents INTEGER');
+      db.exec('ALTER TABLE bookings ADD COLUMN payment_currency TEXT');
+      db.exec('ALTER TABLE bookings ADD COLUMN payment_intent TEXT');
+      db.exec("ALTER TABLE bookings ADD COLUMN payment_status TEXT"); // 'paid' | 'refunded' | 'refund_failed'
+      db.exec('ALTER TABLE bookings ADD COLUMN payment_error TEXT');
+    },
+    down(db) {
+      for (const c of ['payment_error', 'payment_status', 'payment_intent', 'payment_currency', 'payment_amount_cents']) db.exec(`ALTER TABLE bookings DROP COLUMN ${c}`);
+      db.exec('ALTER TABLE booking_types DROP COLUMN deposit_cents');
+      db.exec('DROP TABLE payment_holds');
+    },
+  },
 ];
 
 /**

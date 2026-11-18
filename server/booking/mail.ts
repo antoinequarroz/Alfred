@@ -202,6 +202,10 @@ export interface BookingMailData {
   videoUrl?: string | null;
   /** Version de l'événement joint (SEQUENCE) : augmente à chaque déplacement, pour que l'agenda du client le mette à jour. */
   sequence?: number;
+  /** Acompte payé en ligne, en clair (« CHF 50.00 »). */
+  deposit?: string;
+  /** Ce qu'il est devenu : encaissé, remboursé, remboursement en échec. */
+  depositStatus?: 'paid' | 'refunded' | 'refund_failed';
 }
 
 export interface MailContext {
@@ -308,7 +312,23 @@ function summaryRows(b: BookingMailData, ctx: MailContext): [string, string][] {
     ['Date', formatWhen(b.start, b.end, ctx.timezone)],
     ['Lieu', b.location],
     ['Visio', b.videoUrl ?? ''],
+    ['Acompte', depositLine(b)],
   ];
+}
+
+function depositLine(b: BookingMailData): string {
+  if (!b.deposit) return '';
+  if (b.depositStatus === 'refunded') return `${b.deposit}, remboursé`;
+  if (b.depositStatus === 'refund_failed') return `${b.deposit}, remboursement en cours`;
+  return `${b.deposit}, payé en ligne`;
+}
+
+/** Phrase sur l'acompte dans l'avis d'annulation au client, ou rien. */
+function refundSentence(b: BookingMailData): string {
+  if (!b.deposit) return '';
+  if (b.depositStatus === 'refunded') return `Votre acompte de ${b.deposit} vous est remboursé. Selon votre banque, il apparaît sur votre compte d’ici 5 à 10 jours.`;
+  if (b.depositStatus === 'refund_failed') return `Le remboursement de votre acompte de ${b.deposit} est en cours de traitement.`;
+  return `L’acompte de ${b.deposit} n’est pas remboursé.`;
 }
 
 function clientRows(b: BookingMailData): [string, string][] {
@@ -541,13 +561,15 @@ export function clientCancellation(b: BookingMailData, ctx: MailContext, by: 'cl
     : 'Votre rendez-vous a dû être annulé. Veuillez nous en excuser.';
   const again = `Pour reprendre rendez-vous : ${ctx.publicUrl}/rdv`;
   const signature = ctx.publicName || 'Alfred';
+  const refund = refundSentence(b);
   return {
     to: { name: b.name, address: b.email },
     subject: `Rendez-vous annulé : ${b.typeName}, ${formatWhen(b.start, b.end, ctx.timezone)}`,
-    text: [`Bonjour ${b.name},`, '', intro, '', rowsText(rows), '', again, '', signature].join('\n'),
+    text: [`Bonjour ${b.name},`, '', intro, ...(refund ? ['', refund] : []), '', rowsText(rows), '', again, '', signature].join('\n'),
     html: layout(title, [
       p(`Bonjour ${escapeHtml(b.name)},`),
       p(escapeHtml(intro)),
+      ...(refund ? [p(escapeHtml(refund))] : []),
       rowsHtml(rows),
       p(`<a href="${escapeHtml(`${ctx.publicUrl}/rdv`)}">Reprendre rendez-vous</a>`),
       `<p style="${STYLE.small}">${escapeHtml(signature)}</p>`,
