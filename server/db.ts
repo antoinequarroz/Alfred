@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { syncLegacyInstants } from './instants.js';
 import { DEFAULT_SPACE_ID, ensureSpaceColumns, migrateUp } from './migrations.js';
 import { PostgresDriver } from './pg.js';
 import { ALL_SPACES, Sql, SqliteDriver, type Driver } from './sql.js';
@@ -232,6 +233,8 @@ export function prepareDb(db: Db): Db {
   // Phase 4 : migrations numérotées (espaces, personnes, liens…), voir server/migrations.ts.
   migrateUp(db);
   ensureSpaceColumns(db);
+  // Lignes écrites par l'image précédente (colonnes en millisecondes seulement) : recopiées en ISO.
+  syncLegacyInstants(db);
   return db;
 }
 

@@ -17,6 +17,11 @@ export interface ResourceSummary {
   /** Fin de la dernière occurrence, null si la répétition est infinie. */
   recurEndMs: number | null;
   /**
+   * Fuseau IANA de l'heure de début (celui que suivent les répétitions), 'UTC' pour une heure
+   * en UTC, null pour une journée entière ou une heure « flottante » (sans fuseau).
+   */
+  tzid: string | null;
+  /**
    * Occupation d'une ressource non récurrente (un élément par VEVENT), calculée une fois
    * à l'enregistrement. null pour une série : elle doit être développée sur la période.
    */
@@ -120,6 +125,16 @@ export function repeatOf(master: ICAL.Component): RepeatRule {
   }
 }
 
+/** Fuseau d'une heure iCalendar : voir ResourceSummary.tzid. */
+function zoneOf(time: ICAL.Time): string | null {
+  if (time.isDate) return null;
+  // Fuseau inconnu d'ical.js (pas de VTIMEZONE) : il garde le TZID dans « timezone ».
+  const zone = time.zone?.tzid;
+  const tzid = zone && zone !== 'floating' ? zone : (time as unknown as { timezone?: string }).timezone;
+  if (!tzid || tzid === 'floating') return null;
+  return tzid === 'Z' ? 'UTC' : tzid;
+}
+
 /** Résumé utilisé pour indexer la ressource en base (filtrage par période). */
 export function summarize(ics: string): ResourceSummary {
   const vcal = parseCalendar(ics);
@@ -169,6 +184,7 @@ export function summarize(ics: string): ResourceSummary {
     endMs: maxEnd,
     recurring,
     recurEndMs,
+    tzid: zoneOf(start),
     busy,
   };
 }

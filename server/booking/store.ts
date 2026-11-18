@@ -240,13 +240,19 @@ export class BookingStore {
     return rows.map((r) => ({ weekday: r.weekday, startMin: r.start_min, endMin: r.end_min }));
   }
 
-  setHours(hours: BookingHoursRange[]): void {
+  /** Remplace les horaires ; tzid : fuseau IANA dans lequel les minutes sont comptées. */
+  setHours(hours: BookingHoursRange[], tzid: string): void {
     tx(this.db, () => {
       this.db.run('DELETE FROM booking_hours WHERE space_id = ?', this.space);
       for (const h of hours) {
-        this.db.run('INSERT INTO booking_hours (weekday, start_min, end_min, space_id) VALUES (?, ?, ?, ?)', h.weekday, h.startMin, h.endMin, this.space);
+        this.db.run('INSERT INTO booking_hours (weekday, start_min, end_min, tzid, space_id) VALUES (?, ?, ?, ?, ?)', h.weekday, h.startMin, h.endMin, tzid, this.space);
       }
     });
+  }
+
+  /** Fuseau des horaires d'ouverture (null : aucun horaire). Une seule valeur : setHours les écrit ensemble. */
+  hoursTimezone(): string | null {
+    return this.db.get<{ tzid: string }>('SELECT tzid FROM booking_hours WHERE space_id = ? ORDER BY weekday, start_min LIMIT 1', this.space)?.tzid ?? null;
   }
 
   // --- réservations --------------------------------------------------------

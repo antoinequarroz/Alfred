@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { uuidv7 } from './ids.js';
 import type { CalendarInfo, CalendarSource, Occurrence } from '../shared/types.js';
 import type { Db } from './db.js';
+import { toInstant } from './instants.js';
 import { ALL_SPACES } from './sql.js';
 import { expand, expandBusy, summarize, type BusyOccurrence } from './ics.js';
 
@@ -138,16 +139,22 @@ export class Store {
   saveEvent(ev: { id?: string; calendarId: string; href: string | null; etag: string | null; ics: string }): string {
     const s = summarize(ev.ics);
     const id = ev.id ?? (ev.href ? eventIdForHref(ev.href) : uuidv7());
+    const now = Date.now();
+    // Les colonnes en millisecondes (start_ms…) ne sont plus lues ; elles restent écrites pour
+    // l'image précédente d'Alfred (voir server/instants.ts).
     this.db.run(
-      `INSERT INTO events (id, calendar_id, href, etag, uid, ics, summary, start_ms, end_ms, recurring, recur_end_ms, busy, updated_at, space_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO events (id, calendar_id, href, etag, uid, ics, summary, start_at, end_at, recurring, recur_end_at, tzid, busy, modified_at,
+         start_ms, end_ms, recur_end_ms, updated_at, space_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET calendar_id = excluded.calendar_id, href = excluded.href, etag = excluded.etag,
-         uid = excluded.uid, ics = excluded.ics, summary = excluded.summary, start_ms = excluded.start_ms,
-         end_ms = excluded.end_ms, recurring = excluded.recurring, recur_end_ms = excluded.recur_end_ms,
-         busy = excluded.busy, updated_at = excluded.updated_at
+         uid = excluded.uid, ics = excluded.ics, summary = excluded.summary, start_at = excluded.start_at,
+         end_at = excluded.end_at, recurring = excluded.recurring, recur_end_at = excluded.recur_end_at, tzid = excluded.tzid,
+         busy = excluded.busy, modified_at = excluded.modified_at, start_ms = excluded.start_ms, end_ms = excluded.end_ms,
+         recur_end_ms = excluded.recur_end_ms, updated_at = excluded.updated_at
        WHERE events.space_id = excluded.space_id`,
-      id, ev.calendarId, ev.href, ev.etag, s.uid, ev.ics, s.summary, s.startMs, s.endMs, s.recurring ? 1 : 0, s.recurEndMs,
-      s.busy ? packBusy(s.busy) : null, Date.now(), this.space);
+      id, ev.calendarId, ev.href, ev.etag, s.uid, ev.ics, s.summary, toInstant(s.startMs), toInstant(s.endMs), s.recurring ? 1 : 0,
+      s.recurEndMs === null ? null : toInstant(s.recurEndMs), s.tzid, s.busy ? packBusy(s.busy) : null, toInstant(now),
+      s.startMs, s.endMs, s.recurEndMs, now, this.space);
     this.changes++;
     return id;
   }
@@ -163,11 +170,11 @@ export class Store {
     const rows = this.db.all<{ id: string; calendar_id: string; ics: string }>(
       `SELECT e.id, e.calendar_id, e.ics FROM events e JOIN calendars c ON c.id = e.calendar_id AND c.space_id = e.space_id
        WHERE e.space_id = ? AND c.visible = 1
-         AND e.start_ms < ?
-         AND ((e.recurring = 0 AND e.end_ms > ?)
-           OR (e.recurring = 1 AND (e.recur_end_ms IS NULL OR e.recur_end_ms > ?)))
-       ORDER BY e.start_ms, e.id`,
-      this.space, to.getTime() + margin, from.getTime() - margin, from.getTime() - margin);
+         AND e.start_at < ?
+         AND ((e.recurring = 0 AND e.end_at > ?)
+           OR (e.recurring = 1 AND (e.recur_end_at IS NULL OR e.recur_end_at > ?)))
+       ORDER BY e.start_at, e.id`,
+      this.space, toInstant(to.getTime() + margin), toInstant(from.getTime() - margin), toInstant(from.getTime() - margin));
     const allowed = calendarIds ? new Set(calendarIds) : null;
     const out: Occurrence[] = [];
     for (const row of rows) {
@@ -215,11 +222,11 @@ export class Store {
       `SELECT e.id, e.calendar_id, e.summary, e.recurring, e.busy, CASE WHEN e.busy IS NULL THEN e.ics END AS ics
        FROM events e JOIN calendars c ON c.id = e.calendar_id AND c.space_id = e.space_id
        WHERE e.space_id = ? AND c.blocks_booking = 1
-         AND e.start_ms < ?
-         AND ((e.recurring = 0 AND e.end_ms > ?)
-           OR (e.recurring = 1 AND (e.recur_end_ms IS NULL OR e.recur_end_ms > ?)))
-       ORDER BY e.start_ms, e.id`,
-      this.space, to.getTime() + margin, from.getTime() - margin, from.getTime() - margin);
+         AND e.start_at < ?
+         AND ((e.recurring = 0 AND e.end_at > ?)
+           OR (e.recurring = 1 AND (e.recur_end_at IS NULL OR e.recur_end_at > ?)))
+       ORDER BY e.start_at, e.id`,
+      this.space, toInstant(to.getTime() + margin), toInstant(from.getTime() - margin), toInstant(from.getTime() - margin));
     for (const row of rows) {
       try {
         let list: BusyOccurrence[];
@@ -245,11 +252,11 @@ export class Store {
    * (l'identifiant change quand l'événement change de calendrier, pas l'UID).
    */
   findEvent(id: string | null, uid: string | null): { id: string; calendarId: string; uid: string; startMs: number; endMs: number } | undefined {
-    type Row = { id: string; calendar_id: string; uid: string; start_ms: number; end_ms: number };
-    const columns = 'id, calendar_id, uid, start_ms, end_ms';
+    type Row = { id: string; calendar_id: string; uid: string; start_at: string; end_at: string };
+    const columns = 'id, calendar_id, uid, start_at, end_at';
     let row = id ? this.db.get<Row>(`SELECT ${columns} FROM events WHERE id = ? AND space_id = ?`, id, this.space) : undefined;
-    if (!row && uid) row = this.db.get<Row>(`SELECT ${columns} FROM events WHERE uid = ? AND space_id = ? ORDER BY updated_at DESC, id LIMIT 1`, uid, this.space);
-    return row && { id: row.id, calendarId: row.calendar_id, uid: row.uid, startMs: row.start_ms, endMs: row.end_ms };
+    if (!row && uid) row = this.db.get<Row>(`SELECT ${columns} FROM events WHERE uid = ? AND space_id = ? ORDER BY modified_at DESC, id LIMIT 1`, uid, this.space);
+    return row && { id: row.id, calendarId: row.calendar_id, uid: row.uid, startMs: Date.parse(row.start_at), endMs: Date.parse(row.end_at) };
   }
 
   /** Événements d'un calendrier qui portent cet UID. */
@@ -263,13 +270,13 @@ export class Store {
   createSession(days: number): { id: string; expires: Date } {
     const id = randomUUID() + randomUUID();
     const expires = new Date(Date.now() + days * 86_400_000);
-    this.db.run(`INSERT INTO sessions (id, expires_ms) VALUES (?, ?) ${ALL_SPACES}`, hashToken(id), expires.getTime());
+    this.db.run(`INSERT INTO sessions (id, expires_at, expires_ms) VALUES (?, ?, ?) ${ALL_SPACES}`, hashToken(id), toInstant(expires), expires.getTime());
     return { id, expires };
   }
 
   isSessionValid(id: string): boolean {
-    const row = this.db.get<{ expires_ms: number }>(`SELECT expires_ms FROM sessions WHERE id = ? ${ALL_SPACES}`, hashToken(id));
-    return Boolean(row && row.expires_ms > Date.now());
+    const row = this.db.get<{ expires_at: string }>(`SELECT expires_at FROM sessions WHERE id = ? ${ALL_SPACES}`, hashToken(id));
+    return Boolean(row && row.expires_at > toInstant(Date.now()));
   }
 
   deleteSession(id: string): void {
@@ -277,7 +284,7 @@ export class Store {
   }
 
   purgeSessions(): void {
-    this.db.run(`DELETE FROM sessions WHERE expires_ms < ? ${ALL_SPACES}`, Date.now());
+    this.db.run(`DELETE FROM sessions WHERE expires_at < ? ${ALL_SPACES}`, toInstant(Date.now()));
   }
 }
 

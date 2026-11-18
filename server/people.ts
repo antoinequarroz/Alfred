@@ -133,8 +133,8 @@ export class PeopleService {
         return { ...base, title: d.title, url: d.personId ? `/#personnes/${encodeURIComponent(d.personId)}` : '/#rendez-vous' };
       }
       case 'event': {
-        const ev = this.db.get<{ id: string; summary: string; start_ms: number }>(
-          'SELECT id, summary, start_ms FROM events WHERE uid = ? AND space_id = ? ORDER BY updated_at DESC, id LIMIT 1', a.id, this.spaceId);
+        const ev = this.db.get<{ id: string; summary: string; start_at: string }>(
+          'SELECT id, summary, start_at FROM events WHERE uid = ? AND space_id = ? ORDER BY modified_at DESC, id LIMIT 1', a.id, this.spaceId);
         if (!ev) return null;
         return { ...base, title: ev.summary || 'Événement', url: '/' };
       }

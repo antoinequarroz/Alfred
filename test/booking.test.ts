@@ -14,6 +14,7 @@ import { BookingService, hashToken, locationLabel, slugify, type BookingOptions 
 import { RateLimiter, rateKey } from '../server/booking/ratelimit.js';
 import type { CaldavSync } from '../server/caldav.js';
 import { openDb } from '../server/db.js';
+import { INSTANT_COLUMNS, INSTANT_RE, LEGACY_MS_COLUMNS } from '../server/instants.js';
 import { hashPassword } from '../server/password.js';
 import { CalendarService } from '../server/service.js';
 import { Store } from '../server/store.js';
@@ -1670,5 +1671,99 @@ describe('prise de rendez-vous : déplacement par le client', () => {
     expect(res.status).toBe(409);
     expect(((await res.json()) as { code: string }).code).toBe('not_reschedulable');
     expect(ctx.booking.listBookings('upcoming')[0].start).toBe(MONDAY_9);
+  });
+});
+
+describe('dates : un seul format d’instant, fuseau explicite, changement d’heure (ALFRED-296)', () => {
+  it('propose les créneaux et envoie les rappels à la bonne heure autour du passage à l’heure d’été', async () => {
+    const ctx = await setup();
+    ctx.clock.now = new Date('2027-03-20T10:00:00Z');
+    await open(ctx);
+    // Vendredi 26 mars 2027, encore en heure d'hiver (UTC+1) ; lundi 29 mars, en heure d'été (UTC+2).
+    expect((await slotsOf(ctx, '2027-03-26', '2027-03-26'))[0]).toBe('2027-03-26T08:00:00.000Z');
+    expect((await slotsOf(ctx, '2027-03-29', '2027-03-29'))[0]).toBe('2027-03-29T07:00:00.000Z');
+    const res = await bookRequest(ctx, { start: '2027-03-29T07:00:00.000Z' });
+    expect(res.status).toBe(201);
+    ctx.sent.length = 0;
+    // 24 h avant : dimanche 28 mars, jour du changement d'heure, 09:00 heure d'été.
+    ctx.clock.now = new Date('2027-03-28T06:59:00Z');
+    expect(await ctx.booking.sendDueReminders()).toBe(0);
+    ctx.clock.now = new Date('2027-03-28T07:00:00Z');
+    expect(await ctx.booking.sendDueReminders()).toBe(1);
+    expect(ctx.sent[0].subject).toBe('Rappel : Consultation, demain à 09:00');
+    ctx.clock.now = new Date('2027-03-29T05:59:00Z');
+    expect(await ctx.booking.sendDueReminders()).toBe(0);
+    ctx.clock.now = new Date('2027-03-29T06:00:00Z');
+    expect(await ctx.booking.sendDueReminders()).toBe(1);
+    expect(ctx.sent[1].subject).toBe('Rappel : Consultation, aujourd’hui à 09:00');
+  });
+
+  it('fait de même autour du retour à l’heure d’hiver', async () => {
+    const ctx = await setup();
+    ctx.clock.now = new Date('2027-10-20T10:00:00Z');
+    await open(ctx);
+    // Vendredi 29 octobre 2027 en heure d'été ; lundi 1er novembre en heure d'hiver (changement le 31).
+    expect((await slotsOf(ctx, '2027-10-29', '2027-10-29'))[0]).toBe('2027-10-29T07:00:00.000Z');
+    expect((await slotsOf(ctx, '2027-11-01', '2027-11-01'))[0]).toBe('2027-11-01T08:00:00.000Z');
+    expect((await bookRequest(ctx, { start: '2027-11-01T08:00:00.000Z' })).status).toBe(201);
+    ctx.sent.length = 0;
+    ctx.clock.now = new Date('2027-10-31T07:59:00Z');
+    expect(await ctx.booking.sendDueReminders()).toBe(0);
+    ctx.clock.now = new Date('2027-10-31T08:00:00Z');
+    expect(await ctx.booking.sendDueReminders()).toBe(1);
+    expect(ctx.sent[0].subject).toBe('Rappel : Consultation, demain à 09:00');
+  });
+
+  it('enregistre le fuseau des horaires d’ouverture et calcule les créneaux dans ce fuseau', async () => {
+    const ctx = await setup();
+    await open(ctx);
+    expect((await ctx.admin('/api/booking/hours', 'PUT', [{ weekday: 1, startMin: 9 * 60, endMin: 12 * 60 }])).status).toBe(200);
+    const rows = ctx.store.db.prepare('SELECT tzid FROM booking_hours').all() as { tzid: string }[];
+    expect(rows).toEqual([{ tzid: 'Europe/Zurich' }]);
+    expect((await slotsOf(ctx))[0]).toBe(MONDAY_9);
+    // Horaires saisis ailleurs (Alfred réglé sur un autre fuseau depuis) : ils gardent leur sens et un avertissement le dit.
+    ctx.store.db.prepare("UPDATE booking_hours SET tzid = 'Europe/London'").run();
+    expect((await slotsOf(ctx))[0]).toBe('2026-11-16T09:00:00.000Z');
+    const state = (await (await ctx.admin('/api/booking/settings')).json()) as BookingAdminState;
+    expect(state.warnings.join(' ')).toContain('Europe/London');
+  });
+
+  it('n’écrit qu’un format d’instant dans toute la base', async () => {
+    const ctx = await setup();
+    await open(ctx);
+    const res = await bookRequest(ctx);
+    expect(res.status).toBe(201);
+    const confirmation = (await res.json()) as BookingConfirmation;
+    await ctx.booking.sendDueReminders();
+    expect((await ctx.admin('/api/events', 'POST', {
+      calendarId: ctx.calendar.id, title: 'Cours', start: '2026-11-18T14:00:00+01:00', end: '2026-11-18T15:00:00+01:00', allDay: false, repeat: 'weekly',
+    })).status).toBe(201);
+    expect((await ctx.json(`/api/public/booking/cancel/${tokenOf(confirmation)}`, 'POST')).status).toBe(200);
+
+    const db = ctx.store.db;
+    let checked = 0;
+    for (const [table, columns] of Object.entries(INSTANT_COLUMNS)) {
+      if (!db.tables().includes(table)) continue;
+      for (const column of columns) {
+        for (const row of db.prepare(`SELECT ${column} AS v FROM ${table} WHERE ${column} IS NOT NULL`).all() as { v: unknown }[]) {
+          expect(row.v, `${table}.${column}`).toMatch(INSTANT_RE);
+          checked++;
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(10);
+    const ev = db.prepare("SELECT tzid, start_at, recur_end_at FROM events WHERE summary = 'Cours'").get();
+    expect(ev).toEqual({ tzid: 'Europe/Zurich', start_at: '2026-11-18T13:00:00.000Z', recur_end_at: null });
+
+    // Toute colonne qui ressemble à un instant est répertoriée : une nouvelle colonne ne peut pas échapper au format.
+    const known = new Set([
+      ...Object.entries(INSTANT_COLUMNS).flatMap(([t, cs]) => cs.map((c) => `${t}.${c}`)),
+      ...Object.entries(LEGACY_MS_COLUMNS).flatMap(([t, m]) => Object.keys(m).map((c) => `${t}.${c}`)),
+    ]);
+    for (const table of db.tables()) {
+      for (const column of db.columns(table)) {
+        if (/(_at|_utc|_ms)$|^notified_start$|^reminder_ref$/.test(column)) expect(known.has(`${table}.${column}`), `${table}.${column}`).toBe(true);
+      }
+    }
   });
 });

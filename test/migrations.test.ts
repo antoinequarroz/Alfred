@@ -65,7 +65,7 @@ describe('migrations numérotées', () => {
     expect(schemaVersion(db)).toBe(LATEST);
     expect(migrateUp(db)).toEqual([]);
     const versions = (db.prepare('SELECT version, name FROM schema_migrations ORDER BY version').all() as unknown as { version: number; name: string }[]);
-    expect(versions.map((v) => v.name)).toEqual(['espaces', 'personnes', 'liens', 'acomptes', 'journal']);
+    expect(versions.map((v) => v.name)).toEqual(['espaces', 'personnes', 'liens', 'acomptes', 'journal', 'instants']);
     db.close();
   });
 
@@ -120,7 +120,7 @@ describe('migrations numérotées', () => {
     const dir = mkdtempSync(join(tmpdir(), 'alfred-mig-'));
     const db = openDb(dir);
     oldBooking(db, 'b1', 'a@example.org', 'A', '2026-11-01T10:00:00.000Z');
-    expect(migrateDown(db, 0)).toEqual([5, 4, 3, 2, 1]);
+    expect(migrateDown(db, 0)).toEqual([6, 5, 4, 3, 2, 1]);
     expect(schemaVersion(db)).toBe(0);
     for (const t of ['people', 'links', 'spaces', 'payment_holds']) expect(userTables(db)).not.toContain(t);
     for (const table of userTables(db)) expect(columns(db, table), table).not.toContain('space_id');
@@ -128,7 +128,7 @@ describe('migrations numérotées', () => {
     expect(columns(db, 'bookings')).not.toContain('payment_status');
     expect(columns(db, 'booking_types')).not.toContain('deposit_cents');
     expect(db.prepare('SELECT id, email FROM bookings').all()).toEqual([{ id: 'b1', email: 'a@example.org' }]);
-    expect(migrateUp(db)).toEqual([1, 2, 3, 4, 5]);
+    expect(migrateUp(db)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(columns(db, 'payment_holds')).toContain('space_id');
     expect((db.prepare('SELECT COUNT(*) AS n FROM people').get() as { n: number }).n).toBe(1);
     db.close();
@@ -150,5 +150,57 @@ describe('migrations numérotées', () => {
 
   it('normalise les e-mails : espaces et casse', () => {
     expect(normalizeEmail('  Élodie@Example.ORG ')).toBe('élodie@example.org');
+  });
+});
+
+describe('instants : un seul format en base (migration 6, ALFRED-296)', () => {
+  const ics = (dtstart: string, rrule = '') => ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:x', 'BEGIN:VEVENT', 'UID:u1', 'DTSTAMP:20260101T000000Z',
+    dtstart, 'DURATION:PT1H', ...(rrule ? [rrule] : []), 'END:VEVENT', 'END:VCALENDAR', ''].join('\r\n');
+
+  it('recopie les millisecondes en ISO, note le fuseau et met les textes au format exact', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'alfred-mig-'));
+    const before = openDb(dir);
+    migrateDown(before, 5);
+    before.prepare("INSERT INTO calendars (id, source, name, color) VALUES ('c1', 'local', 'Perso', '#000')").run();
+    const start = Date.UTC(2026, 10, 16, 8, 0, 0);
+    before.prepare(`INSERT INTO events (id, calendar_id, uid, ics, summary, start_ms, end_ms, recurring, recur_end_ms, updated_at)
+      VALUES ('e1', 'c1', 'u1', ?, 'Cours', ?, ?, 1, NULL, ?)`).run(ics('DTSTART;TZID=Europe/Zurich:20261116T090000', 'RRULE:FREQ=WEEKLY'), start, start + 3_600_000, start - 5000);
+    before.prepare(`INSERT INTO events (id, calendar_id, uid, ics, summary, start_ms, end_ms, recurring, updated_at)
+      VALUES ('e2', 'c1', 'u2', 'illisible', '', ?, ?, 0, ?)`).run(start, start + 1, start);
+    before.prepare('INSERT INTO sessions (id, expires_ms) VALUES (?, ?)').run('s1', start);
+    oldBooking(before, 'b1', 'a@example.org', 'A', '2026-11-01T10:00:00Z');
+    before.prepare("UPDATE bookings SET cancelled_at = '2026-11-02T11:00:00+01:00' WHERE id = 'b1'").run();
+    before.close();
+
+    const db = openDb(dir);
+    expect(db.prepare("SELECT start_at, end_at, recur_end_at, modified_at, tzid FROM events WHERE id = 'e1'").get()).toEqual({
+      start_at: '2026-11-16T08:00:00.000Z', end_at: '2026-11-16T09:00:00.000Z', recur_end_at: null, modified_at: '2026-11-16T07:59:55.000Z', tzid: 'Europe/Zurich',
+    });
+    expect(db.prepare("SELECT tzid FROM events WHERE id = 'e2'").get()).toEqual({ tzid: null });
+    expect(db.prepare('SELECT expires_at FROM sessions').get()).toEqual({ expires_at: '2026-11-16T08:00:00.000Z' });
+    expect(db.prepare('SELECT created_at, cancelled_at FROM bookings').get()).toEqual({ created_at: '2026-11-01T10:00:00.000Z', cancelled_at: '2026-11-02T10:00:00.000Z' });
+    expect(new Set((db.prepare('SELECT tzid FROM booking_hours').all() as { tzid: string }[]).map((r) => r.tzid))).toEqual(new Set(['Europe/Zurich']));
+    db.close();
+  });
+
+  it('rattrape au démarrage ce qu’a écrit l’image précédente après un retour arrière', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'alfred-mig-'));
+    const db = openDb(dir);
+    db.prepare("INSERT INTO calendars (id, source, name, color) VALUES ('c1', 'local', 'Perso', '#000')").run();
+    const start = Date.UTC(2026, 11, 1, 9, 0, 0);
+    // Ce que fait l'image précédente : elle ne connaît que les colonnes en millisecondes.
+    db.prepare(`INSERT INTO events (id, calendar_id, uid, ics, summary, start_ms, end_ms, recurring, updated_at)
+      VALUES ('e1', 'c1', 'u1', ?, 'Nouveau', ?, ?, 0, ?)`).run(ics('DTSTART:20261201T090000Z'), start, start + 3_600_000, start);
+    db.prepare('INSERT INTO sessions (id, expires_ms) VALUES (?, ?)').run('s1', start);
+    db.close();
+    const again = openDb(dir);
+    expect(again.prepare("SELECT start_at, end_at FROM events WHERE id = 'e1'").get()).toEqual({ start_at: '2026-12-01T09:00:00.000Z', end_at: '2026-12-01T10:00:00.000Z' });
+    // Puis elle déplace l'événement : la colonne ISO suit au démarrage suivant.
+    again.prepare("UPDATE events SET start_ms = ?, end_ms = ? WHERE id = 'e1'").run(start + 86_400_000, start + 90_000_000);
+    again.close();
+    const third = openDb(dir);
+    expect(third.prepare("SELECT start_at FROM events WHERE id = 'e1'").get()).toEqual({ start_at: '2026-12-02T09:00:00.000Z' });
+    expect(third.prepare('SELECT expires_at FROM sessions').get()).toEqual({ expires_at: '2026-12-01T09:00:00.000Z' });
+    third.close();
   });
 });

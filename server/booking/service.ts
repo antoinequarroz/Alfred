@@ -358,6 +358,10 @@ export class BookingService {
       warnings.push(`Le paiement en ligne n’est pas configuré : ${unpaid.map((t) => `« ${t.name} »`).join(', ')} ${unpaid.length > 1 ? 'ne sont pas proposés' : 'n’est pas proposé'} sur la page publique tant qu’aucune clé Stripe n’est enregistrée (Rendez-vous > Réglages).`);
     }
     if (this.data.getHours().length === 0) warnings.push('Aucun horaire d’ouverture : aucun créneau n’est proposé.');
+    const hoursTz = this.data.hoursTimezone();
+    if (hoursTz && hoursTz !== this.timezone) {
+      warnings.push(`Les horaires d’ouverture sont comptés en heure de ${hoursTz}, mais Alfred est réglé sur ${this.timezone}. Enregistrez-les à nouveau pour les passer en ${this.timezone}.`);
+    }
     const sync = this.caldav?.configured ? this.caldav.getStatus() : undefined;
     if (sync?.lastError) warnings.push('La synchro iCloud est en échec : les créneaux sont calculés sur la dernière copie connue.');
     if (!settings.enabled) warnings.push('La prise de rendez-vous est fermée : la page publique n’accepte aucune réservation.');
@@ -521,7 +525,7 @@ export class BookingService {
         throw invalid({ hours: `${WEEKDAY_NAMES[hours[i].weekday - 1]} : deux plages se chevauchent` });
       }
     }
-    this.data.setHours(hours);
+    this.data.setHours(hours, this.timezone);
     return hours;
   }
 
@@ -658,8 +662,9 @@ export class BookingService {
       busy.push({ start: h.start_utc, end: h.end_utc, bufferBeforeMin: h.buffer_before_min, bufferAfterMin: h.buffer_after_min });
     }
     return computeSlotDays({
+      // Les horaires sont des heures locales : elles se lisent dans le fuseau où ils ont été saisis.
       type, hours: this.data.getHours(), stepMin: this.getSettings().slotStepMin,
-      timezone: this.timezone, from: first, to: last, now, busy,
+      timezone: this.data.hoursTimezone() ?? this.timezone, from: first, to: last, now, busy,
     });
   }
 
