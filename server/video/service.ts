@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { ALL_SPACES } from '../sql.js';
 import { uuidv7 } from '../ids.js';
 import type {
   PublicVideoRoom, VideoAdminState, VideoJoinInfo, VideoJoinResult, VideoQuality, VideoRoom, VideoRoomKind,
@@ -204,7 +205,7 @@ export class VideoService {
   // --- réglages ------------------------------------------------------------
 
   getSettings(): VideoSettings {
-    const rows = this.db.prepare('SELECT key, value FROM video_settings').all() as unknown as { key: string; value: string }[];
+    const rows = this.db.all<{ key: string; value: string }>('SELECT key, value FROM video_settings WHERE space_id = ? ORDER BY key', this.db.spaceId);
     const out: VideoSettings = { ...DEFAULTS };
     for (const r of rows) {
       try {
@@ -243,8 +244,12 @@ export class VideoService {
       else fields.waitingRoom = 'Valeur invalide';
     }
     if (Object.keys(fields).length > 0) throw new VideoError(400, 'invalid', Object.values(fields)[0], fields);
-    const put = this.db.prepare('INSERT INTO video_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
-    for (const [key, value] of Object.entries(patch)) put.run(key, JSON.stringify(value));
+    for (const [key, value] of Object.entries(patch)) {
+      this.db.run(
+        `INSERT INTO video_settings (key, value, space_id) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE video_settings.space_id = excluded.space_id`,
+        key, JSON.stringify(value), this.db.spaceId);
+    }
     return this.getSettings();
   }
 
@@ -281,11 +286,11 @@ export class VideoService {
   }
 
   private bySlug(slug: string): RoomRow | undefined {
-    return this.db.prepare('SELECT * FROM video_rooms WHERE slug = ?').get(slug) as RoomRow | undefined;
+    return this.db.get<RoomRow>('SELECT * FROM video_rooms WHERE slug = ? AND space_id = ?', slug, this.db.spaceId);
   }
 
   private byId(id: string): RoomRow | undefined {
-    return this.db.prepare('SELECT * FROM video_rooms WHERE id = ?').get(id) as RoomRow | undefined;
+    return this.db.get<RoomRow>('SELECT * FROM video_rooms WHERE id = ? AND space_id = ?', id, this.db.spaceId);
   }
 
   /** Horaire effectif : celui du rendez-vous pour une salle de rendez-vous (il a pu être déplacé). */
@@ -324,15 +329,16 @@ export class VideoService {
   }
 
   private insert(row: RoomRow): void {
-    this.db.prepare(
-      `INSERT INTO video_rooms (id, slug, title, kind, booking_id, starts_at, ends_at, created_at, closed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(row.id, row.slug, row.title, row.kind, row.booking_id, row.starts_at, row.ends_at, row.created_at, row.closed_at);
+    this.db.run(
+      `INSERT INTO video_rooms (id, slug, title, kind, booking_id, starts_at, ends_at, created_at, closed_at, space_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      row.id, row.slug, row.title, row.kind, row.booking_id, row.starts_at, row.ends_at, row.created_at, row.closed_at, this.db.spaceId);
   }
 
   private newRow(kind: VideoRoomKind, title: string, start: string | null, end: string | null, bookingId: string | null = null): RoomRow {
     let slug = newRoomSlug();
-    while (this.bySlug(slug)) slug = newRoomSlug();
+    // Le lien d'une salle est unique dans toute la base, tous espaces confondus.
+    while (this.db.get(`SELECT 1 AS ok FROM video_rooms WHERE slug = ? ${ALL_SPACES}`, slug)) slug = newRoomSlug();
     return {
       id: uuidv7(), slug, title, kind, booking_id: bookingId, starts_at: start, ends_at: end,
       created_at: this.now().toISOString(), closed_at: null,
@@ -359,18 +365,18 @@ export class VideoService {
     const settings = this.getSettings();
     const server = await this.serverStatus();
     const live = server.reachable ? await this.liveCounts() : null;
-    const personal = (this.db.prepare("SELECT * FROM video_rooms WHERE kind = 'permanent' AND closed_at IS NULL").get() as RoomRow | undefined) ?? null;
+    const personal = this.db.get<RoomRow>("SELECT * FROM video_rooms WHERE space_id = ? AND kind = 'permanent' AND closed_at IS NULL ORDER BY created_at, id", this.db.spaceId) ?? null;
     // Les horaires des réservations sont d'abord rapprochés de l'agenda (un rendez-vous a pu être déplacé).
     this.bookingLink('');
     // Les salles passées sont écartées en SQL, avant la limite : elles ne sont jamais purgées.
     const cutoff = new Date(this.now().getTime() - GRACE_MS).toISOString();
-    const rows = this.db.prepare(
-      `SELECT r.* FROM video_rooms r LEFT JOIN bookings b ON b.id = r.booking_id
-       WHERE r.closed_at IS NULL AND r.kind != 'permanent'
+    const rows = this.db.all<RoomRow>(
+      `SELECT r.* FROM video_rooms r LEFT JOIN bookings b ON b.id = r.booking_id AND b.space_id = r.space_id
+       WHERE r.space_id = ? AND r.closed_at IS NULL AND r.kind != 'permanent'
          AND COALESCE(b.status, 'confirmed') = 'confirmed'
          AND COALESCE(b.end_utc, r.ends_at) > ?
-       ORDER BY COALESCE(b.start_utc, r.starts_at, r.created_at) LIMIT 500`,
-    ).all(cutoff) as unknown as RoomRow[];
+       ORDER BY COALESCE(b.start_utc, r.starts_at, r.created_at), r.id LIMIT 500`,
+      this.db.spaceId, cutoff);
     const rooms = rows
       .filter((r) => {
         const s = this.schedule(r);
@@ -420,7 +426,7 @@ export class VideoService {
   /** Salle permanente (ton lien fixe). renew : nouveau lien, l'ancien ne marche plus. */
   personalRoom(renew: boolean): VideoRoom {
     this.requireAvailable();
-    const current = this.db.prepare("SELECT * FROM video_rooms WHERE kind = 'permanent' AND closed_at IS NULL").get() as RoomRow | undefined;
+    const current = this.db.get<RoomRow>("SELECT * FROM video_rooms WHERE space_id = ? AND kind = 'permanent' AND closed_at IS NULL ORDER BY created_at, id", this.db.spaceId);
     if (current && !renew) return this.toRoom(current, null);
     if (current) this.close(current);
     const row = this.newRow('permanent', 'Ma salle', null, null);
@@ -429,7 +435,7 @@ export class VideoService {
   }
 
   private close(row: RoomRow): void {
-    this.db.prepare('UPDATE video_rooms SET closed_at = ? WHERE id = ? AND closed_at IS NULL').run(this.now().toISOString(), row.id);
+    this.db.run('UPDATE video_rooms SET closed_at = ? WHERE id = ? AND space_id = ? AND closed_at IS NULL', this.now().toISOString(), row.id, this.db.spaceId);
     for (const [ticket, w] of this.waiters) if (w.roomId === row.id) this.waiters.delete(ticket);
     // Les personnes encore connectées sont déconnectées, au mieux.
     void this.backend?.deleteRoom(this.livekitName(row)).catch(() => undefined);
@@ -480,13 +486,13 @@ export class VideoService {
   urlForBooking(bookingId: string): string | null {
     // Visio désactivée ou désinstallée après coup : pas de bouton qui mène à une salle indisponible.
     if (!this.available) return null;
-    const row = this.db.prepare('SELECT slug FROM video_rooms WHERE booking_id = ? AND closed_at IS NULL').get(bookingId) as { slug: string } | undefined;
+    const row = this.db.get<{ slug: string }>('SELECT slug FROM video_rooms WHERE booking_id = ? AND space_id = ? AND closed_at IS NULL ORDER BY created_at, id', bookingId, this.db.spaceId);
     return row ? this.roomUrl(row.slug) : null;
   }
 
   /** Réservation annulée : sa salle ferme. */
   closeForBooking(bookingId: string): void {
-    const rows = this.db.prepare('SELECT * FROM video_rooms WHERE booking_id = ? AND closed_at IS NULL').all(bookingId) as unknown as RoomRow[];
+    const rows = this.db.all<RoomRow>('SELECT * FROM video_rooms WHERE booking_id = ? AND space_id = ? AND closed_at IS NULL ORDER BY created_at, id', bookingId, this.db.spaceId);
     for (const row of rows) this.close(row);
   }
 

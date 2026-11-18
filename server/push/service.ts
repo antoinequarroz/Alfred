@@ -1,4 +1,5 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import { uuidv7 } from '../ids.js';
 import type { PushPrefs, PushReminderMode, PushState, PushDevice, PushTestResult } from '../../shared/types.js';
 import type { Db } from '../db.js';
 import type { Store } from '../store.js';
@@ -23,28 +24,6 @@ export class PushError extends Error {
   }
 }
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS push_settings (
-  key   TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS push_subscriptions (
-  id              TEXT PRIMARY KEY,
-  endpoint        TEXT NOT NULL UNIQUE,
-  p256dh          TEXT NOT NULL,
-  auth            TEXT NOT NULL,
-  label           TEXT NOT NULL,
-  created_at      TEXT NOT NULL,
-  last_success_at TEXT,
-  last_error      TEXT,
-  last_error_at   TEXT
-);
--- Notifications déjà traitées (envoyées, ou volontairement tues) : une clé par événement signalé.
-CREATE TABLE IF NOT EXISTS push_sent (
-  key     TEXT PRIMARY KEY,
-  sent_at TEXT NOT NULL
-);
-`;
 
 export const DEFAULT_PREFS: PushPrefs = {
   newBooking: true,
@@ -135,7 +114,6 @@ export class PushService {
     this.now = opts.now ?? (() => new Date());
     this.fetchImpl = opts.fetch;
     this.bookingVideoUrl = opts.bookingVideoUrl ?? (() => null);
-    this.db.exec(SCHEMA);
     // Paire de clés VAPID créée une fois pour toutes : la changer désabonnerait tous les appareils.
     // Elle n'est pas chiffrée : qui lit la base y trouve aussi les abonnements et leurs clés.
     const stored = this.setting<VapidKeys>('vapid');
@@ -145,6 +123,10 @@ export class PushService {
     if (!this.setting<string>('since')) this.saveSetting('since', this.now().toISOString());
   }
 
+  private get space(): string {
+    return this.db.spaceId;
+  }
+
   get publicKey(): string {
     return this.vapid.publicKey;
   }
@@ -152,7 +134,7 @@ export class PushService {
   // --- réglages --------------------------------------------------------------
 
   private setting<T>(key: string): T | null {
-    const row = this.db.prepare('SELECT value FROM push_settings WHERE key = ?').get(key) as { value: string } | undefined;
+    const row = this.db.get<{ value: string }>('SELECT value FROM push_settings WHERE key = ? AND space_id = ?', key, this.space);
     if (!row) return null;
     try {
       return JSON.parse(row.value) as T;
@@ -162,7 +144,10 @@ export class PushService {
   }
 
   private saveSetting(key: string, value: unknown): void {
-    this.db.prepare('INSERT INTO push_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, JSON.stringify(value));
+    this.db.run(
+      `INSERT INTO push_settings (key, value, space_id) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE push_settings.space_id = excluded.space_id`,
+      key, JSON.stringify(value), this.space);
   }
 
   getPrefs(): PushPrefs {
@@ -197,7 +182,7 @@ export class PushService {
   // --- appareils -------------------------------------------------------------
 
   private rows(): SubRow[] {
-    return this.db.prepare('SELECT * FROM push_subscriptions ORDER BY created_at').all() as unknown as SubRow[];
+    return this.db.all<SubRow>('SELECT * FROM push_subscriptions WHERE space_id = ? ORDER BY created_at, id', this.space);
   }
 
   private toDevice(r: SubRow): PushDevice {
@@ -222,24 +207,24 @@ export class PushService {
     const rawLabel = typeof b.label === 'string' ? b.label.replace(/[\u0000-\u001f\u007f]/g, '').trim() : '';
     const replaces = typeof b.replaces === 'string' ? b.replaces : null;
     // Un abonnement renouvelé par le navigateur garde le nom de l'appareil.
-    const previous = replaces ? (this.db.prepare('SELECT label FROM push_subscriptions WHERE endpoint = ?').get(replaces) as { label: string } | undefined) : undefined;
+    const previous = replaces ? this.db.get<{ label: string }>('SELECT label FROM push_subscriptions WHERE endpoint = ? AND space_id = ?', replaces, this.space) : undefined;
     const label = (rawLabel || previous?.label || 'Appareil').slice(0, 60);
 
-    const existing = this.db.prepare('SELECT * FROM push_subscriptions WHERE endpoint = ?').get(endpoint) as SubRow | undefined;
+    const existing = this.db.get<SubRow>('SELECT * FROM push_subscriptions WHERE endpoint = ? AND space_id = ?', endpoint, this.space);
     if (existing) {
-      this.db.prepare('UPDATE push_subscriptions SET p256dh = ?, auth = ?, label = ? WHERE id = ?').run(keys.p256dh, keys.auth, label, existing.id);
+      this.db.run('UPDATE push_subscriptions SET p256dh = ?, auth = ?, label = ? WHERE id = ? AND space_id = ?', keys.p256dh, keys.auth, label, existing.id, this.space);
     } else {
-      if (replaces) this.db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(replaces);
-      const count = (this.db.prepare('SELECT COUNT(*) AS n FROM push_subscriptions').get() as { n: number }).n;
+      if (replaces) this.db.run('DELETE FROM push_subscriptions WHERE endpoint = ? AND space_id = ?', replaces, this.space);
+      const count = this.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM push_subscriptions WHERE space_id = ?', this.space)!.n;
       if (count >= MAX_DEVICES) throw new PushError(409, 'too_many', `${MAX_DEVICES} appareils au plus : retire d’abord un appareil que tu n’utilises plus.`);
-      this.db.prepare('INSERT INTO push_subscriptions (id, endpoint, p256dh, auth, label, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(randomUUID(), endpoint, keys.p256dh, keys.auth, label, this.now().toISOString());
+      this.db.run('INSERT INTO push_subscriptions (id, endpoint, p256dh, auth, label, created_at, space_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        uuidv7(this.now().getTime()), endpoint, keys.p256dh, keys.auth, label, this.now().toISOString(), this.space);
     }
-    return this.toDevice(this.db.prepare('SELECT * FROM push_subscriptions WHERE endpoint = ?').get(endpoint) as unknown as SubRow);
+    return this.toDevice(this.db.get<SubRow>('SELECT * FROM push_subscriptions WHERE endpoint = ? AND space_id = ?', endpoint, this.space)!);
   }
 
   remove(id: string): void {
-    const r = this.db.prepare('DELETE FROM push_subscriptions WHERE id = ?').run(id);
+    const r = this.db.run('DELETE FROM push_subscriptions WHERE id = ? AND space_id = ?', id, this.space);
     if (r.changes === 0) throw new PushError(404, 'not_found', 'Appareil introuvable');
   }
 
@@ -255,14 +240,14 @@ export class PushService {
       });
       const at = this.now().toISOString();
       if (outcome.ok) {
-        this.db.prepare('UPDATE push_subscriptions SET last_success_at = ?, last_error = NULL, last_error_at = NULL WHERE id = ?').run(at, r.id);
+        this.db.run('UPDATE push_subscriptions SET last_success_at = ?, last_error = NULL, last_error_at = NULL WHERE id = ? AND space_id = ?', at, r.id, this.space);
         return { id: r.id, label: r.label, ok: true, removed: false, error: null };
       }
       if (outcome.gone) {
         // L'appareil s'est désabonné (ou l'app a été supprimée) : il est oublié.
-        this.db.prepare('DELETE FROM push_subscriptions WHERE id = ?').run(r.id);
+        this.db.run('DELETE FROM push_subscriptions WHERE id = ? AND space_id = ?', r.id, this.space);
       } else {
-        this.db.prepare('UPDATE push_subscriptions SET last_error = ?, last_error_at = ? WHERE id = ?').run(outcome.error, at, r.id);
+        this.db.run('UPDATE push_subscriptions SET last_error = ?, last_error_at = ? WHERE id = ? AND space_id = ?', outcome.error, at, r.id, this.space);
         console.warn(`[alfred] notification non envoyée à « ${r.label} » : ${outcome.error}`);
       }
       return { id: r.id, label: r.label, ok: false, removed: outcome.gone, error: outcome.error };
@@ -278,7 +263,7 @@ export class PushService {
 
   /** Marque une clé comme traitée. false si elle l'était déjà. */
   private claim(key: string): boolean {
-    const r = this.db.prepare('INSERT OR IGNORE INTO push_sent (key, sent_at) VALUES (?, ?)').run(key, this.now().toISOString());
+    const r = this.db.run('INSERT INTO push_sent (key, sent_at, space_id) VALUES (?, ?, ?) ON CONFLICT (key) DO NOTHING', key, this.now().toISOString(), this.space);
     return r.changes > 0;
   }
 
@@ -371,8 +356,8 @@ export class PushService {
       };
 
       if (prefs.reminders === 'bookings' && hasTable) {
-        const rows = this.db.prepare("SELECT * FROM bookings WHERE status = 'confirmed' AND start_utc > ? AND start_utc <= ?")
-          .all(new Date(nowMs - 60_000).toISOString(), new Date(nowMs + windowMs).toISOString()) as unknown as BookingRow[];
+        const rows = this.db.all<BookingRow>("SELECT * FROM bookings WHERE space_id = ? AND status = 'confirmed' AND start_utc > ? AND start_utc <= ? ORDER BY start_utc, id",
+          this.space, new Date(nowMs - 60_000).toISOString(), new Date(nowMs + windowMs).toISOString());
         for (const b of rows) {
           if (!due(Date.parse(b.start_utc))) continue;
           const video = this.localPath(this.bookingVideoUrl(b.id));
@@ -387,7 +372,7 @@ export class PushService {
       }
     }
 
-    this.db.prepare('DELETE FROM push_sent WHERE sent_at < ?').run(new Date(nowMs - 3 * DAY_MS).toISOString());
+    this.db.run('DELETE FROM push_sent WHERE sent_at < ? AND space_id = ?', new Date(nowMs - 3 * DAY_MS).toISOString(), this.space);
     await Promise.all(jobs);
   }
 

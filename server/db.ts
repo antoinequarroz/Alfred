@@ -1,12 +1,12 @@
+import { randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { ensureSpaceColumns, migrateUp } from './migrations.js';
+import { DEFAULT_SPACE_ID, ensureSpaceColumns, migrateUp } from './migrations.js';
+import { PostgresDriver } from './pg.js';
+import { ALL_SPACES, Sql, SqliteDriver, type Driver } from './sql.js';
 
 const SCHEMA = `
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE IF NOT EXISTS calendars (
   id         TEXT PRIMARY KEY,
   source     TEXT NOT NULL,            -- 'local' | 'caldav'
@@ -134,6 +134,28 @@ CREATE TABLE IF NOT EXISTS video_rooms (
   closed_at   TEXT                       -- fermée (annulation, suppression, lien renouvelé)
 );
 CREATE INDEX IF NOT EXISTS video_rooms_booking ON video_rooms(booking_id) WHERE booking_id IS NOT NULL;
+
+-- Notifications sur les appareils (Web Push).
+CREATE TABLE IF NOT EXISTS push_settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id              TEXT PRIMARY KEY,
+  endpoint        TEXT NOT NULL UNIQUE,
+  p256dh          TEXT NOT NULL,
+  auth            TEXT NOT NULL,
+  label           TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  last_success_at TEXT,
+  last_error      TEXT,
+  last_error_at   TEXT
+);
+-- Notifications déjà traitées (envoyées, ou volontairement tues) : une clé par événement signalé.
+CREATE TABLE IF NOT EXISTS push_sent (
+  key     TEXT PRIMARY KEY,
+  sent_at TEXT NOT NULL
+);
 `;
 
 /** Horaires proposés à la première ouverture : lundi à vendredi, 09:00-12:00 et 13:30-17:30. */
@@ -143,10 +165,9 @@ const DEFAULT_HOURS: [number, number][] = [[9 * 60, 12 * 60], [13 * 60 + 30, 17 
  * Schéma de départ : colonnes ajoutées après coup et valeurs initiales, rejouables. Les
  * changements suivants sont des migrations numérotées (server/migrations.ts).
  */
-function migrate(db: DatabaseSync): void {
+function migrate(db: Sql): void {
   const addColumn = (table: string, column: string, definition: string) => {
-    const columns = db.prepare(`PRAGMA table_info(${table})`).all() as unknown as { name: string }[];
-    if (!columns.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    if (!db.columns(table).includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   };
   // Par défaut, tout calendrier occupe l'agenda pour la prise de rendez-vous.
   addColumn('calendars', 'blocks_booking', 'INTEGER NOT NULL DEFAULT 1');
@@ -164,32 +185,48 @@ function migrate(db: DatabaseSync): void {
   // Déplacements faits par le client lui-même, depuis le lien de ses e-mails.
   addColumn('bookings', 'client_reschedules', 'INTEGER NOT NULL DEFAULT 0');
   // Les horaires ne sont posés qu'une fois : si Antoine les vide ensuite, ils restent vides.
-  const seeded = db.prepare("SELECT 1 FROM booking_settings WHERE key = 'hours_seeded'").get();
+  // Base créée avant les espaces : ces lignes reçoivent l'espace par défaut avec la colonne.
+  const seeded = db.get(`SELECT 1 AS ok FROM booking_settings WHERE key = 'hours_seeded' ${ALL_SPACES}`);
   if (!seeded) {
-    db.exec('BEGIN');
-    try {
-      const insert = db.prepare('INSERT INTO booking_hours (weekday, start_min, end_min) VALUES (?, ?, ?)');
+    db.tx(() => {
       for (let weekday = 1; weekday <= 5; weekday++) {
-        for (const [start, end] of DEFAULT_HOURS) insert.run(weekday, start, end);
+        for (const [start, end] of DEFAULT_HOURS) db.run(`INSERT INTO booking_hours (weekday, start_min, end_min) VALUES (?, ?, ?) ${ALL_SPACES}`, weekday, start, end);
       }
-      db.prepare("INSERT INTO booking_settings (key, value) VALUES ('hours_seeded', '1')").run();
-      db.exec('COMMIT');
-    } catch (err) {
-      db.exec('ROLLBACK');
-      throw err;
-    }
+      db.run(`INSERT INTO booking_settings (key, value) VALUES ('hours_seeded', '1') ${ALL_SPACES}`);
+    });
   }
 }
 
-export type Db = DatabaseSync;
+export type Db = Sql;
 
+/**
+ * Ouvre la base d'Alfred : le fichier alfred.db du dossier, ou une base en mémoire (':memory:').
+ *
+ * Tests : avec ALFRED_TEST_PG=postgres://… dans l'environnement, une base « en mémoire » est un
+ * schéma neuf de ce PostgreSQL, si bien que toute la suite de tests tourne aussi sur PostgreSQL.
+ */
 export function openDb(dataDir: string): Db {
-  let path = ':memory:';
-  if (dataDir !== ':memory:') {
-    mkdirSync(dataDir, { recursive: true });
-    path = join(dataDir, 'alfred.db');
+  let driver: Driver;
+  const testPg = process.env.ALFRED_TEST_PG;
+  if (dataDir === ':memory:' && testPg) {
+    driver = new PostgresDriver(testPg, `t_${randomBytes(6).toString('hex')}`);
+  } else {
+    let path = ':memory:';
+    if (dataDir !== ':memory:') {
+      mkdirSync(dataDir, { recursive: true });
+      path = join(dataDir, 'alfred.db');
+    }
+    const raw = new DatabaseSync(path);
+    raw.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+    driver = new SqliteDriver(raw);
   }
-  const db = new DatabaseSync(path);
+  // La garde d'espace vérifie chaque requête pendant les tests (voir server/sql.ts).
+  const guard = Boolean(process.env.VITEST) || process.env.ALFRED_SPACE_GUARD === '1';
+  return prepareDb(Sql.open(driver, DEFAULT_SPACE_ID, { guard }));
+}
+
+/** Schéma de départ, puis migrations numérotées : la base est prête à servir. */
+export function prepareDb(db: Db): Db {
   db.exec(SCHEMA);
   migrate(db);
   // Phase 4 : migrations numérotées (espaces, personnes, liens…), voir server/migrations.ts.
@@ -198,15 +235,7 @@ export function openDb(dataDir: string): Db {
   return db;
 }
 
-/** Exécute fn dans une transaction. */
+/** Exécute fn dans une transaction (imbriquée : point de sauvegarde). */
 export function tx<T>(db: Db, fn: () => T): T {
-  db.exec('BEGIN');
-  try {
-    const out = fn();
-    db.exec('COMMIT');
-    return out;
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
+  return db.tx(fn);
 }

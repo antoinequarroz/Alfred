@@ -152,22 +152,23 @@ export class ConnectionsService {
   // --- lecture -------------------------------------------------------------
 
   private row(key: string): string | undefined {
-    const r = this.db.prepare('SELECT value FROM connection_settings WHERE key = ?').get(key) as { value: string } | undefined;
-    return r?.value;
+    return this.db.get<{ value: string }>('SELECT value FROM connection_settings WHERE key = ? AND space_id = ?', key, this.db.spaceId)?.value;
   }
 
   private put(key: string, value: string, secret = false): void {
-    this.db.prepare(
-      'INSERT INTO connection_settings (key, value, secret, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, secret = excluded.secret, updated_at = excluded.updated_at',
-    ).run(key, value, secret ? 1 : 0, new Date().toISOString());
+    this.db.run(
+      `INSERT INTO connection_settings (key, value, secret, updated_at, space_id) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, secret = excluded.secret, updated_at = excluded.updated_at
+       WHERE connection_settings.space_id = excluded.space_id`,
+      key, value, secret ? 1 : 0, new Date().toISOString(), this.db.spaceId);
   }
 
   private drop(key: string): void {
-    this.db.prepare('DELETE FROM connection_settings WHERE key = ?').run(key);
+    this.db.run('DELETE FROM connection_settings WHERE key = ? AND space_id = ?', key, this.db.spaceId);
   }
 
   private hasAppValues(group: 'smtp' | 'caldav'): boolean {
-    return Boolean(this.db.prepare('SELECT 1 FROM connection_settings WHERE key LIKE ? LIMIT 1').get(`${group}.%`));
+    return Boolean(this.db.get('SELECT 1 AS ok FROM connection_settings WHERE key LIKE ? AND space_id = ? LIMIT 1', `${group}.%`, this.db.spaceId));
   }
 
   private field(key: string, envValue: string | undefined, fallback?: string): ConnectionField {
@@ -303,7 +304,9 @@ export class ConnectionsService {
       lastTest: this.lastSmtpTest(),
     };
     const c = this.caldavFields();
-    const events = (this.db.prepare("SELECT COUNT(*) AS n FROM events e JOIN calendars c ON c.id = e.calendar_id WHERE c.source = 'caldav'").get() as { n: number }).n;
+    const events = this.db.get<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM events e JOIN calendars c ON c.id = e.calendar_id AND c.space_id = e.space_id WHERE e.space_id = ? AND c.source = 'caldav'",
+      this.db.spaceId)!.n;
     const caldav: CaldavConnectionState = {
       configured: Boolean(c.username.value && c.password.value),
       url: c.url, username: c.username, password: c.password.state,
@@ -468,7 +471,7 @@ export class ConnectionsService {
     if (field) {
       this.drop(`smtp.${field}`);
       if (field === 'password') this.drop(SMTP_PASSWORD_FOR);
-    } else this.db.prepare("DELETE FROM connection_settings WHERE key LIKE 'smtp.%'").run();
+    } else this.db.run("DELETE FROM connection_settings WHERE key LIKE 'smtp.%' AND space_id = ?", this.db.spaceId);
     this.cachedMailer = null;
     this.setSmtpTest(null);
     console.log(`[alfred] réglages d’envoi des e-mails retirés de l’app (${field ?? 'tous'})`);
@@ -748,7 +751,7 @@ export class ConnectionsService {
         throw new ConnectionError(422, 'connection_failed', `Les identifiants du fichier .env ne fonctionnent pas. ${result.message} Rien n’a été modifié : la configuration de l’app reste active.`, undefined, result.code);
       }
       const test = this.caldavTestResult(result, true);
-      this.db.prepare("DELETE FROM connection_settings WHERE key LIKE 'caldav.%'").run();
+      this.db.run("DELETE FROM connection_settings WHERE key LIKE 'caldav.%' AND space_id = ?", this.db.spaceId);
       console.log('[alfred] identifiants de calendrier retirés de l’app : retour à ceux du fichier .env');
       this.applyCaldav();
       return { state: this.state(), test, warning: null };

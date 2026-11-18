@@ -78,12 +78,12 @@ describe('migrations numérotées', () => {
       expect(columns(db, table), table).toContain('space_id');
     }
     expect(db.prepare('SELECT id, name FROM spaces').all()).toEqual([{ id: DEFAULT_SPACE_ID, name: 'Personnel' }]);
-    // Une autre branche du code crée sa table (ex. réglages des notifications) : elle reçoit sa colonne au démarrage suivant.
-    db.exec("CREATE TABLE push_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
-    db.exec("INSERT INTO push_settings VALUES ('vapid', 'x')");
+    // Une autre branche du code crée sa table : elle reçoit sa colonne au démarrage suivant.
+    db.exec("CREATE TABLE futurs_reglages (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    db.exec("INSERT INTO futurs_reglages VALUES ('vapid', 'x')");
     db.close();
     const again = openDb(dir);
-    expect(again.prepare('SELECT space_id FROM push_settings').get()).toEqual({ space_id: DEFAULT_SPACE_ID });
+    expect(again.prepare('SELECT space_id FROM futurs_reglages').get()).toEqual({ space_id: DEFAULT_SPACE_ID });
     again.close();
   });
 
