@@ -129,8 +129,23 @@ export class StripeClient {
     await this.call('GET', '/v1/checkout/sessions', { limit: 1 });
   }
 
-  createCheckout(input: CheckoutInput): Promise<CheckoutSession> {
-    return this.call<CheckoutSession>('POST', '/v1/checkout/sessions', {
+  /**
+   * Ouvre une page de paiement. Les moyens de paiement sont imposés (carte, TWINT) : sur un compte
+   * où Stripe active « Managed Payments » par défaut, ce paramètre est refusé tant que Managed
+   * Payments n'est pas désactivé pour la demande ; on refait alors la demande en le désactivant.
+   */
+  async createCheckout(input: CheckoutInput): Promise<CheckoutSession> {
+    try {
+      return await this.call<CheckoutSession>('POST', '/v1/checkout/sessions', this.checkoutParams(input), `alfred-checkout-${input.reference}`);
+    } catch (err) {
+      if (!(err instanceof StripeError && err.kind === 'invalid' && /managed.?payments/i.test(err.message))) throw err;
+      return this.call<CheckoutSession>('POST', '/v1/checkout/sessions', { ...this.checkoutParams(input), managed_payments: { enabled: false } },
+        `alfred-checkout-${input.reference}-nmp`);
+    }
+  }
+
+  private checkoutParams(input: CheckoutInput): Record<string, unknown> {
+    return {
       mode: 'payment',
       locale: 'fr',
       customer_email: input.customerEmail,
@@ -145,7 +160,7 @@ export class StripeClient {
       }],
       payment_intent_data: { description: `${input.productName} – ${input.description}`.slice(0, 1000), metadata: { alfred_hold: input.reference } },
       metadata: { alfred_hold: input.reference },
-    }, `alfred-checkout-${input.reference}`);
+    };
   }
 
   getCheckout(id: string): Promise<CheckoutSession> {
