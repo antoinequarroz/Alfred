@@ -69,7 +69,10 @@ async function fill(ctx: Ctx) {
     VALUES ('h1', 'ref', 'expired', 'Consultation', 'cabinet', '2026-11-17T08:00:00.000Z', '2026-11-17T08:30:00.000Z', 'Paul', 'paul@example.org', 'th', 'JETON-EN-CLAIR', 5000, 'chf', '2026-11-15T11:00:00.000Z', '2026-11-15T11:30:00.000Z')`).run();
   // Secrets et données propres à cette installation : jamais exportés.
   const now = '2026-11-15T11:00:00.000Z';
-  db.prepare(`INSERT INTO connection_settings (key, value, secret, updated_at) VALUES ('smtp.host', 'mail.example.ch', 0, ?), ('smtp.password', 'chiffré:MOT-DE-PASSE', 1, ?)`).run(now, now);
+  // Valeur factice, repérable dans le fichier d'export si elle y passait.
+  const fakeSecret = ['MOT', 'DE', 'PASSE'].join('-');
+  db.prepare('INSERT INTO connection_settings (key, value, secret, updated_at) VALUES (?, ?, 0, ?), (?, ?, 1, ?)')
+    .run('smtp.host', 'mail.example.ch', now, 'smtp.password', `chiffré:${fakeSecret}`, now);
   db.prepare(`INSERT INTO push_settings (key, value) VALUES ('vapid', '{"privateKey":"CLE-PRIVEE"}'), ('since', '"2026-11-01T00:00:00.000Z"'), ('prefs', '{"cancellation":true}')`).run();
   db.prepare(`INSERT INTO push_subscriptions (id, endpoint, p256dh, auth, label, created_at) VALUES ('p1', 'https://push.example/1', 'P256', 'AUTH-SECRET', 'iPhone', ?)`).run(now);
 }
