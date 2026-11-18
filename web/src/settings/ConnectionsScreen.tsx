@@ -3,6 +3,7 @@ import { AlertIcon, LockIcon, MenuIcon } from '../icons';
 import { CaldavCard, SmtpCard, useConnections } from './ConnectionCards';
 import { useVideoState, VideoSettingsCard } from '../video/VideoScreen';
 import { NotificationsCard, usePushState } from './NotificationsCard';
+import { PaymentCard, usePayments } from '../rdv/PaymentCard';
 
 const KEY_TEXT = {
   env: 'La clé de chiffrement vient de la variable ALFRED_SECRET_KEY du serveur.',
@@ -11,11 +12,12 @@ const KEY_TEXT = {
   none: 'La clé de chiffrement sera créée au premier mot de passe enregistré (fichier secret.key du dossier de données).',
 } as const;
 
-/** Écran « Réglages » : les connexions d'Alfred (calendrier iCloud, envoi des e-mails), les notifications et la visio. */
+/** Écran « Réglages » : les connexions d'Alfred (calendrier iCloud, envoi des e-mails, paiement en ligne), les notifications et la visio. */
 export function ConnectionsScreen({ onMenu, onCalendarChanged }: { onMenu: () => void; onCalendarChanged: () => void }) {
   const { state, error, reload, set } = useConnections();
   const video = useVideoState();
   const push = usePushState();
+  const payments = usePayments();
   const [toast, setToast] = useState<string | null>(null);
   const notify = useCallback((msg: string) => setToast(msg), []);
   useEffect(() => {
@@ -50,6 +52,7 @@ export function ConnectionsScreen({ onMenu, onCalendarChanged }: { onMenu: () =>
               <div className="bk-pair">
                 <CaldavCard state={state} onState={set} notify={notify} onSynced={synced} />
                 <SmtpCard state={state} onState={set} notify={notify} />
+                {payments.state && <PaymentCard state={payments.state} onState={payments.set} notify={notify} />}
                 {push.state && <NotificationsCard state={push.state} onState={push.set} notify={notify} />}
                 {video.state && <VideoSettingsCard state={video.state} onState={video.set} notify={notify} />}
               </div>
