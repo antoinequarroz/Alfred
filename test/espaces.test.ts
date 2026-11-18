@@ -1,7 +1,7 @@
 // Espaces (ALFRED-295) et journal d'événements (ALFRED-302) : une donnée d'un autre espace n'est
 // jamais visible, toutes les requêtes passent par le filtre d'espace, et les faits sont écrits
 // dans la même transaction que le changement qu'ils décrivent.
-import { randomBytes } from 'node:crypto';
+import { createECDH, randomBytes } from 'node:crypto';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -63,7 +63,8 @@ function stack(db: Db, who: string) {
   const room = video.createRoom({ title: `Salle ${who}` });
   push.subscribe({
     endpoint: `https://fcm.googleapis.com/fcm/send/${who}`,
-    keys: { p256dh: 'BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4', auth: 'BTBZMqHH6r4Tts7J_aSIgg' },
+    // Clés d'appareil générées pour le test (aucune valeur figée dans le code).
+    keys: { p256dh: createECDH('prime256v1').generateKeys().toString('base64url'), auth: randomBytes(16).toString('base64url') },
     label: `Appareil ${who}`,
   });
   return { db, store, booking, people, video, push, ids: { calendar: cal.id, eventId, type: type.id, booking: `rdv-${who}`, person: person.id, link: link.id, room: room.id } };
