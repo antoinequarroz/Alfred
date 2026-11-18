@@ -78,6 +78,11 @@ export class Store {
     return this.changes;
   }
 
+  /** Signale un changement fait hors de ce magasin (import de données) : ce qui en est déduit est recalculé. */
+  markChanged(): void {
+    this.changes++;
+  }
+
   // --- calendriers -------------------------------------------------------
 
   listCalendars(): CalendarRow[] {

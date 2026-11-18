@@ -12,6 +12,7 @@ le socle. Référence : le document Linear « Architecture de données d'Alfred 
 | Requêtes portables | `server/sql.ts` : couche d'accès commune (`get`, `all`, `run`, `exec`, `tx`) servie par SQLite (production) et PostgreSQL (`server/pg.ts`). Plus de SQL propre à SQLite dans le code métier (un test le vérifie). Toute la suite de tests tourne aussi sur PostgreSQL. |
 | Journal d'événements | Table `outbox` au format commun, écrite dans la même transaction que le fait. Les notifications la lisent. Voir [JOURNAL.md](JOURNAL.md). |
 | Un seul format d'instant | Texte ISO 8601 UTC avec millisecondes (`2026-11-18T21:45:00.000Z`), partout : voir « Dates et fuseaux » plus bas. |
+| Export ouvert | Export complet JSON (versionné, sans secrets) et .ics depuis Réglages > Données, import dans un Alfred vide. Voir [EXPORT.md](EXPORT.md). |
 | Identifiants universels | Les nouveaux objets reçoivent un UUID v7 (`server/ids.ts`). Les anciens identifiants restent valables, les UID iCalendar ne changent pas. |
 | Adresses stables | `media://alfred/<type>/<id>` : `person`, `booking`, `event` (par UID iCalendar, qui survit à iCloud et aux changements de calendrier)… `GET /api/v1/resolve?address=` dit ce que désigne une adresse. |
 | Personnes | Table `people` : une fiche par e-mail normalisé (minuscules, sans espaces) et par espace. Chaque réservation pointe vers sa fiche (`bookings.person_id`) et garde sa copie figée du nom, de l'e-mail et du téléphone. Rubrique « Personnes » dans l'app. |
@@ -105,5 +106,5 @@ Chaque base ouverte par un test devient un schéma neuf de cette base PostgreSQL
 ## Reste à faire (phase 4)
 
 - Une seule table de réglages (ANT-298), à faire après la fusion des PR 4 et 6 qui en ajoutent.
-- Participants visio et invités iCloud reliés aux Personnes (ANT-300), distribution du journal (ALFRED-308), API v1 complète, export (E4.3).
+- Participants visio et invités iCloud reliés aux Personnes (ANT-300), distribution du journal (ALFRED-308), API v1 complète.
 - Côté Cairn : bouton « Note de réunion » qui crée la note et le lien d'un coup (ANT-175).

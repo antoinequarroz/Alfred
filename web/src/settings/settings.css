@@ -61,3 +61,4 @@
   .cx-form .bk-savebar > span:empty { display: none; }
   .cx-form .bk-savebar > span { flex-basis: 100%; }
 }
+.cx-data a.btn { display: inline-flex; align-items: center; text-decoration: none; }

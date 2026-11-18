@@ -11,6 +11,7 @@ import { ConflictError, RemoteError, type CaldavSync } from './caldav.js';
 import { CALLBACK_PATH, finishSignIn, PENDING_COOKIE, PENDING_MAX_AGE, START_PATH, startSignIn, type Settings as CompteSettings } from './compte.js';
 import { ConnectionError, type ConnectionsService } from './connections.js';
 import { DEFAULT_CONNECTION_LIMITS, registerConnectionRoutes, type ConnectionLimits } from './connections-routes.js';
+import { registerExportRoutes, IMPORT_MAX_BYTES } from './export-routes.js';
 import { IcsError } from './ics.js';
 import { verifyPassword } from './password.js';
 import { registerPushRoutes } from './push/routes.js';
@@ -138,7 +139,10 @@ export function createApp(deps: AppDeps): Hono {
     },
   }));
 
-  app.use('/api/*', bodyLimit({ maxSize: 128 * 1024 }));
+  // Import des données : un fichier d'export complet, bien plus gros qu'une requête ordinaire.
+  const smallBody = bodyLimit({ maxSize: 128 * 1024 });
+  const importBody = bodyLimit({ maxSize: IMPORT_MAX_BYTES });
+  app.use('/api/*', (c, next) => (c.req.path === '/api/import' ? importBody(c, next) : smallBody(c, next)));
 
   app.get('/healthz', (c) => c.json({ ok: true }));
 
@@ -250,6 +254,10 @@ export function createApp(deps: AppDeps): Hono {
   // --- personnes et liens (phase 4) ------------------------------------------
 
   registerPeopleRoutes(app, people);
+
+  // --- export et import des données (phase 4) ---------------------------------
+
+  registerExportRoutes(app, store);
 
   // --- calendriers ---------------------------------------------------------
 
