@@ -8,6 +8,23 @@ rtc:
   udp_port: 7882
   tcp_port: 7881
   use_external_ip: false   # l'adresse annoncée est NODE_IP
+turn:
+  # Relais TURN intégré, pour les invités dont le réseau (entreprise, hôtel, hôpital) ne laisse sortir
+  # que le web. Les navigateurs le joignent en TLS sur turn.postmelo.ch:443 (adresse que LiveKit annonce
+  # d'office) : Caddy reconnaît ce nom avant le déchiffrement (module layer4), garde le TLS et transmet
+  # le flux en clair ici, précédé d'un en-tête PROXY qui porte l'adresse réelle du navigateur.
+  # Ce port n'est pas publié sur l'hôte : seul Caddy, sur le réseau Docker, peut l'atteindre.
+  # Mise en place : deploy/relais-visio.sh (voir docs/DEPLOIEMENT.md).
+  enabled: true
+  domain: turn.postmelo.ch
+  tls_port: 5349
+  external_tls: true       # le TLS est fait par Caddy, avec son certificat Let's Encrypt
+  proxy_protocol: true
+  proxy_protocol_trusted_cidrs:
+    - 172.16.0.0/12        # réseaux Docker du VPS (Caddy change d'adresse à chaque recréation)
+  # Ports des relais, à l'intérieur du conteneur seulement (le relais parle au serveur de visio voisin).
+  relay_range_start: 30000
+  relay_range_end: 30099
 room:
   # Une salle n'existe que si Alfred l'a créée (à chaque entrée) : un ancien jeton ne peut pas
   # rouvrir une salle fermée.

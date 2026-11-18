@@ -93,7 +93,8 @@ Chaque visio est une « salle » avec un lien `https://alfred.postmelo.ch/v/<slu
 ```
  Navigateur ──HTTPS──► Caddy ──► alfred (jetons, salles, réglages)
      │                   └─ /rtc (WebSocket) ──► alfred-livekit:7880 (signalisation)
-     └── audio/vidéo : UDP 7882 (ou TCP 7881 en repli) ──► alfred-livekit
+     ├── audio/vidéo : UDP 7882 (ou TCP 7881 en repli) ──► alfred-livekit
+     └── réseau filtré : TLS 443 (turn.postmelo.ch) ──► Caddy layer4 ──► relais TURN d'alfred-livekit
 ```
 
 - **Partage des rôles.** LiveKit (conteneur `alfred-livekit`, image officielle, 256 Mo et 1 cœur au plus) transporte l'audio et la vidéo. Alfred décide qui entre : il signe un jeton d'accès (JWT HS256, `server/video/token.ts`, sans dépendance) valable pour une salle, avec les droits d'hôte ou d'invité. Les deux partagent une clé créée par `deploy/visio.sh`.
@@ -104,7 +105,8 @@ Chaque visio est une « salle » avec un lien `https://alfred.postmelo.ch/v/<slu
 - **Salle d'attente** (réglage, active par défaut). Un invité qui demande à entrer ne reçoit pas de jeton mais un ticket d'attente : il n'est pas connecté au serveur de visio, donc il ne voit, n'entend et n'apprend rien de la salle. Sa page interroge Alfred toutes les 3 secondes (`POST /api/public/video/rooms/<slug>/wait`). L'hôte voit la file dans la salle (panneau « Salle d'attente », signal sonore), fait entrer ou refuse (`/api/video/by-slug/<slug>/admit` et `/deny`, avec session) ; l'invité admis reçoit alors son jeton, une seule fois. La file vit en mémoire (un redémarrage d'Alfred la vide, la page de l'invité redemande d'elle-même) ; un invité sans nouvelles depuis 90 secondes en sort, 12 personnes au plus par salle. L'admission compte les places comme une entrée directe.
 - **Arrière-plan : flou ou fond.** Le bouton « Arrière-plan » propose : aucun, flou, cinq fonds fournis (`web/src/video/fonds/`) ou une image importée par la personne (recadrée en 1280 × 720 et gardée dans son navigateur, jamais envoyée à Alfred). Calculé dans le navigateur de la personne (`web/src/video/background.ts`, bibliothèque `@livekit/track-processors`, MediaPipe en WebAssembly) : rien ne passe par le VPS ni par un service externe. Le moteur et le modèle de détourage sont servis par Alfred sous `/assets/flou-<version>/` (copiés à la compilation par `vite.config.ts` ; le modèle est dans `web/visio-flou/`), d'où `'wasm-unsafe-eval'` dans la politique de sécurité. Le bouton n'apparaît que si le navigateur en est capable (WebGL 2) ; l'arrière-plan est posé avant que l'image parte vers les autres, et s'il ne démarre pas la caméra reste coupée.
 - **Réglages dans l'app** : Réglages > Visioconférence (activer, salle d'attente, participants, qualité, état du serveur). Rubrique « Visio » : nouvelle visio, salle permanente, visios à venir avec le nombre de personnes connectées.
-- **Ce qui manque encore.** Pas de serveur TURN sur le port 443 : un invité derrière un réseau d'entreprise qui ne laisse sortir que le web (443) ne pourra pas se connecter. Pas d'enregistrement. Sur le VPS actuel (2 cœurs partagés), viser 2 à 4 personnes.
+- **Réseaux filtrés.** Un invité dont le réseau ne laisse sortir que le web passe par le relais TURN intégré à LiveKit, en TLS sur `turn.postmelo.ch:443` : Caddy (module layer4) reconnaît ce nom avant le déchiffrement et lui transmet le flux. Mise en place : [DEPLOIEMENT.md](DEPLOIEMENT.md), « Relais pour les réseaux filtrés ».
+- **Ce qui manque encore.** Pas d'enregistrement. Sur le VPS actuel (2 cœurs partagés), viser 2 à 4 personnes.
 
 ## Les notifications (apps Mac et iPhone)
 

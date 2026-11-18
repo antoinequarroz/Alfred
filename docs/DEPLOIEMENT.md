@@ -123,6 +123,26 @@ Le serveur de visio (LiveKit) est un second conteneur du même fichier compose, 
 
 Tout le reste (activer, nombre de participants, qualité) se règle dans l'app. Pour arrêter la visio sans toucher à Alfred : `docker stop alfred-livekit` (les liens répondent « indisponible »).
 
+#### Relais pour les réseaux filtrés (TURN sur le port 443) et tampons UDP
+
+Un invité dont le réseau (entreprise, hôtel, hôpital) ne laisse sortir que le web passe par le relais TURN intégré à LiveKit, joint en TLS sur `turn.postmelo.ch:443`. Le port 443 étant celui de Caddy, Caddy reçoit aussi le relais : son module layer4 reconnaît le nom `turn.postmelo.ch` avant le déchiffrement, garde le TLS (certificat Let's Encrypt comme les sites) et transmet le flux à `alfred-livekit:5349` avec un en-tête PROXY (adresse réelle de l'invité). Les autres connexions continuent vers les sites sans changement. Le coturn de Nino n'est pas utilisé.
+
+```
+ Navigateur ──TLS 443 (turn.postmelo.ch)──► Caddy + layer4 ──TCP + PROXY──► alfred-livekit:5349 (relais) ──► SFU
+```
+
+1. **DNS** (Infomaniak, zone `postmelo.ch`) : enregistrement A `turn` → adresse IPv4 du VPS (la même que `NODE_IP` dans `/opt/alfred/.env.livekit`).
+2. **Déployer Alfred** depuis le Mac (`deploy/mac/deployer.sh`) : il apporte `deploy/livekit.yaml` (section `turn`), `deploy/caddy-l4/Dockerfile` et le script.
+3. **Simulation** : `bash /opt/alfred/deploy/relais-visio.sh`. Vérifie le DNS, les sites et le Caddyfile, construit l'image `alfred-caddy-l4:2.10.2` (Caddy 2.10.2 identique + layer4, 4 à 6 minutes), valide la nouvelle configuration et montre les changements, sans rien toucher d'autre.
+4. **Appliquer** : `bash /opt/alfred/deploy/relais-visio.sh --oui`. Tampons UDP (`/etc/sysctl.d/90-alfred-visio.conf`, 5 Mo), sauvegarde puis modification de `~/.config/antoinequarroz-vitrine/runtime/Caddyfile` (options globales en tête, bloc `turn.postmelo.ch` en fin) et `compose.runtime.yml` (image `alfred-caddy-l4:2.10.2`), recréation de Caddy (2 à 5 secondes de coupure pour tous les sites), contrôle des sites avec retour automatique en cas d'échec, puis `deploy/visio.sh` (appels en cours coupés).
+5. **Retour** de Caddy si besoin : `bash /opt/alfred/deploy/relais-visio.sh --retour`.
+
+À savoir :
+- L'image Caddy est imposée par `compose.runtime.yml`, qui sert aussi aux déploiements du site : ils gardent donc Caddy avec layer4. Pour changer de version de Caddy plus tard, reconstruire l'image (`deploy/caddy-l4/Dockerfile`) avec la même version, sinon le relais disparaît et le Caddyfile n'est plus valide.
+- Le port 5349 du conteneur n'est pas publié : seul Caddy l'atteint, et LiveKit n'accepte l'en-tête PROXY que des réseaux Docker (`172.16.0.0/12`). Rien de nouveau à ouvrir dans UFW.
+- Les tampons UDP suppriment l'avertissement « UDP receive buffer is too small » de LiveKit (`docker logs alfred-livekit | grep buffer` doit rester vide après le redémarrage).
+- Essai : sur un téléphone en Wi-Fi d'entreprise ou d'hôtel, ou en forçant le relais dans un navigateur, la visio doit se connecter. Dans Chrome, `chrome://webrtc-internals` montre alors une paire de candidats `relay` via `turns:turn.postmelo.ch:443`.
+
 ## 4. Installer l'app
 
 - **Mac** : dans Safari, Fichier > Ajouter au Dock.

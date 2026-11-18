@@ -1,3 +1,30 @@
+# Options globales, tout en haut du Caddyfile (un seul bloc { } global par fichier). Exige une image Caddy
+# avec le module layer4 (deploy/caddy-l4/Dockerfile) ; posé par deploy/relais-visio.sh.
+# Relais visio d'Alfred : les connexions TLS pour turn.postmelo.ch sont reconnues avant le déchiffrement,
+# déchiffrées avec le certificat de Caddy, puis transmises en clair au TURN de LiveKit. Tout le reste
+# continue vers les sites, sans changement.
+{
+	servers :443 {
+		listener_wrappers {
+			layer4 {
+				@alfred_turn tls sni turn.postmelo.ch
+				route @alfred_turn {
+					tls {
+						connection_policy {
+							alpn stun.turn
+						}
+					}
+					proxy {
+						proxy_protocol v2
+						upstream alfred-livekit:5349
+					}
+				}
+			}
+			tls
+		}
+	}
+}
+
 # À ajouter au Caddyfile existant, une fois le DNS alfred.postmelo.ch créé.
 # Caddy tourne en conteneur : il joint Alfred par son nom sur le réseau Docker partagé.
 alfred.postmelo.ch {
@@ -15,4 +42,10 @@ alfred.postmelo.ch {
 # pour que les liens déjà envoyés (rendez-vous, gestion, visios) continuent de marcher.
 alfred.antoinequarroz.ch {
 	redir https://alfred.postmelo.ch{uri} permanent
+}
+
+# Relais visio : ce bloc ne sert qu'à obtenir et renouveler le certificat de turn.postmelo.ch.
+# Les connexions TLS pour ce nom sont prises par le relais (options globales ci-dessus).
+turn.postmelo.ch {
+	respond "Relais visio d'Alfred" 404
 }
