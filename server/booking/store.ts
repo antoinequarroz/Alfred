@@ -6,6 +6,12 @@ import {
 import { tx, type Db } from '../db.js';
 import { upsertPerson } from '../migrations.js';
 import type { Param } from '../sql.js';
+import { recordFact } from '../outbox.js';
+
+/** Détails d'une réservation repris dans les faits du journal (jamais l'e-mail ni le téléphone). */
+function bookingFact(b: Pick<BookingRow, 'id' | 'type_name' | 'start_utc' | 'end_utc' | 'name' | 'status'> & { person_id?: string | null }): Record<string, unknown> {
+  return { bookingId: b.id, typeName: b.type_name, start: b.start_utc, end: b.end_utc, name: b.name, personId: b.person_id ?? null, status: b.status };
+}
 
 export interface BookingRow {
   id: string;
@@ -259,6 +265,7 @@ export class BookingStore {
           b.start_utc, b.end_utc, b.name, b.email, b.phone, b.message, b.status, b.token_hash, b.created_at, b.cancelled_at,
           b.cancelled_by, b.mail_error, b.notified_start, personId, b.payment_amount_cents ?? null, b.payment_currency ?? null,
           b.payment_intent ?? null, b.payment_status ?? null, b.payment_error ?? null, this.space);
+      recordFact(this.db, 'booking.created', b.id, { ...bookingFact(b), deposit: b.payment_amount_cents ? { amountCents: b.payment_amount_cents, currency: b.payment_currency } : null }, b.created_at);
     });
   }
 
@@ -303,10 +310,15 @@ export class BookingStore {
 
   /** Déplacement par le client : nouvel horaire, connu de lui, et compteur augmenté. */
   rescheduleByClient(id: string, startIso: string, endIso: string, atIso: string): void {
-    this.db.run(
-      `UPDATE bookings SET start_utc = ?, end_utc = ?, notified_start = NULL, reminders_sent = '', reminder_ref = ?,
-         client_reschedules = client_reschedules + 1 WHERE id = ? AND space_id = ?`,
-      startIso, endIso, atIso, id, this.space);
+    tx(this.db, () => {
+      const before = this.getBooking(id);
+      this.db.run(
+        `UPDATE bookings SET start_utc = ?, end_utc = ?, notified_start = NULL, reminders_sent = '', reminder_ref = ?,
+           client_reschedules = client_reschedules + 1 WHERE id = ? AND space_id = ?`,
+        startIso, endIso, atIso, id, this.space);
+      const b = this.getBooking(id);
+      if (b) recordFact(this.db, 'booking.rescheduled', id, { ...bookingFact(b), by: 'client', previousStart: before?.start_utc ?? null }, atIso);
+    });
   }
 
   /** Réservations confirmées qui recoupent [from, to) (instants ISO UTC). */
@@ -345,7 +357,11 @@ export class BookingStore {
   }
 
   markCancelled(id: string, by: 'client' | 'admin', atIso: string): void {
-    this.db.run("UPDATE bookings SET status = 'cancelled', cancelled_at = ?, cancelled_by = ? WHERE id = ? AND space_id = ?", atIso, by, id, this.space);
+    tx(this.db, () => {
+      const r = this.db.run("UPDATE bookings SET status = 'cancelled', cancelled_at = ?, cancelled_by = ? WHERE id = ? AND space_id = ? AND status <> 'cancelled'", atIso, by, id, this.space);
+      const b = r.changes > 0 ? this.getBooking(id) : undefined;
+      if (b) recordFact(this.db, 'booking.cancelled', id, { ...bookingFact(b), by }, atIso);
+    });
   }
 
   setMailError(id: string, error: string | null): void {
@@ -359,7 +375,14 @@ export class BookingStore {
 
   /** L'événement a été déplacé : la réservation suit, et garde l'horaire que le client connaît. */
   reschedule(id: string, startIso: string, endIso: string, notifiedStart: string | null): void {
-    this.db.run('UPDATE bookings SET start_utc = ?, end_utc = ?, notified_start = ? WHERE id = ? AND space_id = ?', startIso, endIso, notifiedStart, id, this.space);
+    tx(this.db, () => {
+      const before = this.getBooking(id);
+      this.db.run('UPDATE bookings SET start_utc = ?, end_utc = ?, notified_start = ? WHERE id = ? AND space_id = ?', startIso, endIso, notifiedStart, id, this.space);
+      const b = this.getBooking(id);
+      if (b && before && (before.start_utc !== startIso || before.end_utc !== endIso)) {
+        recordFact(this.db, 'booking.rescheduled', id, { ...bookingFact(b), by: 'agenda', previousStart: before.start_utc });
+      }
+    });
   }
 
   setNotifiedStart(id: string, notifiedStart: string | null): void {
@@ -371,7 +394,15 @@ export class BookingStore {
   }
 
   setPaymentStatus(id: string, status: PaymentStatus, error: string | null): void {
-    this.db.run('UPDATE bookings SET payment_status = ?, payment_error = ? WHERE id = ? AND space_id = ?', status, error, id, this.space);
+    tx(this.db, () => {
+      const before = this.getBooking(id);
+      this.db.run('UPDATE bookings SET payment_status = ?, payment_error = ? WHERE id = ? AND space_id = ?', status, error, id, this.space);
+      if (status === 'refunded' && before && before.payment_status !== 'refunded') {
+        recordFact(this.db, 'payment.refunded', id, {
+          ...bookingFact(before), amountCents: before.payment_amount_cents ?? null, currency: before.payment_currency ?? null,
+        });
+      }
+    });
   }
 
   // --- retenues pendant le paiement ------------------------------------------
@@ -414,7 +445,16 @@ export class BookingStore {
   updateHold(id: string, patch: Partial<Omit<HoldRow, 'id'>>): void {
     const cols = Object.keys(patch) as (keyof typeof patch)[];
     if (cols.length === 0) return;
-    this.db.run(`UPDATE payment_holds SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ? AND space_id = ?`,
-      ...cols.map((c) => (patch[c] ?? null) as Param), id, this.space);
+    tx(this.db, () => {
+      const before = patch.status === 'paid' ? this.getHold(id) : undefined;
+      this.db.run(`UPDATE payment_holds SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ? AND space_id = ?`,
+        ...cols.map((c) => (patch[c] ?? null) as Param), id, this.space);
+      if (before && before.status === 'pending') {
+        recordFact(this.db, 'payment.received', id, {
+          holdId: id, amountCents: before.amount_cents, currency: before.currency, typeName: before.type_name,
+          start: before.start_utc, end: before.end_utc, name: before.name,
+        });
+      }
+    });
   }
 }

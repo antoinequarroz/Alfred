@@ -32,3 +32,28 @@ jobs:
           RADICALE_USER: alfred
           RADICALE_PASSWORD: secret
       - run: npm run build
+
+  # Toute la suite de tests sur PostgreSQL : chaque base de test est un schéma neuf (ALFRED_TEST_PG).
+  test-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: alfred
+          POSTGRES_PASSWORD: alfred
+          POSTGRES_DB: alfred_test
+          POSTGRES_INITDB_ARGS: --locale=C --encoding=UTF8
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U alfred" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:pg
+        env:
+          ALFRED_TEST_PG: postgres://alfred:alfred@127.0.0.1:5432/alfred_test

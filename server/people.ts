@@ -88,7 +88,7 @@ export class PeopleService {
     const where = q ? "AND (lower(p.name) LIKE ? ESCAPE '\\' OR lower(p.email) LIKE ? ESCAPE '\\' OR lower(p.phone) LIKE ? ESCAPE '\\')" : '';
     const now = this.now().toISOString();
     const rows = this.db.all<PersonRow>(
-      `${this.summaryQuery(where)} ORDER BY COALESCE(next_at, last_at, p.created_at) DESC, p.id LIMIT ?`,
+      `SELECT * FROM (${this.summaryQuery(where)}) s ORDER BY COALESCE(s.next_at, s.last_at, s.created_at) DESC, s.id LIMIT ?`,
       now, now, this.spaceId, ...(q ? [like, like, like] : []), limit);
     // Prochain RDV d'abord (le plus proche en tête), puis les autres par activité récente.
     const upcoming = rows.filter((r) => r.next_at).sort((a, b) => a.next_at!.localeCompare(b.next_at!));

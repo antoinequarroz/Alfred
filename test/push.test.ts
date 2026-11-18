@@ -9,6 +9,7 @@ import { PushService } from '../server/push/service.js';
 import { allowedEndpoint, encryptPayload, generateVapidKeys, vapidAuthorization, vapidPublicKey, validPushKeys, type FetchLike } from '../server/push/webpush.js';
 import { CalendarService } from '../server/service.js';
 import { Store } from '../server/store.js';
+import { BookingStore } from '../server/booking/store.js';
 import { VideoService, type VideoBackend } from '../server/video/service.js';
 
 const PASSWORD = 'correct horse battery';
@@ -62,12 +63,19 @@ function setup() {
     bookingVideoUrl: (id) => (id === 'b-visio' ? 'https://alfred.example.ch/v/abc123' : null),
     now: () => clock.now, fetch: net.fetch,
   });
-  const insertBooking = (b: { id: string; start: string; end?: string; created?: string; status?: string; cancelledAt?: string; cancelledBy?: string; name?: string }) =>
-    store.db.prepare(`INSERT INTO bookings (id, type_name, start_utc, end_utc, name, email, status, token_hash, created_at, cancelled_at, cancelled_by)
-      VALUES (?, 'Consultation', ?, ?, ?, 'marie@example.com', ?, ?, ?, ?, ?)`).run(
-      b.id, b.start, b.end ?? new Date(Date.parse(b.start) + 3_600_000).toISOString(), b.name ?? 'Marie Dupont', b.status ?? 'confirmed',
-      randomBytes(8).toString('hex'), b.created ?? clock.now.toISOString(), b.cancelledAt ?? null, b.cancelledBy ?? null,
-    );
+  // Comme la prise de RDV : par le magasin des réservations, qui écrit aussi les faits du journal.
+  const data = new BookingStore(store.db);
+  const insertBooking = (b: { id: string; start: string; end?: string; created?: string; status?: string; cancelledAt?: string; cancelledBy?: string; name?: string }) => {
+    const created = b.created ?? clock.now.toISOString();
+    data.insertBooking({
+      id: b.id, type_id: null, type_name: 'Consultation', location: '', buffer_before_min: 0, buffer_after_min: 0,
+      event_id: null, event_uid: null, calendar_id: null,
+      start_utc: b.start, end_utc: b.end ?? new Date(Date.parse(b.start) + 3_600_000).toISOString(),
+      name: b.name ?? 'Marie Dupont', email: 'marie@example.com', phone: '', message: '', status: 'confirmed',
+      token_hash: randomBytes(8).toString('hex'), created_at: created, cancelled_at: null, cancelled_by: null, mail_error: null, notified_start: null,
+    });
+    if (b.status === 'cancelled') data.markCancelled(b.id, (b.cancelledBy ?? 'admin') as 'client' | 'admin', b.cancelledAt ?? created);
+  };
   return { store, clock, net, push, insertBooking };
 }
 
@@ -170,7 +178,7 @@ describe('planificateur', () => {
     expect(phone.decrypt(net.calls[0].body)).toEqual({ title: 'Nouveau rendez-vous', body: 'Marie Dupont · Consultation, mercredi 18 novembre à 14:00', url: '/#rendez-vous', tag: 'rdv-b1' });
 
     clock.now = new Date('2026-11-16T10:00:00Z');
-    store.db.prepare("UPDATE bookings SET status = 'cancelled', cancelled_at = ?, cancelled_by = 'client' WHERE id = 'b1'").run(clock.now.toISOString());
+    new BookingStore(store.db).markCancelled('b1', 'client', clock.now.toISOString());
     await push.tick();
     await push.tick();
     expect(net.calls).toHaveLength(2);
@@ -256,16 +264,18 @@ describe('visio et routes', () => {
     const video = new VideoService({
       db: store.db, publicUrl: 'https://alfred.example.ch', timezone: 'Europe/Zurich', backend,
       server: { apiKey: 'k', apiSecret: 'x'.repeat(40), internalUrl: 'http://livekit:7880', publicUrl: 'wss://alfred.example.ch' },
-      hostName: () => 'Antoine', onGuestJoin: (room, name) => void push.guestArrived(room, name),
+      hostName: () => 'Antoine',
     });
     const room = video.createRoom({ title: 'Point hebdo' });
     const slug = room.url.split('/v/')[1];
     await video.join(slug, { name: 'Léa' }, false);
     await video.join(slug, { name: 'Léa' }, false);
     await video.join(slug, { name: 'Antoine' }, true);
+    // L'arrivée passe par le journal d'événements, qui réveille les notifications aussitôt.
     await new Promise((r) => setTimeout(r, 0));
+    await push.tick();
     expect(net.calls).toHaveLength(1);
-    expect(phone.decrypt(net.calls[0].body)).toMatchObject({ title: 'Léa est dans la visio', url: `/v/${slug}` });
+    expect(phone.decrypt(net.calls[0].body)).toMatchObject({ title: 'Léa attend d’entrer dans la visio', url: `/v/${slug}` });
     await push.guestArrived({ slug: 'autre', title: 'Bilan' }, 'Tom', true);
     expect(phone.decrypt(net.calls[1].body)).toMatchObject({ title: 'Tom attend d’entrer dans la visio', body: '« Bilan » · touche pour le faire entrer' });
   });

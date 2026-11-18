@@ -53,6 +53,8 @@ const TABLE_REF_RE = /\b(?:FROM|JOIN|INTO|UPDATE)\s+"?([a-z_][a-z0-9_]*)"?/gi;
 class Shared {
   depth = 0;
   spaced: Set<string> | null = null;
+  /** Actions à lancer une fois la transaction en cours validée (voir afterCommit). */
+  pending: (() => void)[] = [];
   constructor(readonly driver: Driver, readonly guard: boolean) {}
 
   spacedTables(): Set<string> {
@@ -73,6 +75,20 @@ export class Sql {
 
   get dialect(): Dialect {
     return this.shared.driver.dialect;
+  }
+
+  /** Identité de la base sous-jacente, commune à toutes ses vues d'espace. */
+  get root(): object {
+    return this.shared;
+  }
+
+  /**
+   * Lance fn après la validation de la transaction en cours (tout de suite après, hors
+   * transaction). Rien n'est lancé si la transaction est annulée.
+   */
+  afterCommit(fn: () => void): void {
+    if (this.shared.depth === 0) queueMicrotask(fn);
+    else this.shared.pending.push(fn);
   }
 
   /** La même base, vue depuis un autre espace (même connexion, mêmes transactions). */
@@ -128,16 +144,22 @@ export class Sql {
   tx<T>(fn: () => T): T {
     const s = this.shared;
     const level = s.depth;
+    const pendingBefore = s.pending.length;
     s.driver.exec(level === 0 ? 'BEGIN' : `SAVEPOINT sp${level}`);
     s.depth++;
     try {
       const out = fn();
       s.depth--;
       s.driver.exec(level === 0 ? 'COMMIT' : `RELEASE SAVEPOINT sp${level}`);
+      if (level === 0) {
+        const todo = s.pending.splice(0);
+        for (const f of todo) queueMicrotask(f);
+      }
       return out;
     } catch (err) {
       s.depth--;
-      s.driver.exec(level === 0 ? 'ROLLBACK' : `ROLLBACK TO SAVEPOINT sp${level}`);
+      s.pending.length = pendingBefore;
+      s.driver.exec(level === 0 ? 'ROLLBACK' : `ROLLBACK TO SAVEPOINT sp${level}; RELEASE SAVEPOINT sp${level}`);
       throw err;
     }
   }

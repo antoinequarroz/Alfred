@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { ALL_SPACES } from '../sql.js';
+import { recordFact } from '../outbox.js';
 import { uuidv7 } from '../ids.js';
 import type {
   PublicVideoRoom, VideoAdminState, VideoJoinInfo, VideoJoinResult, VideoQuality, VideoRoom, VideoRoomKind,
@@ -580,6 +581,10 @@ export class VideoService {
 
   private guestArrived(row: RoomRow, name: string, waiting: boolean): void {
     try {
+      // Fait du journal : les notifications le lisent (server/push/service.ts).
+      recordFact(this.db, waiting ? 'video.guest_waiting' : 'video.guest_joined', row.id, {
+        roomId: row.id, slug: row.slug, title: row.title, kind: row.kind, bookingId: row.booking_id, guestName: name,
+      }, this.now());
       this.onGuestJoin?.({ slug: row.slug, title: row.title }, name, waiting);
     } catch (err) {
       console.error('[alfred] visio : avis d’arrivée d’un invité impossible :', err);

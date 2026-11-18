@@ -15,7 +15,8 @@
     "start": "node --disable-warning=ExperimentalWarning dist/server/index.js",
     "typecheck": "tsc -p server/tsconfig.json --noEmit && tsc -p web/tsconfig.json --noEmit",
     "test": "vitest run",
-    "hash-password": "tsx server/scripts/hash-password.ts"
+    "hash-password": "tsx server/scripts/hash-password.ts",
+    "test:pg": "node -e \"if (!process.env.ALFRED_TEST_PG) { console.error('ALFRED_TEST_PG manquant (postgres://…)'); process.exit(2) }\" && vitest run"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.8",

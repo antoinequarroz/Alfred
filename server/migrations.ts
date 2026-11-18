@@ -181,6 +181,38 @@ export const MIGRATIONS: Migration[] = [
       db.exec('DROP TABLE payment_holds');
     },
   },
+  {
+    version: 5,
+    name: 'journal',
+    up(db) {
+      // Journal d'événements (boîte d'envoi) : les faits d'Alfred au format commun de la suite,
+      // écrits dans la même transaction que le changement qu'ils décrivent. Voir server/outbox.ts
+      // et docs/JOURNAL.md. seq donne l'ordre d'écriture ; chaque lecteur garde sa position.
+      db.exec(`CREATE TABLE outbox (
+        seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+        id           TEXT NOT NULL UNIQUE,      -- UUID v7 du fait
+        space_id     TEXT NOT NULL DEFAULT '${DEFAULT_SPACE_ID}',
+        source       TEXT NOT NULL,             -- module qui écrit : 'alfred'
+        type         TEXT NOT NULL,             -- 'booking.created', 'payment.received'…
+        subject      TEXT NOT NULL,             -- adresse media:// de l'objet concerné
+        occurred_at  TEXT NOT NULL,             -- instant ISO UTC du fait
+        data         TEXT NOT NULL,             -- détails, JSON
+        data_version INTEGER NOT NULL DEFAULT 1
+      )`);
+      db.exec('CREATE INDEX outbox_space_seq ON outbox(space_id, seq)');
+      db.exec(`CREATE TABLE outbox_readers (
+        space_id   TEXT NOT NULL DEFAULT '${DEFAULT_SPACE_ID}',
+        reader     TEXT NOT NULL,              -- 'push'…
+        seq        INTEGER NOT NULL,           -- dernier fait traité
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (space_id, reader)
+      )`);
+    },
+    down(db) {
+      db.exec('DROP TABLE outbox_readers');
+      db.exec('DROP TABLE outbox');
+    },
+  },
 ];
 
 /**

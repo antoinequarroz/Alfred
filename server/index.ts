@@ -46,12 +46,10 @@ const mailer = connections.mailer;
 // La visio et la prise de rendez-vous se connaissent : une salle de rendez-vous suit sa réservation,
 // et une réservation « En visio » reçoit le lien d'une salle.
 let bookingRef: BookingService | null = null;
-let pushRef: PushService | null = null;
 const video = new VideoService({
   db: store.db, server: videoEnv, publicUrl: config.publicUrl, timezone: config.timezone,
   hostName: () => bookingRef?.getSettings().publicName ?? config.mail.from.name,
   bookingLink: (id) => bookingRef?.videoLink(id) ?? null,
-  onGuestJoin: (room, name, waiting) => void pushRef?.guestArrived(room, name, waiting).catch((err) => console.error('[alfred] notifications :', err)),
 });
 const payments = new PaymentsService({ db: store.db, secrets, pendingCount: () => bookingRef?.pendingPayments() ?? 0 });
 const booking = new BookingService({
@@ -65,7 +63,6 @@ const push = new PushService({
   db: store.db, store, publicUrl: config.publicUrl, timezone: config.timezone,
   bookingVideoUrl: (id) => video.urlForBooking(id),
 });
-pushRef = push;
 connections.mailContext = () => ({ publicName: booking.getSettings().publicName, timezone: config.timezone, publicUrl: config.publicUrl });
 const people = new PeopleService({ db: store.db, store, booking, cairnUrl: config.cairnUrl });
 // Compte Postmelo : actif seulement avec COMPTE_URL et COMPTE_CLIENT_SECRET. L'adresse de retour est celle d'Alfred.
