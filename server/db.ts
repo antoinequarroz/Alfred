@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { syncLegacyInstants } from './instants.js';
 import { syncLegacySettings } from './settings.js';
+import { syncEventAttendees } from './attendees.js';
 import { DEFAULT_SPACE_ID, ensureSpaceColumns, migrateUp } from './migrations.js';
 import { PostgresDriver } from './pg.js';
 import { ALL_SPACES, Sql, SqliteDriver, type Driver } from './sql.js';
@@ -238,6 +239,8 @@ export function prepareDb(db: Db): Db {
   syncLegacyInstants(db);
   // Réglages changés par l'image précédente dans les anciennes tables : repris (server/settings.ts).
   syncLegacySettings(db);
+  // Invités des événements écrits sans eux (image précédente, import) : recopiés (server/attendees.ts).
+  syncEventAttendees(db);
   return db;
 }
 

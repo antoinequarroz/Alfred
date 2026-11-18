@@ -2,6 +2,7 @@ import { summarize } from './ics.js';
 import { uuidv7 } from './ids.js';
 import { INSTANT_COLUMNS, isInstant, toInstant } from './instants.js';
 import { copyLegacySettings } from './settings.js';
+import { syncEventAttendees } from './attendees.js';
 import { ALL_SPACES, SPACELESS_TABLES, type Sql } from './sql.js';
 
 // Migrations numérotées (phase 4 : données prêtes pour la suite Media).
@@ -276,6 +277,46 @@ export const MIGRATIONS: Migration[] = [
     },
     down(db) {
       db.exec('DROP TABLE settings');
+    },
+  },
+  {
+    version: 8,
+    name: 'participations',
+    up(db) {
+      // Qui a rejoint quelle salle de visio, et quand (server/video/service.ts). L'arrivée est
+      // notée quand Alfred remet le jeton d'entrée ; le passage régulier auprès du serveur de
+      // visio note la dernière présence vue (seen_at), puis le départ (left_at).
+      db.exec(`CREATE TABLE video_participations (
+        id         TEXT PRIMARY KEY,
+        space_id   TEXT NOT NULL DEFAULT '${DEFAULT_SPACE_ID}',
+        room_id    TEXT NOT NULL,
+        identity   TEXT NOT NULL,             -- 'host' ou 'invite-…' (identité dans la salle)
+        role       TEXT NOT NULL,             -- 'host' (le compte d'Alfred) | 'guest'
+        name       TEXT NOT NULL DEFAULT '',
+        person_id  TEXT,                      -- fiche de l'invité, quand la salle est celle d'un rendez-vous
+        joined_at  TEXT NOT NULL,
+        seen_at    TEXT,
+        left_at    TEXT
+      )`);
+      db.exec('CREATE INDEX video_participations_room ON video_participations(space_id, room_id)');
+      db.exec('CREATE INDEX video_participations_person ON video_participations(space_id, person_id)');
+      // Invités des événements (server/attendees.ts), reconnus comme Personnes par leur e-mail.
+      db.exec(`CREATE TABLE event_attendees (
+        space_id   TEXT NOT NULL DEFAULT '${DEFAULT_SPACE_ID}',
+        event_id   TEXT NOT NULL,
+        email      TEXT NOT NULL,
+        name       TEXT NOT NULL DEFAULT '',
+        partstat   TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (space_id, event_id, email)
+      )`);
+      db.exec('CREATE INDEX event_attendees_email ON event_attendees(space_id, email)');
+      db.exec('ALTER TABLE events ADD COLUMN attendees_at TEXT');
+      syncEventAttendees(db);
+    },
+    down(db) {
+      db.exec('ALTER TABLE events DROP COLUMN attendees_at');
+      db.exec('DROP TABLE event_attendees');
+      db.exec('DROP TABLE video_participations');
     },
   },
 ];

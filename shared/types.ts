@@ -689,6 +689,37 @@ export interface PersonDetail extends PersonSummary {
   upcoming: Booking[];
   past: Booking[];
   links: LinkInfo[];
+  /** Ses passages en visio (salles de ses rendez-vous), du plus récent au plus ancien. */
+  calls: PersonCall[];
+  /** Événements de l'agenda où elle est invitée (reconnue par son e-mail), du plus récent au plus ancien. */
+  events: PersonEvent[];
+}
+
+/** Un passage d'une personne dans une salle de visio (table video_participations). */
+export interface PersonCall {
+  id: string;
+  roomId: string;
+  /** Titre de la salle (celui du rendez-vous). */
+  title: string;
+  /** Nom donné en entrant. */
+  name: string;
+  /** Instant ISO de l'arrivée (jeton d'entrée remis). */
+  joinedAt: string;
+  /** Instant ISO du départ ; null tant qu'elle est dans la salle. */
+  leftAt: string | null;
+}
+
+/** Un événement de l'agenda dont la personne est invitée (ligne ATTENDEE avec son e-mail). */
+export interface PersonEvent {
+  eventId: string;
+  calendarId: string;
+  title: string;
+  /** Début (de la première occurrence pour une série), instant ISO. */
+  start: string;
+  end: string;
+  recurring: boolean;
+  /** Sa réponse : ACCEPTED, DECLINED, TENTATIVE, NEEDS-ACTION, '' si inconnue. */
+  partstat: string;
 }
 
 /** Un lien d'un objet d'Alfred vers un autre objet de la suite (note Cairn…) ou une page web. */

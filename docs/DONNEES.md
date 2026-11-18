@@ -16,6 +16,7 @@ le socle. Référence : le document Linear « Architecture de données d'Alfred 
 | Identifiants universels | Les nouveaux objets reçoivent un UUID v7 (`server/ids.ts`). Les anciens identifiants restent valables, les UID iCalendar ne changent pas. |
 | Adresses stables | `media://alfred/<type>/<id>` : `person`, `booking`, `event` (par UID iCalendar, qui survit à iCloud et aux changements de calendrier)… `GET /api/v1/resolve?address=` dit ce que désigne une adresse. |
 | Personnes | Table `people` : une fiche par e-mail normalisé (minuscules, sans espaces) et par espace. Chaque réservation pointe vers sa fiche (`bookings.person_id`) et garde sa copie figée du nom, de l'e-mail et du téléphone. Rubrique « Personnes » dans l'app. |
+| Historique d'une personne | `video_participations (room_id, identity, role, name, person_id, joined_at, seen_at, left_at)` : qui est entré dans quelle salle et quand. L'arrivée est notée quand Alfred remet le jeton d'entrée ; toutes les minutes, Alfred demande au serveur de visio qui est connecté (`seen_at`), et note le départ deux minutes après la dernière présence vue (`left_at`). Un jeton jamais utilisé est effacé. L'invité d'une salle de rendez-vous est relié à la fiche de la personne qui a réservé ; l'hôte est le compte d'Alfred (`role = 'host'`). `event_attendees (event_id, email, name, partstat)` : copie des lignes ATTENDEE de chaque événement, refaite à chaque enregistrement ; un invité est reconnu comme Personne dès que son e-mail est celui d'une fiche (aucune fiche n'est créée pour lui). La fiche montre ses visios et ses invitations. |
 | Liens | Table `links (space_id, from_ref, to_ref, kind, title, url)`, au format de la table commune du socle. Un lien de note Cairn collé (`https://cairn…/notes/<id>`) devient `media://cairn/note/<id>`. Depuis une fiche Personne ou un événement. |
 
 Aucune app ne lit la base d'une autre : Cairn n'est jamais interrogé, Alfred garde seulement
@@ -32,6 +33,7 @@ l'adresse de la note et le lien pour l'ouvrir.
 | 5 | journal | tables `outbox` et `outbox_readers` | retire les tables |
 | 6 | instants | `events.start_at/end_at/recur_end_at/modified_at/tzid`, `sessions.expires_at`, `booking_hours.tzid`, textes ISO mis au format exact | retire les colonnes |
 | 7 | reglages | table `settings (space_id, module, key, value, secret, updated_at)`, reprise des quatre anciennes tables de réglages | retire la table |
+| 8 | participations | tables `video_participations` et `event_attendees`, colonne `events.attendees_at`, invités tirés des événements existants | retire les tables et la colonne |
 
 Règle : une migration n'enlève ni ne renomme rien de ce que lit le code précédent. Remettre
 l'image précédente d'Alfred fonctionne donc sans restaurer la base.
@@ -102,11 +104,12 @@ Chaque base ouverte par un test devient un schéma neuf de cette base PostgreSQL
 ## API (session requise)
 
 - `GET /api/people?q=` : fiches, prochain et dernier RDV.
-- `GET /api/people/:id` : une fiche, ses RDV à venir et passés, ses liens.
+- `GET /api/people/:id` : une fiche, ses RDV à venir et passés, ses liens, ses visios (`calls`) et les événements où elle est invitée (`events`).
 - `GET /api/links?from=<adresse>` ou `?eventId=<id>` ; `POST /api/links { from | eventId, target, title? }` ; `DELETE /api/links/:id`.
 - `GET /api/v1/resolve?address=media://alfred/…`
 
 ## Reste à faire (phase 4)
 
-- Participants visio et invités iCloud reliés aux Personnes (ANT-300), distribution du journal (ALFRED-308), API v1 complète.
+- Distribution du journal (ALFRED-308), API v1 complète.
+- Participations : un passage de moins d'une minute entre deux relevés n'est pas gardé, et plusieurs invités d'une même salle de rendez-vous sont tous reliés à la personne qui a réservé.
 - Côté Cairn : bouton « Note de réunion » qui crée la note et le lien d'un coup (ANT-175).

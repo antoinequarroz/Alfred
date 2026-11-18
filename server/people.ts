@@ -1,4 +1,4 @@
-import type { LinkInfo, PersonDetail, PersonSummary, ResolvedAddress } from '../shared/types.js';
+import type { LinkInfo, PersonCall, PersonDetail, PersonEvent, PersonSummary, ResolvedAddress } from '../shared/types.js';
 import type { BookingService } from './booking/service.js';
 import type { Db } from './db.js';
 import { addressOf, MODULE, parseAddress, uuidv7 } from './ids.js';
@@ -104,7 +104,33 @@ export class PeopleService {
     const row = this.findRow(id);
     if (!row) throw new PeopleError(404, 'not_found', 'Personne introuvable');
     const { upcoming, past } = this.opts.booking.bookingsForPerson(id);
-    return { ...this.toSummary(row), upcoming, past, links: this.listLinks(addressOf('person', id)) };
+    return {
+      ...this.toSummary(row), upcoming, past, links: this.listLinks(addressOf('person', id)),
+      calls: this.callsOf(id), events: this.eventsOf(row.email),
+    };
+  }
+
+  /** Passages en visio d'une personne (ALFRED-300), les plus récents d'abord. */
+  callsOf(personId: string, limit = 100): PersonCall[] {
+    const rows = this.db.all<{ id: string; room_id: string; title: string | null; name: string; joined_at: string; left_at: string | null }>(
+      `SELECT p.id, p.room_id, r.title, p.name, p.joined_at, p.left_at
+       FROM video_participations p LEFT JOIN video_rooms r ON r.id = p.room_id AND r.space_id = p.space_id
+       WHERE p.space_id = ? AND p.person_id = ? ORDER BY p.joined_at DESC, p.id DESC LIMIT ?`,
+      this.spaceId, personId, limit);
+    return rows.map((r) => ({ id: r.id, roomId: r.room_id, title: r.title ?? 'Visio', name: r.name, joinedAt: r.joined_at, leftAt: r.left_at }));
+  }
+
+  /** Événements où l'e-mail de la fiche figure parmi les invités (ALFRED-300), les plus récents d'abord. */
+  eventsOf(email: string, limit = 100): PersonEvent[] {
+    const rows = this.db.all<{ id: string; calendar_id: string; summary: string; start_at: string; end_at: string; recurring: number; partstat: string }>(
+      `SELECT e.id, e.calendar_id, e.summary, e.start_at, e.end_at, e.recurring, a.partstat
+       FROM event_attendees a JOIN events e ON e.id = a.event_id AND e.space_id = a.space_id
+       WHERE a.space_id = ? AND a.email = ? ORDER BY e.start_at DESC, e.id LIMIT ?`,
+      this.spaceId, email, limit);
+    return rows.map((r) => ({
+      eventId: r.id, calendarId: r.calendar_id, title: r.summary || 'Événement', start: r.start_at, end: r.end_at,
+      recurring: Number(r.recurring) === 1, partstat: r.partstat,
+    }));
   }
 
   // --- adresses ------------------------------------------------------------

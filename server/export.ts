@@ -1,6 +1,7 @@
 import ICAL from 'ical.js';
 import { toInstant } from './instants.js';
 import { schemaVersion } from './migrations.js';
+import { syncEventAttendees } from './attendees.js';
 import { LEGACY_SETTINGS_TABLES, Settings, type SettingsModule } from './settings.js';
 import { ALL_SPACES, type Param, type Sql } from './sql.js';
 
@@ -35,7 +36,7 @@ const EXPORTED_SETTINGS = "secret = 0 AND NOT (module = 'push' AND key IN ('vapi
 
 export const EXPORTED_TABLES: Record<string, TableSpec> = {
   calendars: { order: 'sort, id' },
-  events: { order: 'id', omit: ['start_ms', 'end_ms', 'recur_end_ms', 'updated_at'] },
+  events: { order: 'id', omit: ['start_ms', 'end_ms', 'recur_end_ms', 'updated_at', 'attendees_at'] },
   booking_types: { order: 'sort, id' },
   booking_hours: { order: 'weekday, start_min, end_min', omit: ['id'] },
   people: { order: 'id' },
@@ -43,6 +44,7 @@ export const EXPORTED_TABLES: Record<string, TableSpec> = {
   booking_tokens: { order: 'token_hash' },
   payment_holds: { order: 'id', blank: ['cancel_token'] },
   video_rooms: { order: 'id' },
+  video_participations: { order: 'joined_at, id' },
   links: { order: 'id' },
   // Réglages de tous les modules, sans les secrets ni la date de départ des notifications.
   settings: { order: 'module, key', where: EXPORTED_SETTINGS, omit: ['updated_at'] },
@@ -62,10 +64,11 @@ export const NOT_EXPORTED: Record<string, string> = {
   video_settings: 'ancienne copie des réglages (retour arrière), voir la table settings',
   connection_settings: 'ancienne copie des réglages (retour arrière), voir la table settings',
   push_settings: 'ancienne copie des réglages (retour arrière), voir la table settings',
+  event_attendees: 'copie des invités tirée des événements (ATTENDEE), refaite à l’import',
 };
 
 /** Tables qui doivent être vides pour accepter un import (les réglages, eux, sont remplacés). */
-const CONTENT_TABLES = ['events', 'bookings', 'booking_types', 'booking_tokens', 'people', 'links', 'video_rooms', 'payment_holds', 'outbox'];
+const CONTENT_TABLES = ['events', 'bookings', 'booking_types', 'booking_tokens', 'people', 'links', 'video_rooms', 'video_participations', 'payment_holds', 'outbox'];
 /** Exports d'avant la table settings (schéma < 7) : anciennes tables de réglages → module. */
 const LEGACY_SETTINGS_MODULES = Object.fromEntries(
   Object.entries(LEGACY_SETTINGS_TABLES).map(([module, table]) => [table, module as SettingsModule])) as Record<string, SettingsModule>;
@@ -200,6 +203,8 @@ export function importSpace(db: Sql, value: unknown): Record<string, number> {
       for (const row of rows) insertRow(db, table, row);
       counts[table] = rows.length;
     }
+    // Invités des événements importés, tirés de leur iCalendar (server/attendees.ts).
+    syncEventAttendees(db);
     // Les faits importés sont de l'histoire : aucune notification ne doit repartir pour eux.
     const last = db.get<{ seq: number | null }>('SELECT MAX(seq) AS seq FROM outbox WHERE space_id = ?', db.spaceId)?.seq;
     if (last !== null && last !== undefined) {

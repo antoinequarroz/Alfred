@@ -9,6 +9,7 @@ import { BookingService } from '../server/booking/service.js';
 import { openDb } from '../server/db.js';
 import { hashPassword } from '../server/password.js';
 import { CalendarService } from '../server/service.js';
+import { PeopleService } from '../server/people.js';
 import { Store } from '../server/store.js';
 import { cleanGuestName, isRoomSlug, newRoomSlug, VideoService, type VideoBackend } from '../server/video/service.js';
 import { signAccessToken, verifyAccessToken } from '../server/video/token.js';
@@ -483,5 +484,74 @@ describe('rendez-vous en visio', () => {
     expect(confirmation.booking.videoUrl).toBeNull();
     const events = (await (await ctx.admin('/api/events?start=2026-11-16T00:00:00Z&end=2026-11-17T00:00:00Z')).json()) as Occurrence[];
     expect(events[0].location).toBe('En visio');
+  });
+});
+
+describe('participations (historique des Personnes)', () => {
+  it('note qui entre, sa présence et son départ, et relie l’invité d’un rendez-vous à sa fiche', async () => {
+    const ctx = await setup();
+    await ctx.admin('/api/booking/settings', 'PUT', { enabled: true });
+    await ctx.admin('/api/booking/types', 'POST', { name: 'Consultation', durationMin: 30, mode: 'visio' });
+    const confirmation = (await (await ctx.json('/api/public/booking/book', 'POST',
+      { typeSlug: 'consultation', start: MONDAY_9, name: 'Élodie Müller', email: 'elodie@example.org' })).json()) as BookingConfirmation;
+    const slug = confirmation.booking.videoUrl!.split('/v/')[1];
+    const people = new PeopleService({ db: ctx.store.db, store: ctx.store, booking: ctx.booking, cairnUrl: 'https://cairn.example.ch', now: () => ctx.clock.now });
+    const personId = people.list()[0].id;
+
+    const guest = (await (await ctx.json(`/api/public/video/rooms/${slug}/join`, 'POST', { name: 'Élodie' })).json()) as VideoJoinInfo;
+    const host = (await (await ctx.admin(`/api/public/video/rooms/${slug}/join`, 'POST', {})).json()) as VideoJoinInfo;
+    // Un second jeton pour l'hôte (autre appareil) reprend sa participation ouverte.
+    await ctx.admin(`/api/public/video/rooms/${slug}/join`, 'POST', {});
+    const rows = () => ctx.store.db.all<{ identity: string; role: string; person_id: string | null; seen_at: string | null; left_at: string | null }>(
+      'SELECT identity, role, person_id, seen_at, left_at FROM video_participations WHERE space_id = ? ORDER BY joined_at, id', ctx.store.db.spaceId);
+    expect(rows().map((r) => [r.role, r.person_id])).toEqual([['guest', personId], ['host', null]]);
+
+    // Le serveur de visio voit les deux : présence notée.
+    const live = [...ctx.fake.rooms.values()][0];
+    live.participants.push({ identity: guest.identity, name: 'Élodie' }, { identity: host.identity, name: 'Antoine' });
+    ctx.clock.now = new Date(Date.parse(NOW) + 60_000);
+    expect(await ctx.video.sweepParticipations()).toBe(0);
+    expect(rows().every((r) => r.seen_at === ctx.clock.now.toISOString())).toBe(true);
+    const seen = ctx.clock.now.toISOString();
+
+    // L'invitée part : notée partie après le délai de grâce, à sa dernière présence vue.
+    live.participants.splice(0, 1);
+    ctx.clock.now = new Date(Date.parse(NOW) + 120_000);
+    expect(await ctx.video.sweepParticipations()).toBe(0); // coupure brève tolérée
+    ctx.clock.now = new Date(Date.parse(NOW) + 4 * 60_000);
+    expect(await ctx.video.sweepParticipations()).toBe(1);
+    expect(rows()[0]).toMatchObject({ role: 'guest', left_at: seen });
+    expect(rows()[1].left_at).toBeNull();
+
+    // Serveur injoignable : rien n'est clos à l'aveugle.
+    ctx.fake.state.up = false;
+    live.participants.length = 0;
+    ctx.clock.now = new Date(Date.parse(NOW) + 30 * 60_000);
+    expect(await ctx.video.sweepParticipations()).toBe(0);
+    ctx.fake.state.up = true;
+    expect(await ctx.video.sweepParticipations()).toBe(1);
+
+    // La fiche montre ses visios.
+    const detail = people.get(personId);
+    expect(detail.calls).toEqual([expect.objectContaining({ title: 'Consultation : Élodie Müller', name: 'Élodie', leftAt: seen })]);
+  });
+
+  it('efface un jeton jamais utilisé et clôt tout quand la salle ferme', async () => {
+    const ctx = await setup();
+    const room = (await (await ctx.admin('/api/video/rooms', 'POST', { title: 'Point', kind: 'instant' })).json()) as VideoRoom;
+    const slug = slugOf(room);
+    await ctx.json(`/api/public/video/rooms/${slug}/join`, 'POST', { name: 'Marc' });
+    const b = (await (await ctx.json(`/api/public/video/rooms/${slug}/join`, 'POST', { name: 'Zoé' })).json()) as VideoJoinInfo;
+    [...ctx.fake.rooms.values()][0].participants.push({ identity: b.identity, name: 'Zoé' });
+    ctx.clock.now = new Date(Date.parse(NOW) + 60_000);
+    await ctx.video.sweepParticipations();
+    ctx.clock.now = new Date(Date.parse(NOW) + 5 * 60_000);
+    await ctx.video.sweepParticipations(); // Marc ne s'est jamais connecté : effacé
+    const names = () => ctx.store.db.all<{ name: string; left_at: string | null }>(
+      'SELECT name, left_at FROM video_participations WHERE space_id = ? ORDER BY joined_at, id', ctx.store.db.spaceId);
+    expect(names()).toEqual([{ name: 'Zoé', left_at: null }]);
+    expect((await ctx.admin(`/api/video/rooms/${room.id}`, 'DELETE')).status).toBeLessThan(300);
+    await ctx.video.sweepParticipations();
+    expect(names()[0].left_at).not.toBeNull();
   });
 });

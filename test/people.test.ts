@@ -7,6 +7,8 @@ import { BookingService } from '../server/booking/service.js';
 import { openDb } from '../server/db.js';
 import { addressOf } from '../server/ids.js';
 import { hashPassword } from '../server/password.js';
+import { syncEventAttendees } from '../server/attendees.js';
+import { attendeesOf } from '../server/ics.js';
 import { PeopleService } from '../server/people.js';
 import { CalendarService } from '../server/service.js';
 import { Store } from '../server/store.js';
@@ -169,5 +171,58 @@ describe('liens vers Cairn et adresses', () => {
     expect((await ctx.admin('/api/links', 'POST', { from: addressOf('person', 'inconnu'), target: 'https://exemple.ch' })).status).toBe(404);
     expect((await ctx.admin('/api/links', 'POST', { from: 'media://cairn/note/x', target: 'https://exemple.ch' })).status).toBe(404);
     expect((await ctx.admin('/api/links', 'POST', { eventId: 'inconnu', target: 'https://exemple.ch' })).status).toBe(404);
+  });
+});
+
+describe('invités des événements', () => {
+  const ics = (uid: string, attendees: string[]) => [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//test//FR', 'BEGIN:VEVENT', `UID:${uid}`, 'DTSTAMP:20261101T000000Z',
+    'DTSTART:20261120T090000Z', 'DTEND:20261120T100000Z', 'SUMMARY:Atelier', 'ORGANIZER:mailto:antoine@example.ch',
+    ...attendees, 'END:VEVENT', 'END:VCALENDAR', '',
+  ].join('\r\n');
+
+  it('lit les lignes ATTENDEE, une fois par e-mail, sans l’organisateur', () => {
+    expect(attendeesOf(ics('u1', [
+      'ATTENDEE;CN="Élodie Müller";PARTSTAT=ACCEPTED:mailto:Elodie@Example.org',
+      'ATTENDEE;PARTSTAT=declined:MAILTO:elodie@example.org',
+      'ATTENDEE;CN=Marc:mailto:marc@example.org',
+      'ATTENDEE:urn:uuid:sans-email',
+    ]))).toEqual([
+      { email: 'elodie@example.org', name: 'Élodie Müller', partstat: 'ACCEPTED' },
+      { email: 'marc@example.org', name: 'Marc', partstat: '' },
+    ]);
+  });
+
+  it('reconnaît un invité comme Personne quand son e-mail est connu, et suit les changements', async () => {
+    const ctx = await setup();
+    await ctx.book(MONDAY_9, { name: 'Élodie', email: 'elodie@example.org' });
+    const cal = ctx.store.listCalendars()[0].id;
+    const id = ctx.store.saveEvent({ calendarId: cal, href: null, etag: null, ics: ics('atelier-1', [
+      'ATTENDEE;CN=Élodie;PARTSTAT=TENTATIVE:mailto:ELODIE@example.org', 'ATTENDEE:mailto:inconnu@example.org']) });
+    const person = ctx.people.list().find((p) => p.email === 'elodie@example.org')!;
+    expect(ctx.people.get(person.id).events).toEqual([expect.objectContaining({ eventId: id, title: 'Atelier', partstat: 'TENTATIVE', recurring: false })]);
+    // Aucune fiche n'est créée pour l'invité inconnu.
+    expect(ctx.people.list().map((p) => p.email)).not.toContain('inconnu@example.org');
+
+    // Retirée des invités, puis événement supprimé : elle n'y figure plus.
+    ctx.store.saveEvent({ id, calendarId: cal, href: null, etag: null, ics: ics('atelier-1', []) });
+    expect(ctx.people.get(person.id).events).toEqual([]);
+    ctx.store.saveEvent({ id, calendarId: cal, href: null, etag: null, ics: ics('atelier-1', ['ATTENDEE:mailto:elodie@example.org']) });
+    ctx.store.deleteEvent(id);
+    expect(ctx.people.get(person.id).events).toEqual([]);
+  });
+
+  it('reprend au démarrage les événements écrits sans leurs invités (image précédente)', async () => {
+    const ctx = await setup();
+    await ctx.book(MONDAY_9, { name: 'Élodie', email: 'elodie@example.org' });
+    const cal = ctx.store.listCalendars()[0].id;
+    const id = ctx.store.saveEvent({ calendarId: cal, href: null, etag: null, ics: ics('atelier-2', []) });
+    // L'image précédente réécrit l'événement : nouvel iCalendar, nouvelle date, invités non copiés.
+    ctx.store.db.run('UPDATE events SET ics = ?, modified_at = ? WHERE id = ? AND space_id = ?',
+      ics('atelier-2', ['ATTENDEE:mailto:elodie@example.org']), '2026-11-15T12:00:00.000Z', id, ctx.store.db.spaceId);
+    expect(syncEventAttendees(ctx.store.db)).toBe(1);
+    expect(syncEventAttendees(ctx.store.db)).toBe(0);
+    const person = ctx.people.list()[0];
+    expect(ctx.people.get(person.id).events.map((e) => e.eventId)).toEqual([id]);
   });
 });

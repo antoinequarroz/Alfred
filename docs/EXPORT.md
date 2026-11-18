@@ -50,14 +50,17 @@ ensuite exactement le même fichier (seule la date d'export change ; c'est test�
 ### Tables exportées
 
 Dans l'ordre d'import : `calendars`, `events`, `booking_types`, `booking_hours`, `people`,
-`bookings`, `booking_tokens`, `payment_holds`, `video_rooms`, `links`, `settings`, `outbox`.
+`bookings`, `booking_tokens`, `payment_holds`, `video_rooms`, `video_participations`, `links`, `settings`, `outbox`.
+
+Les invités des événements (`event_attendees`) ne sont pas exportés : ils sont tirés à nouveau de
+l'iCalendar de chaque événement à l'import.
 
 `settings` (schéma 7 et suivants) regroupe les réglages de tous les modules (`module`, `key`,
 `value`, `secret`). Un export d'avant le schéma 7 porte à la place les anciennes tables
 `booking_settings`, `video_settings`, `connection_settings` et `push_settings` : il s'importe aussi.
 
 Colonnes laissées de côté : les anciennes colonnes en millisecondes des événements (recalculées à
-l'import), la date de modification des réglages, l'identifiant interne des horaires (`booking_hours.id`) et la position des faits du
+l'import), la date de copie des invités (`events.attendees_at`), la date de modification des réglages, l'identifiant interne des horaires (`booking_hours.id`) et la position des faits du
 journal (`outbox.seq`, recréée dans le même ordre).
 
 ### Ce qui n'est jamais exporté

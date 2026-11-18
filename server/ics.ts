@@ -652,3 +652,32 @@ export function removeOccurrence(ics: string, occurrenceId: string): string | nu
 export function uidOf(ics: string): string {
   return String(masterOf(parseCalendar(ics)).getFirstPropertyValue('uid') ?? '');
 }
+
+export interface Attendee {
+  /** E-mail en minuscules, sans « mailto: ». */
+  email: string;
+  name: string;
+  /** Réponse de l'invité : ACCEPTED, DECLINED, TENTATIVE, NEEDS-ACTION… ('' si absente). */
+  partstat: string;
+}
+
+/**
+ * Invités d'une ressource (lignes ATTENDEE de tous ses VEVENT, exceptions comprises), une fois
+ * par e-mail : la réponse du VEVENT principal l'emporte. L'organisateur n'en fait pas partie.
+ */
+export function attendeesOf(ics: string): Attendee[] {
+  const vcal = parseCalendar(ics);
+  const master = masterOf(vcal);
+  const byEmail = new Map<string, Attendee>();
+  for (const ev of [master, ...vevents(vcal).filter((v) => v !== master)]) {
+    for (const p of ev.getAllProperties('attendee')) {
+      const raw = String(p.getFirstValue() ?? '').trim();
+      const email = raw.replace(/^mailto:/i, '').trim().normalize('NFC').toLowerCase();
+      if (!email || email.length > 320 || !email.includes('@') || byEmail.has(email)) continue;
+      const name = String(p.getParameter('cn') ?? '').trim().slice(0, 200);
+      const partstat = String(p.getParameter('partstat') ?? '').trim().toUpperCase().slice(0, 40);
+      byEmail.set(email, { email, name, partstat });
+    }
+  }
+  return [...byEmail.values()];
+}

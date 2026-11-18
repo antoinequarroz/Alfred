@@ -65,7 +65,7 @@ describe('migrations numérotées', () => {
     expect(schemaVersion(db)).toBe(LATEST);
     expect(migrateUp(db)).toEqual([]);
     const versions = (db.prepare('SELECT version, name FROM schema_migrations ORDER BY version').all() as unknown as { version: number; name: string }[]);
-    expect(versions.map((v) => v.name)).toEqual(['espaces', 'personnes', 'liens', 'acomptes', 'journal', 'instants', 'reglages']);
+    expect(versions.map((v) => v.name)).toEqual(['espaces', 'personnes', 'liens', 'acomptes', 'journal', 'instants', 'reglages', 'participations']);
     db.close();
   });
 
@@ -120,15 +120,16 @@ describe('migrations numérotées', () => {
     const dir = mkdtempSync(join(tmpdir(), 'alfred-mig-'));
     const db = openDb(dir);
     oldBooking(db, 'b1', 'a@example.org', 'A', '2026-11-01T10:00:00.000Z');
-    expect(migrateDown(db, 0)).toEqual([7, 6, 5, 4, 3, 2, 1]);
+    expect(migrateDown(db, 0)).toEqual([8, 7, 6, 5, 4, 3, 2, 1]);
     expect(schemaVersion(db)).toBe(0);
     for (const t of ['people', 'links', 'spaces', 'payment_holds']) expect(userTables(db)).not.toContain(t);
     for (const table of userTables(db)) expect(columns(db, table), table).not.toContain('space_id');
     expect(columns(db, 'bookings')).not.toContain('person_id');
+    expect(columns(db, 'events')).not.toContain('attendees_at');
     expect(columns(db, 'bookings')).not.toContain('payment_status');
     expect(columns(db, 'booking_types')).not.toContain('deposit_cents');
     expect(db.prepare('SELECT id, email FROM bookings').all()).toEqual([{ id: 'b1', email: 'a@example.org' }]);
-    expect(migrateUp(db)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(migrateUp(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(columns(db, 'payment_holds')).toContain('space_id');
     expect((db.prepare('SELECT COUNT(*) AS n FROM people').get() as { n: number }).n).toBe(1);
     db.close();
@@ -245,6 +246,38 @@ describe('réglages : une seule table (migration 7, ALFRED-298)', () => {
     const third = openDb(dir);
     expect(third.prepare("SELECT value FROM settings WHERE module = 'booking' AND key = 'public_name'").get()).toEqual({ value: 'Après' });
     expect(third.prepare("SELECT COUNT(*) AS n FROM settings WHERE module = 'video'").get()).toEqual({ n: 0 });
+    third.close();
+  });
+});
+
+describe('participations et invités (migration 8, ALFRED-300)', () => {
+  const ics = (uid: string, attendee: string) => ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:x', 'BEGIN:VEVENT', `UID:${uid}`, 'DTSTAMP:20260101T000000Z',
+    'DTSTART:20261201T090000Z', 'DURATION:PT1H', `ATTENDEE;CN=Élodie;PARTSTAT=ACCEPTED:mailto:${attendee}`, 'END:VEVENT', 'END:VCALENDAR', ''].join('\r\n');
+
+  it('tire les invités des événements existants, puis suit ceux que l’image précédente réécrit', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'alfred-mig-'));
+    const before = openDb(dir);
+    migrateDown(before, 7);
+    before.prepare("INSERT INTO calendars (id, source, name, color) VALUES ('c1', 'local', 'Perso', '#000')").run();
+    before.prepare(`INSERT INTO events (id, calendar_id, uid, ics, summary, start_at, end_at, recurring, modified_at, start_ms, end_ms, updated_at)
+      VALUES ('e1', 'c1', 'u1', ?, 'Atelier', '2026-12-01T09:00:00.000Z', '2026-12-01T10:00:00.000Z', 0, '2026-11-01T10:00:00.000Z', 0, 0, ?)`)
+      .run(ics('u1', 'Elodie@Example.org'), Date.parse('2026-11-01T10:00:00.000Z'));
+    before.close();
+
+    const db = openDb(dir);
+    const attendees = () => db.prepare('SELECT event_id, email, name, partstat FROM event_attendees ORDER BY event_id, email').all();
+    expect(attendees()).toEqual([{ event_id: 'e1', email: 'elodie@example.org', name: 'Élodie', partstat: 'ACCEPTED' }]);
+    // Retour arrière : l'image précédente change l'invité sans toucher à la copie.
+    db.prepare("UPDATE events SET ics = ?, modified_at = '2026-11-02T10:00:00.000Z', updated_at = ? WHERE id = 'e1'")
+      .run(ics('u1', 'marc@example.org'), Date.parse('2026-11-02T10:00:00.000Z'));
+    db.close();
+    const again = openDb(dir);
+    expect(again.prepare('SELECT email FROM event_attendees').all()).toEqual([{ email: 'marc@example.org' }]);
+    // Puis elle supprime l'événement : la copie part aussi.
+    again.prepare("DELETE FROM events WHERE id = 'e1'").run();
+    again.close();
+    const third = openDb(dir);
+    expect(third.prepare('SELECT COUNT(*) AS n FROM event_attendees').get()).toEqual({ n: 0 });
     third.close();
   });
 });

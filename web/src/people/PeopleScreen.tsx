@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { Booking, PersonDetail, PersonSummary } from '../../../shared/types';
+import type { Booking, PersonCall, PersonDetail, PersonEvent, PersonSummary } from '../../../shared/types';
 import { peopleApi } from '../api';
 import { ArrowLeftIcon, CheckIcon, CopyIcon, MenuIcon } from '../icons';
 import { Card } from '../rdv/ui';
-import { dayKeyIn, dayLabel, timeIn } from '../rdv/tz';
+import { dayKeyIn, dayLabel, durationLabel, timeIn } from '../rdv/tz';
 import { LinksPanel } from './Links';
 import '../rdv/rdv.css';
 import './people.css';
@@ -125,6 +125,42 @@ function BookingLine({ b }: { b: Booking }) {
   );
 }
 
+const PARTSTAT: Record<string, string> = {
+  ACCEPTED: 'Accepté', DECLINED: 'Refusé', TENTATIVE: 'Peut-être', 'NEEDS-ACTION': 'Sans réponse', DELEGATED: 'Délégué',
+};
+
+function CallLine({ c }: { c: PersonCall }) {
+  const minutes = c.leftAt ? Math.max(1, Math.round((Date.parse(c.leftAt) - Date.parse(c.joinedAt)) / 60_000)) : null;
+  return (
+    <li className="pp-booking">
+      <span className="pp-when">
+        <span className="bk-when-day">{dayLabel(dayKeyIn(TZ, new Date(c.joinedAt)), true)}</span>
+        <span className="bk-when-time">{timeIn(TZ, c.joinedAt)}{c.leftAt ? ` – ${timeIn(TZ, c.leftAt)}` : ''}</span>
+      </span>
+      <span className="pp-what">
+        <span>{c.title}{c.name ? <span className="bk-meta"> · nom affiché : {c.name}</span> : null}</span>
+        {minutes === null ? <span className="tag">En cours</span> : <span className="bk-meta">{durationLabel(minutes)}</span>}
+      </span>
+    </li>
+  );
+}
+
+function EventLine({ e }: { e: PersonEvent }) {
+  const answer = PARTSTAT[e.partstat];
+  return (
+    <li className="pp-booking">
+      <span className="pp-when">
+        <span className="bk-when-day">{dayLabel(dayKeyIn(TZ, new Date(e.start)), true)}</span>
+        <span className="bk-when-time">{timeIn(TZ, e.start)} – {timeIn(TZ, e.end)}</span>
+      </span>
+      <span className="pp-what">
+        <span>{e.title}{e.recurring ? <span className="bk-meta"> · se répète</span> : null}</span>
+        {answer && <span className="tag">{answer}</span>}
+      </span>
+    </li>
+  );
+}
+
 function PersonView({ id, onBack }: { id: string; onBack: () => void }) {
   const [person, setPerson] = useState<PersonDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -189,6 +225,18 @@ function PersonView({ id, onBack }: { id: string; onBack: () => void }) {
       <Card title="Historique" sub={person.past.length ? `${person.past.length} rendez-vous passé${person.past.length > 1 ? 's' : ''} ou annulé${person.past.length > 1 ? 's' : ''}` : 'Pas encore d’historique.'}>
         {person.past.length > 0 && <ul className="bk-list">{person.past.map((b) => <BookingLine key={b.id} b={b} />)}</ul>}
       </Card>
+
+      {person.calls.length > 0 && (
+        <Card title="Visios" sub={`${person.calls.length} passage${person.calls.length > 1 ? 's' : ''} dans la salle de ses rendez-vous`}>
+          <ul className="bk-list">{person.calls.map((c) => <CallLine key={c.id} c={c} />)}</ul>
+        </Card>
+      )}
+
+      {person.events.length > 0 && (
+        <Card title="Invitations" sub="Événements de ton agenda où son e-mail figure parmi les invités">
+          <ul className="bk-list">{person.events.map((e) => <EventLine key={e.eventId} e={e} />)}</ul>
+        </Card>
+      )}
     </>
   );
 }

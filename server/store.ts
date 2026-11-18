@@ -3,6 +3,7 @@ import { uuidv7 } from './ids.js';
 import type { CalendarInfo, CalendarSource, Occurrence } from '../shared/types.js';
 import type { Db } from './db.js';
 import { toInstant } from './instants.js';
+import { saveAttendees } from './attendees.js';
 import { ALL_SPACES } from './sql.js';
 import { expand, expandBusy, summarize, type BusyOccurrence } from './ics.js';
 
@@ -160,12 +161,15 @@ export class Store {
       id, ev.calendarId, ev.href, ev.etag, s.uid, ev.ics, s.summary, toInstant(s.startMs), toInstant(s.endMs), s.recurring ? 1 : 0,
       s.recurEndMs === null ? null : toInstant(s.recurEndMs), s.tzid, s.busy ? packBusy(s.busy) : null, toInstant(now),
       s.startMs, s.endMs, s.recurEndMs, now, this.space);
+    // Invités, reconnus comme Personnes par leur e-mail (server/attendees.ts).
+    saveAttendees(this.db, this.space, id, ev.ics, toInstant(now));
     this.changes++;
     return id;
   }
 
   deleteEvent(id: string): void {
     this.db.run('DELETE FROM events WHERE id = ? AND space_id = ?', id, this.space);
+    this.db.run('DELETE FROM event_attendees WHERE event_id = ? AND space_id = ?', id, this.space);
     this.changes++;
   }
 
