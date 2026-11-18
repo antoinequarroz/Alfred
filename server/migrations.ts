@@ -1,6 +1,8 @@
 import { summarize } from './ics.js';
 import { uuidv7 } from './ids.js';
 import { INSTANT_COLUMNS, isInstant, toInstant } from './instants.js';
+import { copyLegacySettings } from './settings.js';
+import { syncEventAttendees } from './attendees.js';
 import { ALL_SPACES, SPACELESS_TABLES, type Sql } from './sql.js';
 
 // Migrations numérotées (phase 4 : données prêtes pour la suite Media).
@@ -254,6 +256,87 @@ export const MIGRATIONS: Migration[] = [
       db.exec('ALTER TABLE sessions DROP COLUMN expires_at');
       db.exec('DROP INDEX events_span');
       for (const c of ['tzid', 'modified_at', 'recur_end_at', 'end_at', 'start_at']) db.exec(`ALTER TABLE events DROP COLUMN ${c}`);
+    },
+  },
+  {
+    version: 7,
+    name: 'reglages',
+    up(db) {
+      // Une seule table de réglages, par espace et par module (voir server/settings.ts). Les
+      // anciennes tables restent, recopiées à chaque écriture, pour l'image précédente d'Alfred.
+      db.exec(`CREATE TABLE settings (
+        space_id   TEXT NOT NULL DEFAULT '${DEFAULT_SPACE_ID}',
+        module     TEXT NOT NULL,             -- 'booking' | 'video' | 'connections' | 'push'
+        key        TEXT NOT NULL,
+        value      TEXT NOT NULL,
+        secret     INTEGER NOT NULL DEFAULT 0, -- 1 : valeur chiffrée (server/secrets.ts)
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (space_id, module, key)
+      )`);
+      copyLegacySettings(db);
+    },
+    down(db) {
+      db.exec('DROP TABLE settings');
+    },
+  },
+  {
+    version: 8,
+    name: 'participations',
+    up(db) {
+      // Qui a rejoint quelle salle de visio, et quand (server/video/service.ts). L'arrivée est
+      // notée quand Alfred remet le jeton d'entrée ; le passage régulier auprès du serveur de
+      // visio note la dernière présence vue (seen_at), puis le départ (left_at).
+      db.exec(`CREATE TABLE video_participations (
+        id         TEXT PRIMARY KEY,
+        space_id   TEXT NOT NULL DEFAULT '${DEFAULT_SPACE_ID}',
+        room_id    TEXT NOT NULL,
+        identity   TEXT NOT NULL,             -- 'host' ou 'invite-…' (identité dans la salle)
+        role       TEXT NOT NULL,             -- 'host' (le compte d'Alfred) | 'guest'
+        name       TEXT NOT NULL DEFAULT '',
+        person_id  TEXT,                      -- fiche de l'invité, quand la salle est celle d'un rendez-vous
+        joined_at  TEXT NOT NULL,
+        seen_at    TEXT,
+        left_at    TEXT
+      )`);
+      db.exec('CREATE INDEX video_participations_room ON video_participations(space_id, room_id)');
+      db.exec('CREATE INDEX video_participations_person ON video_participations(space_id, person_id)');
+      // Invités des événements (server/attendees.ts), reconnus comme Personnes par leur e-mail.
+      db.exec(`CREATE TABLE event_attendees (
+        space_id   TEXT NOT NULL DEFAULT '${DEFAULT_SPACE_ID}',
+        event_id   TEXT NOT NULL,
+        email      TEXT NOT NULL,
+        name       TEXT NOT NULL DEFAULT '',
+        partstat   TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (space_id, event_id, email)
+      )`);
+      db.exec('CREATE INDEX event_attendees_email ON event_attendees(space_id, email)');
+      db.exec('ALTER TABLE events ADD COLUMN attendees_at TEXT');
+      syncEventAttendees(db);
+    },
+    down(db) {
+      db.exec('ALTER TABLE events DROP COLUMN attendees_at');
+      db.exec('DROP TABLE event_attendees');
+      db.exec('DROP TABLE video_participations');
+    },
+  },
+  {
+    version: 9,
+    name: 'jetons',
+    up(db) {
+      // Jetons de l'API v1 et des flux iCalendar (server/api-tokens.ts) : seule l'empreinte est gardée.
+      db.exec(`CREATE TABLE api_tokens (
+        id           TEXT PRIMARY KEY,
+        space_id     TEXT NOT NULL DEFAULT '${DEFAULT_SPACE_ID}',
+        name         TEXT NOT NULL,
+        kind         TEXT NOT NULL,           -- 'api' (lecture de /api/v1) | 'feed' (flux .ics d'un calendrier)
+        calendar_id  TEXT,
+        token_hash   TEXT NOT NULL UNIQUE,    -- SHA-256 du jeton, en hexadécimal
+        created_at   TEXT NOT NULL,
+        last_used_at TEXT
+      )`);
+    },
+    down(db) {
+      db.exec('DROP TABLE api_tokens');
     },
   },
 ];

@@ -49,22 +49,29 @@ ensuite exactement le même fichier (seule la date d'export change ; c'est test�
 
 ### Tables exportées
 
-Dans l'ordre d'import : `calendars`, `events`, `booking_settings`, `booking_types`,
-`booking_hours`, `people`, `bookings`, `booking_tokens`, `payment_holds`, `video_settings`,
-`video_rooms`, `links`, `connection_settings`, `push_settings`, `outbox`.
+Dans l'ordre d'import : `calendars`, `events`, `booking_types`, `booking_hours`, `people`,
+`bookings`, `booking_tokens`, `payment_holds`, `video_rooms`, `video_participations`, `links`, `settings`, `outbox`.
+
+Les invités des événements (`event_attendees`) ne sont pas exportés : ils sont tirés à nouveau de
+l'iCalendar de chaque événement à l'import.
+
+`settings` (schéma 7 et suivants) regroupe les réglages de tous les modules (`module`, `key`,
+`value`, `secret`). Un export d'avant le schéma 7 porte à la place les anciennes tables
+`booking_settings`, `video_settings`, `connection_settings` et `push_settings` : il s'importe aussi.
 
 Colonnes laissées de côté : les anciennes colonnes en millisecondes des événements (recalculées à
-l'import), l'identifiant interne des horaires (`booking_hours.id`) et la position des faits du
+l'import), la date de copie des invités (`events.attendees_at`), la date de modification des réglages, l'identifiant interne des horaires (`booking_hours.id`) et la position des faits du
 journal (`outbox.seq`, recréée dans le même ordre).
 
 ### Ce qui n'est jamais exporté
 
 | Quoi | Pourquoi |
 | -- | -- |
-| Réglages secrets (`connection_settings` avec `secret = 1` : mots de passe SMTP et iCloud, clé Stripe…) | secrets ; à ressaisir dans les Réglages après un import |
-| Clés des notifications (`push_settings.vapid`) et abonnements des appareils (`push_subscriptions`) | propres à l'installation ; chaque appareil se réabonne |
+| Réglages secrets (`settings` avec `secret = 1` : mots de passe SMTP et iCloud, clé Stripe, clés VAPID des notifications) | secrets ; à ressaisir dans les Réglages après un import |
+| Date de départ des notifications (`push` / `since`) et abonnements des appareils (`push_subscriptions`) | propres à l'installation ; chaque appareil se réabonne |
 | Jeton en clair d'un paiement en cours (`payment_holds.cancel_token`) | secret de passage, vidé |
 | Sessions de connexion, notifications déjà envoyées, positions de lecture du journal | mécanique interne de l'installation |
+| Jetons de l'API v1 et des flux iCalendar (`api_tokens`) | accès propres à l'installation ; à recréer dans les Réglages |
 
 Les empreintes des liens d'annulation des clients (`bookings.token_hash`, `booking_tokens`) sont
 exportées : ce ne sont pas des secrets (seule l'empreinte est gardée), et les liens déjà envoyés

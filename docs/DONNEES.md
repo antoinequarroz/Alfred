@@ -16,6 +16,7 @@ le socle. Référence : le document Linear « Architecture de données d'Alfred 
 | Identifiants universels | Les nouveaux objets reçoivent un UUID v7 (`server/ids.ts`). Les anciens identifiants restent valables, les UID iCalendar ne changent pas. |
 | Adresses stables | `media://alfred/<type>/<id>` : `person`, `booking`, `event` (par UID iCalendar, qui survit à iCloud et aux changements de calendrier)… `GET /api/v1/resolve?address=` dit ce que désigne une adresse. |
 | Personnes | Table `people` : une fiche par e-mail normalisé (minuscules, sans espaces) et par espace. Chaque réservation pointe vers sa fiche (`bookings.person_id`) et garde sa copie figée du nom, de l'e-mail et du téléphone. Rubrique « Personnes » dans l'app. |
+| Historique d'une personne | `video_participations (room_id, identity, role, name, person_id, joined_at, seen_at, left_at)` : qui est entré dans quelle salle et quand. L'arrivée est notée quand Alfred remet le jeton d'entrée ; toutes les minutes, Alfred demande au serveur de visio qui est connecté (`seen_at`), et note le départ deux minutes après la dernière présence vue (`left_at`). Un jeton jamais utilisé est effacé. L'invité d'une salle de rendez-vous est relié à la fiche de la personne qui a réservé ; l'hôte est le compte d'Alfred (`role = 'host'`). `event_attendees (event_id, email, name, partstat)` : copie des lignes ATTENDEE de chaque événement, refaite à chaque enregistrement ; un invité est reconnu comme Personne dès que son e-mail est celui d'une fiche (aucune fiche n'est créée pour lui). La fiche montre ses visios et ses invitations. |
 | Liens | Table `links (space_id, from_ref, to_ref, kind, title, url)`, au format de la table commune du socle. Un lien de note Cairn collé (`https://cairn…/notes/<id>`) devient `media://cairn/note/<id>`. Depuis une fiche Personne ou un événement. |
 
 Aucune app ne lit la base d'une autre : Cairn n'est jamais interrogé, Alfred garde seulement
@@ -31,6 +32,9 @@ l'adresse de la note et le lien pour l'ouvrir.
 | 4 | acomptes | table `payment_holds`, colonnes de paiement | retire les colonnes et la table |
 | 5 | journal | tables `outbox` et `outbox_readers` | retire les tables |
 | 6 | instants | `events.start_at/end_at/recur_end_at/modified_at/tzid`, `sessions.expires_at`, `booking_hours.tzid`, textes ISO mis au format exact | retire les colonnes |
+| 7 | reglages | table `settings (space_id, module, key, value, secret, updated_at)`, reprise des quatre anciennes tables de réglages | retire la table |
+| 8 | participations | tables `video_participations` et `event_attendees`, colonne `events.attendees_at`, invités tirés des événements existants | retire les tables et la colonne |
+| 9 | jetons | table `api_tokens` (jetons de l'API v1 et des flux iCalendar, empreinte seulement) | retire la table |
 
 Règle : une migration n'enlève ni ne renomme rien de ce que lit le code précédent. Remettre
 l'image précédente d'Alfred fonctionne donc sans restaurer la base.
@@ -81,11 +85,13 @@ Chaque `Sql` porte un espace (`db.spaceId`) ; `db.inSpace(id)` donne la même ba
 espace. Une requête qui doit voir tous les espaces le dit avec `ALL_SPACES` (sessions de connexion,
 unicité des liens de visio, migrations).
 
-Limite connue : les tables de réglages (`booking_settings`, `connection_settings`, `video_settings`,
-`push_settings`) gardent une clé unique dans toute la base, pour que l'image précédente d'Alfred
-reste utilisable sans restaurer. Un autre espace ne peut donc pas encore y écrire ses propres
-réglages ; il ne lit et n'écrase jamais ceux d'Antoine (testé). La clé (espace, réglage) viendra
-avec la table de réglages unique (ALFRED-298).
+Réglages : une seule table `settings (space_id, module, key, value, secret, updated_at)`, clé
+(espace, module, réglage), modules `booking`, `video`, `connections` et `push` (`server/settings.ts`).
+Chaque espace a ses propres réglages. Les valeurs secrètes (`secret = 1`) sont chiffrées
+(`server/secrets.ts`) et ne sortent jamais (ni export, ni navigateur). Les quatre anciennes tables
+(`booking_settings`, `video_settings`, `connection_settings`, `push_settings`) ne sont plus lues ;
+chaque écriture y est recopiée pour l'espace d'Antoine, et ce que l'image précédente y change après
+un retour arrière est repris au démarrage suivant.
 
 ### Lancer les tests sur PostgreSQL
 
@@ -99,12 +105,13 @@ Chaque base ouverte par un test devient un schéma neuf de cette base PostgreSQL
 ## API (session requise)
 
 - `GET /api/people?q=` : fiches, prochain et dernier RDV.
-- `GET /api/people/:id` : une fiche, ses RDV à venir et passés, ses liens.
+- `GET /api/people/:id` : une fiche, ses RDV à venir et passés, ses liens, ses visios (`calls`) et les événements où elle est invitée (`events`).
 - `GET /api/links?from=<adresse>` ou `?eventId=<id>` ; `POST /api/links { from | eventId, target, title? }` ; `DELETE /api/links/:id`.
 - `GET /api/v1/resolve?address=media://alfred/…`
+- API v1 en lecture (calendriers, événements, occupation, réservations) et flux iCalendar : voir [API.md](API.md).
 
 ## Reste à faire (phase 4)
 
-- Une seule table de réglages (ANT-298), à faire après la fusion des PR 4 et 6 qui en ajoutent.
-- Participants visio et invités iCloud reliés aux Personnes (ANT-300), distribution du journal (ALFRED-308), API v1 complète.
+- Distribution du journal (ALFRED-308).
+- Participations : un passage de moins d'une minute entre deux relevés n'est pas gardé, et plusieurs invités d'une même salle de rendez-vous sont tous reliés à la personne qui a réservé.
 - Côté Cairn : bouton « Note de réunion » qui crée la note et le lien d'un coup (ANT-175).

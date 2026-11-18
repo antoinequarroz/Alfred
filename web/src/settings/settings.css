@@ -62,3 +62,9 @@
   .cx-form .bk-savebar > span { flex-basis: 100%; }
 }
 .cx-data a.btn { display: inline-flex; align-items: center; text-decoration: none; }
+
+/* Accès à l'agenda : jeton tout juste créé, liste des accès. */
+.cx-created { margin-bottom: 12px; display: grid; gap: 6px; }
+.bk-list.cx-tokens { margin-bottom: 16px; border-bottom: 1px solid var(--line-soft); }
+.cx-token { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.cx-token .pp-what { display: grid; gap: 2px; min-width: 0; }

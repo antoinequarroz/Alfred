@@ -5,6 +5,7 @@ import type {
   PaymentSettingsInput, PaymentSettingsState,
   PushPrefs, PushState, PushTestResult, SmtpSaveResult, SmtpSettingsInput, SyncStatus, VideoAdminState, VideoRoom, VideoRoomInput, VideoSettings,
   LinkInfo, PersonDetail, PersonSummary,
+  ApiToken, ApiTokenCreated, ApiTokenKind,
 } from '../../shared/types';
 
 import { ApiError, requestJson } from './http';
@@ -108,4 +109,11 @@ export const peopleApi = {
     request<LinkInfo[]>('GET', `/api/links?${'from' in source ? `from=${encodeURIComponent(source.from)}` : `eventId=${encodeURIComponent(source.eventId)}`}`),
   addLink: (source: LinkSource, target: string, title = '') => request<LinkInfo>('POST', '/api/links', { ...source, target, title }),
   removeLink: (id: string) => request<{ ok: true }>('DELETE', `/api/links/${encodeURIComponent(id)}`),
+};
+
+/** Jetons de l'API v1 et des flux iCalendar (Réglages > Accès à l'agenda). */
+export const tokensApi = {
+  list: () => request<ApiToken[]>('GET', '/api/tokens'),
+  create: (name: string, kind: ApiTokenKind, calendarId?: string) => request<ApiTokenCreated>('POST', '/api/tokens', { name, kind, calendarId }),
+  remove: (id: string) => request<{ ok: true }>('DELETE', `/api/tokens/${encodeURIComponent(id)}`),
 };

@@ -689,6 +689,37 @@ export interface PersonDetail extends PersonSummary {
   upcoming: Booking[];
   past: Booking[];
   links: LinkInfo[];
+  /** Ses passages en visio (salles de ses rendez-vous), du plus récent au plus ancien. */
+  calls: PersonCall[];
+  /** Événements de l'agenda où elle est invitée (reconnue par son e-mail), du plus récent au plus ancien. */
+  events: PersonEvent[];
+}
+
+/** Un passage d'une personne dans une salle de visio (table video_participations). */
+export interface PersonCall {
+  id: string;
+  roomId: string;
+  /** Titre de la salle (celui du rendez-vous). */
+  title: string;
+  /** Nom donné en entrant. */
+  name: string;
+  /** Instant ISO de l'arrivée (jeton d'entrée remis). */
+  joinedAt: string;
+  /** Instant ISO du départ ; null tant qu'elle est dans la salle. */
+  leftAt: string | null;
+}
+
+/** Un événement de l'agenda dont la personne est invitée (ligne ATTENDEE avec son e-mail). */
+export interface PersonEvent {
+  eventId: string;
+  calendarId: string;
+  title: string;
+  /** Début (de la première occurrence pour une série), instant ISO. */
+  start: string;
+  end: string;
+  recurring: boolean;
+  /** Sa réponse : ACCEPTED, DECLINED, TENTATIVE, NEEDS-ACTION, '' si inconnue. */
+  partstat: string;
 }
 
 /** Un lien d'un objet d'Alfred vers un autre objet de la suite (note Cairn…) ou une page web. */
@@ -716,4 +747,53 @@ export interface ResolvedAddress {
   title: string;
   /** Page d'Alfred qui montre l'objet. */
   url: string;
+}
+
+// ---------------------------------------------------------------------------
+// API v1 en lecture et flux iCalendar (phase 4, ALFRED-303). Voir docs/API.md.
+
+/** api : lecture de l'API v1 (en-tête Authorization) ; feed : abonnement au flux .ics d'un calendrier. */
+export type ApiTokenKind = 'api' | 'feed';
+
+export interface ApiToken {
+  id: string;
+  name: string;
+  kind: ApiTokenKind;
+  /** Calendrier partagé par un jeton de flux, null pour un jeton d'API. */
+  calendarId: string | null;
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+/** Réponse à la création : la seule fois où le jeton en clair est donné. */
+export interface ApiTokenCreated extends ApiToken {
+  token: string;
+  /** Chemin du flux (/api/v1/feeds/<jeton>.ics) pour un jeton de flux, null sinon. */
+  feedPath: string | null;
+}
+
+/** Une occurrence d'événement, telle que l'API v1 la donne (récurrences développées). */
+export interface ApiV1Event {
+  /** Identifiant de l'événement dans Alfred (stable tant qu'il reste dans son calendrier). */
+  id: string;
+  /** Adresse stable : media://alfred/event/<UID iCalendar>. */
+  address: string;
+  /** Identifiant de l'occurrence pour une série (RECURRENCE-ID), null sinon. */
+  occurrenceId: string | null;
+  calendarId: string;
+  title: string;
+  /** Instant ISO UTC, ou date AAAA-MM-JJ pour une journée entière (fin exclusive). */
+  start: string;
+  end: string;
+  allDay: boolean;
+  location: string;
+  description: string;
+  recurring: boolean;
+}
+
+/** Une période occupée de l'agenda (calendriers qui bloquent la prise de rendez-vous), sans détail. */
+export interface ApiV1Busy {
+  start: string;
+  end: string;
+  allDay: boolean;
 }

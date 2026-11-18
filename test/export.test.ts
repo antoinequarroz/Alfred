@@ -9,6 +9,7 @@ import { openDb } from '../server/db.js';
 import { EXPORT_FORMAT, EXPORT_VERSION, EXPORTED_TABLES, NOT_EXPORTED, type AlfredExport } from '../server/export.js';
 import { hashPassword } from '../server/password.js';
 import { CalendarService } from '../server/service.js';
+import { Settings } from '../server/settings.js';
 import { Store } from '../server/store.js';
 
 const PASSWORD = 'correct horse battery';
@@ -64,16 +65,20 @@ async function fill(ctx: Ctx) {
   expect((await ctx.admin('/api/links', 'POST', { from: `media://alfred/person/${people[0].id}`, target: 'https://cairn.example.ch/notes/abc', title: 'Note' })).status).toBe(201);
   const db = ctx.store.db;
   db.prepare(`INSERT INTO video_rooms (id, slug, title, kind, starts_at, ends_at, created_at) VALUES ('r1', 'abc-def-ghi', 'Réunion', 'event', '2026-11-20T10:00:00.000Z', '2026-11-20T11:00:00.000Z', '2026-11-15T11:00:00.000Z')`).run();
-  db.prepare(`INSERT INTO video_settings (key, value) VALUES ('quality', '"eco"')`).run();
+  new Settings(db, 'video').set('quality', '"eco"');
   db.prepare(`INSERT INTO payment_holds (id, ref_hash, status, type_name, mode, start_utc, end_utc, name, email, token_hash, cancel_token, amount_cents, currency, created_at, expires_at)
     VALUES ('h1', 'ref', 'expired', 'Consultation', 'cabinet', '2026-11-17T08:00:00.000Z', '2026-11-17T08:30:00.000Z', 'Paul', 'paul@example.org', 'th', 'JETON-EN-CLAIR', 5000, 'chf', '2026-11-15T11:00:00.000Z', '2026-11-15T11:30:00.000Z')`).run();
   // Secrets et données propres à cette installation : jamais exportés.
   const now = '2026-11-15T11:00:00.000Z';
   // Valeur factice, repérable dans le fichier d'export si elle y passait.
   const fakeSecret = ['MOT', 'DE', 'PASSE'].join('-');
-  db.prepare('INSERT INTO connection_settings (key, value, secret, updated_at) VALUES (?, ?, 0, ?), (?, ?, 1, ?)')
-    .run('smtp.host', 'mail.example.ch', now, 'smtp.password', `chiffré:${fakeSecret}`, now);
-  db.prepare(`INSERT INTO push_settings (key, value) VALUES ('vapid', '{"privateKey":"CLE-PRIVEE"}'), ('since', '"2026-11-01T00:00:00.000Z"'), ('prefs', '{"cancellation":true}')`).run();
+  const connections = new Settings(db, 'connections');
+  connections.set('smtp.host', 'mail.example.ch');
+  connections.set('smtp.password', `chiffré:${fakeSecret}`, true);
+  const push = new Settings(db, 'push');
+  push.set('vapid', '{"privateKey":"CLE-PRIVEE"}', true);
+  push.set('since', '"2026-11-01T00:00:00.000Z"');
+  push.set('prefs', '{"cancellation":true}');
   db.prepare(`INSERT INTO push_subscriptions (id, endpoint, p256dh, auth, label, created_at) VALUES ('p1', 'https://push.example/1', 'P256', 'AUTH-SECRET', 'iPhone', ?)`).run(now);
 }
 
@@ -106,8 +111,12 @@ describe('export et import des données (ALFRED-304)', () => {
     ]);
     expect(data.tables.people.map((p) => p.email)).toEqual(expect.arrayContaining(['elodie@example.org', 'marc@example.org']));
     expect(data.tables.outbox.length).toBeGreaterThanOrEqual(3);
-    expect(data.tables.connection_settings.map((r) => r.key)).toEqual(['smtp.host']);
-    expect(data.tables.push_settings.map((r) => r.key)).toEqual(['prefs']);
+    const keys = (module: string) => data.tables.settings.filter((r) => r.module === module).map((r) => r.key);
+    expect(keys('connections')).toEqual(['smtp.host']);
+    expect(keys('push')).toEqual(['prefs']);
+    expect(keys('video')).toEqual(['quality']);
+    expect(keys('booking')).toEqual(expect.arrayContaining(['enabled', 'public_name', 'reminder_hours']));
+    expect(data.tables).not.toHaveProperty('connection_settings');
     expect(data.tables.payment_holds[0].cancel_token).toBeNull();
     for (const secret of ['MOT-DE-PASSE', 'CLE-PRIVEE', 'AUTH-SECRET', 'JETON-EN-CLAIR', 'push.example']) expect(text).not.toContain(secret);
     expect(data.tables).not.toHaveProperty('sessions');
@@ -141,7 +150,9 @@ describe('export et import des données (ALFRED-304)', () => {
     const maxSeq = (target.store.db.prepare('SELECT MAX(seq) AS s FROM outbox').get() as { s: number }).s;
     expect(target.store.db.prepare("SELECT seq FROM outbox_readers WHERE reader = 'push'").get()).toEqual({ seq: maxSeq });
     // Les secrets de la cible restent les siens.
-    expect(target.store.db.prepare("SELECT COUNT(*) AS n FROM connection_settings WHERE secret = 1").get()).toEqual({ n: 0 });
+    expect(target.store.db.prepare("SELECT COUNT(*) AS n FROM settings WHERE secret = 1").get()).toEqual({ n: 0 });
+    // Les réglages importés sont aussi recopiés dans les anciennes tables (retour arrière).
+    expect(target.store.db.prepare("SELECT value FROM booking_settings WHERE key = 'public_name'").get()).toEqual({ value: 'Antoine Q.' });
   });
 
   it('refuse un Alfred qui contient déjà des données, sans rien changer', async () => {
@@ -177,6 +188,24 @@ describe('export et import des données (ALFRED-304)', () => {
     const broken = { ...good, tables: { booking_types: [{ id: 't1', slug: 'x', name: 'X', duration_min: 30 }, { id: 't2', slug: 'x', name: 'Y', duration_min: 30 }] } };
     expect((await ctx.admin('/api/import', 'POST', broken)).status).toBe(400);
     expect(ctx.store.db.prepare('SELECT COUNT(*) AS n FROM booking_types').get()).toEqual({ n: 0 });
+  });
+
+  it('importe aussi un export d’avant la table de réglages (anciennes tables)', async () => {
+    const source = await setup();
+    await fill(source);
+    const data = (await (await source.admin('/api/export')).json()) as AlfredExport;
+    const { settings, ...tables } = data.tables;
+    const legacy = (module: string) => settings.filter((r) => r.module === module).map((r) => ({ key: r.key, value: r.value }));
+    const old = {
+      ...data, schemaVersion: 6,
+      tables: { ...tables, booking_settings: legacy('booking'), video_settings: legacy('video'),
+        connection_settings: legacy('connections').map((r) => ({ ...r, secret: 0, updated_at: '2026-11-15T11:00:00.000Z' })),
+        push_settings: [...legacy('push'), { key: 'vapid', value: '{"privateKey":"x"}' }] },
+    };
+    const target = await setup();
+    expect((await target.admin('/api/import', 'POST', old)).status).toBe(200);
+    const after = (await (await target.admin('/api/export')).json()) as AlfredExport;
+    expect(after.tables.settings).toEqual(settings);
   });
 
   it('garde l’export et l’import derrière la connexion', async () => {

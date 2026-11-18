@@ -124,9 +124,10 @@ describe('espaces : une donnée d’un autre espace n’est jamais visible', () 
     mine.saveSettings({ ...settings, publicName: 'Antoine Quarroz', enabled: true });
     other.saveSettings({ ...settings, publicName: 'Quelqu’un d’autre', enabled: false });
     expect(mine.getSettings({ publicName: '' })).toMatchObject({ publicName: 'Antoine Quarroz', enabled: true });
-    // Les tables de réglages gardent pour l'instant une clé unique dans toute la base (docs/DONNEES.md) :
-    // l'autre espace ne peut pas encore y écrire les siens, mais ne lit et n'écrase jamais ceux d'Antoine.
-    expect(other.getSettings({ publicName: 'défaut' }).publicName).toBe('défaut');
+    // Table settings (ALFRED-298) : chaque espace a ses propres réglages.
+    expect(other.getSettings({ publicName: 'défaut' })).toMatchObject({ publicName: 'Quelqu’un d’autre', enabled: false });
+    // L'ancienne table, gardée pour le retour arrière, reste celle d'Antoine.
+    expect(db.prepare("SELECT value, space_id FROM booking_settings WHERE key = 'public_name'").get()).toEqual({ value: 'Antoine Quarroz', space_id: DEFAULT_SPACE_ID });
   });
 
   it('la garde refuse une requête sans filtre d’espace', () => {

@@ -40,7 +40,7 @@ export function isInstant(value: unknown): value is string {
 export const INSTANT_COLUMNS: Record<string, readonly string[]> = {
   spaces: ['created_at'],
   schema_migrations: ['applied_at'],
-  events: ['start_at', 'end_at', 'recur_end_at', 'modified_at'],
+  events: ['start_at', 'end_at', 'recur_end_at', 'modified_at', 'attendees_at'],
   sessions: ['expires_at'],
   bookings: ['start_utc', 'end_utc', 'created_at', 'cancelled_at', 'notified_start', 'reminder_ref'],
   booking_tokens: ['created_at'],
@@ -53,6 +53,9 @@ export const INSTANT_COLUMNS: Record<string, readonly string[]> = {
   payment_holds: ['start_utc', 'end_utc', 'created_at', 'expires_at'],
   outbox: ['occurred_at'],
   outbox_readers: ['updated_at'],
+  settings: ['updated_at'],
+  video_participations: ['joined_at', 'seen_at', 'left_at'],
+  api_tokens: ['created_at', 'last_used_at'],
 };
 
 /** Anciennes colonnes en millisecondes → colonne ISO qui les remplace. Écrites, plus lues. */

@@ -6,6 +6,7 @@ import {
 import { tx, type Db } from '../db.js';
 import { upsertPerson } from '../migrations.js';
 import type { Param } from '../sql.js';
+import { Settings } from '../settings.js';
 import { recordFact } from '../outbox.js';
 
 /** Détails d'une réservation repris dans les faits du journal (jamais l'e-mail ni le téléphone). */
@@ -149,8 +150,7 @@ export class BookingStore {
   // --- réglages ------------------------------------------------------------
 
   getSettings(defaults: { publicName: string }): BookingSettings {
-    const rows = this.db.all<{ key: string; value: string }>('SELECT key, value FROM booking_settings WHERE space_id = ?', this.space);
-    const map = new Map(rows.map((r) => [r.key, r.value]));
+    const map = new Settings(this.db, 'booking').all();
     const step = Number(map.get('slot_step_min'));
     const reminders = map.has('reminder_hours') ? parseReminderHours(map.get('reminder_hours')) : [24, 1];
     const notice = Number(map.get('change_notice_hours') ?? 0);
@@ -169,11 +169,8 @@ export class BookingStore {
   }
 
   saveSettings(s: BookingSettings): void {
-    // La clé reste unique pour toute la base (schéma d'origine) : la clause WHERE empêche
-    // d'écrire sur la ligne d'un autre espace.
-    const set = { run: (key: string, value: string) => this.db.run(
-      `INSERT INTO booking_settings (key, value, space_id) VALUES (?, ?, ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE booking_settings.space_id = excluded.space_id`, key, value, this.space) };
+    const settings = new Settings(this.db, 'booking');
+    const set = { run: (key: string, value: string) => settings.set(key, value) };
     tx(this.db, () => {
       set.run('enabled', s.enabled ? '1' : '0');
       set.run('public_name', s.publicName);
@@ -353,6 +350,12 @@ export class BookingStore {
   listUpcoming(nowIso: string, limit: number): BookingRow[] {
     return this.db.all<BookingRow>(
       "SELECT * FROM bookings WHERE space_id = ? AND status = 'confirmed' AND end_utc > ? ORDER BY start_utc, id LIMIT ?", this.space, nowIso, limit);
+  }
+
+  /** Réservations (annulées comprises) qui chevauchent une période, par date croissante. */
+  listBetween(fromIso: string, toIso: string, limit: number): BookingRow[] {
+    return this.db.all<BookingRow>(
+      'SELECT * FROM bookings WHERE space_id = ? AND start_utc < ? AND end_utc > ? ORDER BY start_utc, id LIMIT ?', this.space, toIso, fromIso, limit);
   }
 
   /** Passées ou annulées, de la plus récente à la plus ancienne. */

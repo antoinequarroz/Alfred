@@ -1,3 +1,4 @@
+import { Settings } from '../settings.js';
 import { randomBytes } from 'node:crypto';
 import { ALL_SPACES } from '../sql.js';
 import { recordFact } from '../outbox.js';
@@ -101,6 +102,11 @@ const WAIT_MAX_TOTAL = 300;
 const WAIT_MAX_PER_IP = 3;
 /** La présence de l'hôte dans une salle est relue au plus toutes les 5 secondes. */
 const HOST_CACHE_MS = 5_000;
+/**
+ * Participations : une personne absente de la salle depuis ce délai est notée partie (passage
+ * toutes les minutes, coupure réseau brève tolérée).
+ */
+const LEAVE_GRACE_MS = 120_000;
 const DEFAULTS: VideoSettings = { enabled: true, maxParticipants: 4, quality: 'standard', waitingRoom: true };
 
 /** Un invité qui patiente : il n'est pas connecté au serveur de visio tant que l'hôte ne l'a pas fait entrer. */
@@ -206,9 +212,9 @@ export class VideoService {
   // --- réglages ------------------------------------------------------------
 
   getSettings(): VideoSettings {
-    const rows = this.db.all<{ key: string; value: string }>('SELECT key, value FROM video_settings WHERE space_id = ? ORDER BY key', this.db.spaceId);
     const out: VideoSettings = { ...DEFAULTS };
-    for (const r of rows) {
+    for (const [key, value] of new Settings(this.db, 'video').all()) {
+      const r = { key, value };
       try {
         const v = JSON.parse(r.value) as unknown;
         if (r.key === 'enabled' && typeof v === 'boolean') out.enabled = v;
@@ -245,12 +251,10 @@ export class VideoService {
       else fields.waitingRoom = 'Valeur invalide';
     }
     if (Object.keys(fields).length > 0) throw new VideoError(400, 'invalid', Object.values(fields)[0], fields);
-    for (const [key, value] of Object.entries(patch)) {
-      this.db.run(
-        `INSERT INTO video_settings (key, value, space_id) VALUES (?, ?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE video_settings.space_id = excluded.space_id`,
-        key, JSON.stringify(value), this.db.spaceId);
-    }
+    const settings = new Settings(this.db, 'video');
+    this.db.tx(() => {
+      for (const [key, value] of Object.entries(patch)) settings.set(key, JSON.stringify(value));
+    });
     return this.getSettings();
   }
 
@@ -576,7 +580,83 @@ export class VideoService {
       throw new VideoError(503, 'server_unavailable', 'Le serveur de visio ne répond pas. Réessayez dans un instant.');
     }
     if (!isHost) this.guestArrived(row, name, false);
+    this.recordJoin(row, identity, name, isHost);
     return this.issue(room, identity, name, isHost, settings.quality);
+  }
+
+  // --- participations (ALFRED-300) ------------------------------------------
+
+  /**
+   * Note l'arrivée d'une personne dans une salle, quand Alfred lui remet son jeton d'entrée. Une
+   * participation encore ouverte pour la même identité (l'hôte qui change d'appareil, un jeton
+   * redemandé) est reprise. Un invité d'une salle de rendez-vous est relié à la fiche de la
+   * personne qui a réservé. Ne lève pas : la visio passe avant l'historique.
+   */
+  private recordJoin(row: RoomRow, identity: string, name: string, isHost: boolean): void {
+    try {
+      const open = this.db.get<{ id: string }>(
+        'SELECT id FROM video_participations WHERE space_id = ? AND room_id = ? AND identity = ? AND left_at IS NULL',
+        this.db.spaceId, row.id, identity);
+      if (open) {
+        this.db.run('UPDATE video_participations SET name = ? WHERE id = ? AND space_id = ?', name, open.id, this.db.spaceId);
+        return;
+      }
+      const personId = !isHost && row.kind === 'booking' && row.booking_id
+        ? this.db.get<{ person_id: string | null }>('SELECT person_id FROM bookings WHERE id = ? AND space_id = ?', row.booking_id, this.db.spaceId)?.person_id ?? null
+        : null;
+      const now = this.now();
+      this.db.run(
+        `INSERT INTO video_participations (id, space_id, room_id, identity, role, name, person_id, joined_at, seen_at, left_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+        uuidv7(now.getTime()), this.db.spaceId, row.id, identity, isHost ? 'host' : 'guest', name, personId, now.toISOString());
+    } catch (err) {
+      console.error('[alfred] visio : arrivée non notée :', err);
+    }
+  }
+
+  /**
+   * Passage régulier (toutes les minutes) : compare les participations ouvertes avec les personnes
+   * connectées au serveur de visio. Présente : seen_at avance. Absente depuis LEAVE_GRACE_MS : partie
+   * (left_at = dernière présence vue), ou effacée si elle ne s'est jamais connectée (jeton inutilisé).
+   * Une salle fermée clôt ses participations. Renvoie le nombre de participations closes ou effacées.
+   */
+  async sweepParticipations(): Promise<number> {
+    if (!this.available) return 0;
+    const open = this.db.all<{ id: string; room_id: string; identity: string; joined_at: string; seen_at: string | null }>(
+      'SELECT id, room_id, identity, joined_at, seen_at FROM video_participations WHERE space_id = ? AND left_at IS NULL ORDER BY room_id, joined_at, id',
+      this.db.spaceId);
+    const byRoom = new Map<string, typeof open>();
+    for (const p of open) byRoom.set(p.room_id, [...(byRoom.get(p.room_id) ?? []), p]);
+    let changed = 0;
+    for (const [roomId, list] of byRoom) {
+      const row = this.byId(roomId);
+      let present: Set<string>;
+      if (!row || row.closed_at) {
+        present = new Set();
+      } else {
+        try {
+          present = new Set((await this.backend!.listParticipants(this.livekitName(row))).map((p) => p.identity));
+        } catch {
+          continue; // serveur de visio injoignable : on réessaiera au prochain passage
+        }
+      }
+      const now = this.now();
+      for (const p of list) {
+        if (present.has(p.identity)) {
+          this.db.run('UPDATE video_participations SET seen_at = ? WHERE id = ? AND space_id = ?', now.toISOString(), p.id, this.db.spaceId);
+          continue;
+        }
+        const last = Date.parse(p.seen_at ?? p.joined_at);
+        if (row && !row.closed_at && now.getTime() - last < LEAVE_GRACE_MS) continue;
+        if (p.seen_at) {
+          this.db.run('UPDATE video_participations SET left_at = seen_at WHERE id = ? AND space_id = ?', p.id, this.db.spaceId);
+        } else {
+          this.db.run('DELETE FROM video_participations WHERE id = ? AND space_id = ?', p.id, this.db.spaceId);
+        }
+        changed++;
+      }
+    }
+    return changed;
   }
 
   private guestArrived(row: RoomRow, name: string, waiting: boolean): void {
@@ -697,6 +777,7 @@ export class VideoService {
       const held = this.pending.get(room);
       if (held?.has(w.identity)) held.set(w.identity, w.until);
     }
+    this.recordJoin(row, w.identity, w.name, false);
     return { state: 'admitted', join: this.issue(room, w.identity, w.name, false, this.getSettings().quality) };
   }
 

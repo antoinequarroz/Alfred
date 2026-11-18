@@ -1,3 +1,4 @@
+import { Settings } from '../settings.js';
 import type { ConnectionTest, PaymentSettingsInput, PaymentSettingsState } from '../../shared/types.js';
 import type { Db } from '../db.js';
 import { SecretKeyError, type SecretBox } from '../secrets.js';
@@ -6,7 +7,7 @@ import { keyMode, STRIPE_API, STRIPE_KEY_RE, StripeClient, StripeError, type Fet
 /**
  * Réglages du paiement en ligne (Stripe), modifiables depuis l'app : clé secrète (chiffrée,
  * jamais renvoyée), TWINT, règle de remboursement. Rangés avec les autres connexions
- * (table connection_settings, préfixe « stripe. »).
+ * (table settings, module « connections », préfixe « stripe. »).
  */
 
 export const CURRENCY = 'CHF';
@@ -53,19 +54,15 @@ export class PaymentsService {
   }
 
   private row(key: string): string | undefined {
-    return this.db.get<{ value: string }>('SELECT value FROM connection_settings WHERE key = ? AND space_id = ?', key, this.db.spaceId)?.value;
+    return new Settings(this.db, 'connections').get(key);
   }
 
   private put(key: string, value: string, secret = false): void {
-    this.db.run(
-      `INSERT INTO connection_settings (key, value, secret, updated_at, space_id) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value, secret = excluded.secret, updated_at = excluded.updated_at
-       WHERE connection_settings.space_id = excluded.space_id`,
-      key, value, secret ? 1 : 0, new Date().toISOString(), this.db.spaceId);
+    new Settings(this.db, 'connections').set(key, value, secret);
   }
 
   private drop(key: string): void {
-    this.db.run('DELETE FROM connection_settings WHERE key = ? AND space_id = ?', key, this.db.spaceId);
+    new Settings(this.db, 'connections').delete(key);
   }
 
   /** Clé secrète en clair, ou null (absente ou indéchiffrable). */

@@ -1,3 +1,4 @@
+import { Settings } from './settings.js';
 import type {
   CaldavConnectionState, CaldavSaveResult, ConnectionField, ConnectionSecret, ConnectionsState, ConnectionTest,
   SettingSource, SmtpConnectionState, SmtpSaveResult,
@@ -13,7 +14,7 @@ import type { Store } from './store.js';
 /**
  * Réglages de connexion (SMTP et CalDAV) modifiables depuis l'app.
  *
- * Priorité, réglage par réglage : valeur enregistrée dans l'app (table connection_settings),
+ * Priorité, réglage par réglage : valeur enregistrée dans l'app (table settings, module « connections »),
  * sinon variable d'environnement (fichier .env), sinon valeur par défaut. Les mots de passe
  * sont chiffrés en base et ne ressortent jamais : ni dans l'état renvoyé à l'app, ni dans
  * une erreur, ni dans un journal.
@@ -151,24 +152,25 @@ export class ConnectionsService {
 
   // --- lecture -------------------------------------------------------------
 
+  /** Réglages enregistrés dans l'app (module « connections » de la table settings). */
+  private get settings(): Settings {
+    return new Settings(this.db, 'connections');
+  }
+
   private row(key: string): string | undefined {
-    return this.db.get<{ value: string }>('SELECT value FROM connection_settings WHERE key = ? AND space_id = ?', key, this.db.spaceId)?.value;
+    return this.settings.get(key);
   }
 
   private put(key: string, value: string, secret = false): void {
-    this.db.run(
-      `INSERT INTO connection_settings (key, value, secret, updated_at, space_id) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value, secret = excluded.secret, updated_at = excluded.updated_at
-       WHERE connection_settings.space_id = excluded.space_id`,
-      key, value, secret ? 1 : 0, new Date().toISOString(), this.db.spaceId);
+    this.settings.set(key, value, secret);
   }
 
   private drop(key: string): void {
-    this.db.run('DELETE FROM connection_settings WHERE key = ? AND space_id = ?', key, this.db.spaceId);
+    this.settings.delete(key);
   }
 
   private hasAppValues(group: 'smtp' | 'caldav'): boolean {
-    return Boolean(this.db.get('SELECT 1 AS ok FROM connection_settings WHERE key LIKE ? AND space_id = ? LIMIT 1', `${group}.%`, this.db.spaceId));
+    return this.settings.hasPrefix(`${group}.`);
   }
 
   private field(key: string, envValue: string | undefined, fallback?: string): ConnectionField {
@@ -471,7 +473,7 @@ export class ConnectionsService {
     if (field) {
       this.drop(`smtp.${field}`);
       if (field === 'password') this.drop(SMTP_PASSWORD_FOR);
-    } else this.db.run("DELETE FROM connection_settings WHERE key LIKE 'smtp.%' AND space_id = ?", this.db.spaceId);
+    } else this.settings.deletePrefix('smtp.');
     this.cachedMailer = null;
     this.setSmtpTest(null);
     console.log(`[alfred] réglages d’envoi des e-mails retirés de l’app (${field ?? 'tous'})`);
@@ -751,7 +753,7 @@ export class ConnectionsService {
         throw new ConnectionError(422, 'connection_failed', `Les identifiants du fichier .env ne fonctionnent pas. ${result.message} Rien n’a été modifié : la configuration de l’app reste active.`, undefined, result.code);
       }
       const test = this.caldavTestResult(result, true);
-      this.db.run("DELETE FROM connection_settings WHERE key LIKE 'caldav.%' AND space_id = ?", this.db.spaceId);
+      this.settings.deletePrefix('caldav.');
       console.log('[alfred] identifiants de calendrier retirés de l’app : retour à ceux du fichier .env');
       this.applyCaldav();
       return { state: this.state(), test, warning: null };
