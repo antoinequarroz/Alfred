@@ -65,6 +65,7 @@ export const NOT_EXPORTED: Record<string, string> = {
   connection_settings: 'ancienne copie des réglages (retour arrière), voir la table settings',
   push_settings: 'ancienne copie des réglages (retour arrière), voir la table settings',
   event_attendees: 'copie des invités tirée des événements (ATTENDEE), refaite à l’import',
+  api_tokens: 'jetons d’accès à l’API et aux flux, propres à cette installation (à recréer)',
 };
 
 /** Tables qui doivent être vides pour accepter un import (les réglages, eux, sont remplacés). */
@@ -264,7 +265,7 @@ function importedSettings(data: AlfredExport): { module: SettingsModule; key: st
  * Tout le calendrier de l'espace en un seul fichier .ics (iCalendar), lisible par Apple
  * Calendrier, Google Agenda, Outlook… calendarId : un seul calendrier.
  */
-export function exportIcs(db: Sql, calendarId?: string): string {
+export function exportIcs(db: Sql, calendarId?: string, feed?: { name: string; refreshMinutes: number }): string {
   const rows = db.all<{ ics: string; calendar_id: string }>(
     `SELECT ics, calendar_id FROM events WHERE space_id = ?${calendarId ? ' AND calendar_id = ?' : ''} ORDER BY start_at, id`,
     ...(calendarId ? [db.spaceId, calendarId] : [db.spaceId]));
@@ -272,6 +273,14 @@ export function exportIcs(db: Sql, calendarId?: string): string {
   out.addPropertyWithValue('version', '2.0');
   out.addPropertyWithValue('prodid', '-//Alfred//Calendrier//FR');
   out.addPropertyWithValue('calscale', 'GREGORIAN');
+  if (feed) {
+    // Flux d'abonnement : nom affiché et fréquence de relecture conseillée (Apple Calendrier, Outlook).
+    out.addPropertyWithValue('x-wr-calname', feed.name);
+    out.addPropertyWithValue('name', feed.name);
+    const refresh = out.addPropertyWithValue('refresh-interval', `PT${feed.refreshMinutes}M`);
+    refresh.setParameter('value', 'DURATION');
+    out.addPropertyWithValue('x-published-ttl', `PT${feed.refreshMinutes}M`);
+  }
   const zones = new Map<string, ICAL.Component>();
   const events: ICAL.Component[] = [];
   for (const row of rows) {

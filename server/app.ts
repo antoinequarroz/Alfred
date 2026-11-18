@@ -12,6 +12,8 @@ import { CALLBACK_PATH, finishSignIn, PENDING_COOKIE, PENDING_MAX_AGE, START_PAT
 import { ConnectionError, type ConnectionsService } from './connections.js';
 import { DEFAULT_CONNECTION_LIMITS, registerConnectionRoutes, type ConnectionLimits } from './connections-routes.js';
 import { registerExportRoutes, IMPORT_MAX_BYTES } from './export-routes.js';
+import { ApiTokens, TokenError } from './api-tokens.js';
+import { registerApiV1Guard, registerApiV1Routes, registerTokenRoutes, V1Error } from './api-v1.js';
 import { IcsError } from './ics.js';
 import { verifyPassword } from './password.js';
 import { registerPushRoutes } from './push/routes.js';
@@ -54,6 +56,8 @@ export interface AppDeps {
   push?: PushService;
   /** Annuaire des personnes et liens. Par défaut : construit sur la même base, Cairn à son adresse habituelle. */
   people?: PeopleService;
+  /** Jetons de l'API v1 et des flux iCalendar. Par défaut : sur la même base. */
+  tokens?: ApiTokens;
 }
 
 class BadRequest extends Error {}
@@ -151,6 +155,7 @@ export function createApp(deps: AppDeps): Hono {
     if (err instanceof PushError) return c.json({ error: err.message, code: err.code }, err.status);
     if (err instanceof VideoError) return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}) }, err.status);
     if (err instanceof PaymentSettingsError) return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}) }, err.status);
+    if (err instanceof V1Error || err instanceof TokenError) return c.json({ error: err.message, code: err.code, ...(err instanceof TokenError && err.fields ? { fields: err.fields } : {}) }, err.status);
     if (err instanceof PeopleError) return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}) }, err.status);
     if (err instanceof BookingError) return c.json({ error: err.message, code: err.code, ...(err.fields ? { fields: err.fields } : {}) }, err.status);
     if (err instanceof ConnectionError) {
@@ -246,10 +251,20 @@ export function createApp(deps: AppDeps): Hono {
 
   app.get('/api/me', (c) => c.json({ authenticated: authed(c), compte: Boolean(compte) }));
 
+  // API v1 en lecture : session ou jeton d'API (server/api-v1.ts), flux iCalendar par jeton de flux.
+  const tokens = deps.tokens ?? new ApiTokens(store.db);
+  const v1 = { store, booking, tokens, authed };
+  registerApiV1Guard(app, v1);
+  registerApiV1Routes(app, v1);
+
   app.use('/api/*', async (c, next) => {
+    // /api/v1 a sa propre garde (session ou jeton), placée plus haut.
+    if (c.req.path.startsWith('/api/v1/') || c.req.path === '/api/v1') return next();
     if (!authed(c)) return c.json({ error: 'Non connecté' }, 401);
     await next();
   });
+
+  registerTokenRoutes(app, tokens);
 
   // --- personnes et liens (phase 4) ------------------------------------------
 

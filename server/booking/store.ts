@@ -352,6 +352,12 @@ export class BookingStore {
       "SELECT * FROM bookings WHERE space_id = ? AND status = 'confirmed' AND end_utc > ? ORDER BY start_utc, id LIMIT ?", this.space, nowIso, limit);
   }
 
+  /** Réservations (annulées comprises) qui chevauchent une période, par date croissante. */
+  listBetween(fromIso: string, toIso: string, limit: number): BookingRow[] {
+    return this.db.all<BookingRow>(
+      'SELECT * FROM bookings WHERE space_id = ? AND start_utc < ? AND end_utc > ? ORDER BY start_utc, id LIMIT ?', this.space, toIso, fromIso, limit);
+  }
+
   /** Passées ou annulées, de la plus récente à la plus ancienne. */
   listPast(nowIso: string, limit: number, offset: number): BookingRow[] {
     return this.db.all<BookingRow>(

@@ -319,6 +319,26 @@ export const MIGRATIONS: Migration[] = [
       db.exec('DROP TABLE video_participations');
     },
   },
+  {
+    version: 9,
+    name: 'jetons',
+    up(db) {
+      // Jetons de l'API v1 et des flux iCalendar (server/api-tokens.ts) : seule l'empreinte est gardée.
+      db.exec(`CREATE TABLE api_tokens (
+        id           TEXT PRIMARY KEY,
+        space_id     TEXT NOT NULL DEFAULT '${DEFAULT_SPACE_ID}',
+        name         TEXT NOT NULL,
+        kind         TEXT NOT NULL,           -- 'api' (lecture de /api/v1) | 'feed' (flux .ics d'un calendrier)
+        calendar_id  TEXT,
+        token_hash   TEXT NOT NULL UNIQUE,    -- SHA-256 du jeton, en hexadécimal
+        created_at   TEXT NOT NULL,
+        last_used_at TEXT
+      )`);
+    },
+    down(db) {
+      db.exec('DROP TABLE api_tokens');
+    },
+  },
 ];
 
 /** Fuseau d'Alfred tel que le lit server/config.ts, pour les lignes écrites avant ALFRED-296. */

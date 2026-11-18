@@ -130,6 +130,18 @@ export class Store {
 
   // --- événements --------------------------------------------------------
 
+  /** UID iCalendar de chaque événement demandé (adresses media://alfred/event/<uid>). */
+  uidsOf(ids: string[]): Map<string, string> {
+    const out = new Map<string, string>();
+    for (let i = 0; i < ids.length; i += 500) {
+      const chunk = ids.slice(i, i + 500);
+      const rows = this.db.all<{ id: string; uid: string }>(
+        `SELECT id, uid FROM events WHERE space_id = ? AND id IN (${chunk.map(() => '?').join(', ')})`, this.space, ...chunk);
+      for (const r of rows) out.set(r.id, r.uid);
+    }
+    return out;
+  }
+
   getEvent(id: string): EventRow | undefined {
     return this.db.get<EventRow>('SELECT id, calendar_id, href, etag, uid, ics FROM events WHERE id = ? AND space_id = ?', id, this.space);
   }
@@ -173,17 +185,17 @@ export class Store {
     this.changes++;
   }
 
-  /** Occurrences visibles sur une période. */
-  occurrences(from: Date, to: Date, calendarIds?: string[]): Occurrence[] {
+  /** Occurrences visibles sur une période (includeHidden : aussi celles des calendriers masqués). */
+  occurrences(from: Date, to: Date, calendarIds?: string[], includeHidden = false): Occurrence[] {
     const margin = 86_400_000; // journées entières indexées en heure locale
     const rows = this.db.all<{ id: string; calendar_id: string; ics: string }>(
       `SELECT e.id, e.calendar_id, e.ics FROM events e JOIN calendars c ON c.id = e.calendar_id AND c.space_id = e.space_id
-       WHERE e.space_id = ? AND c.visible = 1
+       WHERE e.space_id = ? AND (c.visible = 1 OR ? = 1)
          AND e.start_at < ?
          AND ((e.recurring = 0 AND e.end_at > ?)
            OR (e.recurring = 1 AND (e.recur_end_at IS NULL OR e.recur_end_at > ?)))
        ORDER BY e.start_at, e.id`,
-      this.space, toInstant(to.getTime() + margin), toInstant(from.getTime() - margin), toInstant(from.getTime() - margin));
+      this.space, includeHidden ? 1 : 0, toInstant(to.getTime() + margin), toInstant(from.getTime() - margin), toInstant(from.getTime() - margin));
     const allowed = calendarIds ? new Set(calendarIds) : null;
     const out: Occurrence[] = [];
     for (const row of rows) {

@@ -65,7 +65,7 @@ describe('migrations numérotées', () => {
     expect(schemaVersion(db)).toBe(LATEST);
     expect(migrateUp(db)).toEqual([]);
     const versions = (db.prepare('SELECT version, name FROM schema_migrations ORDER BY version').all() as unknown as { version: number; name: string }[]);
-    expect(versions.map((v) => v.name)).toEqual(['espaces', 'personnes', 'liens', 'acomptes', 'journal', 'instants', 'reglages', 'participations']);
+    expect(versions.map((v) => v.name)).toEqual(['espaces', 'personnes', 'liens', 'acomptes', 'journal', 'instants', 'reglages', 'participations', 'jetons']);
     db.close();
   });
 
@@ -120,7 +120,7 @@ describe('migrations numérotées', () => {
     const dir = mkdtempSync(join(tmpdir(), 'alfred-mig-'));
     const db = openDb(dir);
     oldBooking(db, 'b1', 'a@example.org', 'A', '2026-11-01T10:00:00.000Z');
-    expect(migrateDown(db, 0)).toEqual([8, 7, 6, 5, 4, 3, 2, 1]);
+    expect(migrateDown(db, 0)).toEqual([9, 8, 7, 6, 5, 4, 3, 2, 1]);
     expect(schemaVersion(db)).toBe(0);
     for (const t of ['people', 'links', 'spaces', 'payment_holds']) expect(userTables(db)).not.toContain(t);
     for (const table of userTables(db)) expect(columns(db, table), table).not.toContain('space_id');
@@ -129,7 +129,7 @@ describe('migrations numérotées', () => {
     expect(columns(db, 'bookings')).not.toContain('payment_status');
     expect(columns(db, 'booking_types')).not.toContain('deposit_cents');
     expect(db.prepare('SELECT id, email FROM bookings').all()).toEqual([{ id: 'b1', email: 'a@example.org' }]);
-    expect(migrateUp(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(migrateUp(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     expect(columns(db, 'payment_holds')).toContain('space_id');
     expect((db.prepare('SELECT COUNT(*) AS n FROM people').get() as { n: number }).n).toBe(1);
     db.close();

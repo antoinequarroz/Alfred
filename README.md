@@ -57,5 +57,6 @@ npm run build && npm start
 
 - [Architecture](docs/ARCHITECTURE.md) : comment c'est construit et comment la suite (RDV, visio) s'y branche
 - [API de la prise de rendez-vous](docs/API-RDV.md) : routes, formes JSON et codes d'erreur
+- [API v1 en lecture et flux iCalendar](docs/API.md) : jetons, calendriers, événements, occupation, réservations
 - [Déploiement sur le VPS](docs/DEPLOIEMENT.md) : pas à pas, avec le mot de passe d'application iCloud
 - [Audit de faisabilité](docs/AUDIT.md) : l'étude de départ

@@ -1566,6 +1566,12 @@ export class BookingService {
     return rows.map((r) => this.toBooking(r));
   }
 
+  /** Réservations (annulées comprises) qui chevauchent une période, par date croissante (API v1). */
+  bookingsBetween(from: Date, to: Date, limit = 1000): Booking[] {
+    this.reconcile();
+    return this.data.listBetween(from.toISOString(), to.toISOString(), limit).map((r) => this.toBooking(r));
+  }
+
   /** Réservations d'une fiche Personne : à venir (les plus proches d'abord) et passées ou annulées (les plus récentes d'abord). */
   bookingsForPerson(personId: string): { upcoming: Booking[]; past: Booking[] } {
     this.reconcile();

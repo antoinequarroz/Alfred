@@ -34,6 +34,7 @@ l'adresse de la note et le lien pour l'ouvrir.
 | 6 | instants | `events.start_at/end_at/recur_end_at/modified_at/tzid`, `sessions.expires_at`, `booking_hours.tzid`, textes ISO mis au format exact | retire les colonnes |
 | 7 | reglages | table `settings (space_id, module, key, value, secret, updated_at)`, reprise des quatre anciennes tables de réglages | retire la table |
 | 8 | participations | tables `video_participations` et `event_attendees`, colonne `events.attendees_at`, invités tirés des événements existants | retire les tables et la colonne |
+| 9 | jetons | table `api_tokens` (jetons de l'API v1 et des flux iCalendar, empreinte seulement) | retire la table |
 
 Règle : une migration n'enlève ni ne renomme rien de ce que lit le code précédent. Remettre
 l'image précédente d'Alfred fonctionne donc sans restaurer la base.
@@ -107,9 +108,10 @@ Chaque base ouverte par un test devient un schéma neuf de cette base PostgreSQL
 - `GET /api/people/:id` : une fiche, ses RDV à venir et passés, ses liens, ses visios (`calls`) et les événements où elle est invitée (`events`).
 - `GET /api/links?from=<adresse>` ou `?eventId=<id>` ; `POST /api/links { from | eventId, target, title? }` ; `DELETE /api/links/:id`.
 - `GET /api/v1/resolve?address=media://alfred/…`
+- API v1 en lecture (calendriers, événements, occupation, réservations) et flux iCalendar : voir [API.md](API.md).
 
 ## Reste à faire (phase 4)
 
-- Distribution du journal (ALFRED-308), API v1 complète.
+- Distribution du journal (ALFRED-308).
 - Participations : un passage de moins d'une minute entre deux relevés n'est pas gardé, et plusieurs invités d'une même salle de rendez-vous sont tous reliés à la personne qui a réservé.
 - Côté Cairn : bouton « Note de réunion » qui crée la note et le lien d'un coup (ANT-175).

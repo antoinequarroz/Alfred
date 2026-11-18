@@ -55,6 +55,7 @@ export const INSTANT_COLUMNS: Record<string, readonly string[]> = {
   outbox_readers: ['updated_at'],
   settings: ['updated_at'],
   video_participations: ['joined_at', 'seen_at', 'left_at'],
+  api_tokens: ['created_at', 'last_used_at'],
 };
 
 /** Anciennes colonnes en millisecondes → colonne ISO qui les remplace. Écrites, plus lues. */

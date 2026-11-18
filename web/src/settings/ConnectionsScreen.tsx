@@ -4,6 +4,7 @@ import { CaldavCard, SmtpCard, useConnections } from './ConnectionCards';
 import { useVideoState, VideoSettingsCard } from '../video/VideoScreen';
 import { NotificationsCard, usePushState } from './NotificationsCard';
 import { PaymentCard, usePayments } from '../rdv/PaymentCard';
+import { AccessCard } from './AccessCard';
 import { DataCard } from './DataCard';
 
 const KEY_TEXT = {
@@ -56,6 +57,7 @@ export function ConnectionsScreen({ onMenu, onCalendarChanged }: { onMenu: () =>
                 {payments.state && <PaymentCard state={payments.state} onState={payments.set} notify={notify} />}
                 {push.state && <NotificationsCard state={push.state} onState={push.set} notify={notify} />}
                 {video.state && <VideoSettingsCard state={video.state} onState={video.set} notify={notify} />}
+                <AccessCard notify={notify} />
                 <DataCard notify={notify} />
               </div>
               <p className="cx-foot">

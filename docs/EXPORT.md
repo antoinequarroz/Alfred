@@ -71,6 +71,7 @@ journal (`outbox.seq`, recréée dans le même ordre).
 | Date de départ des notifications (`push` / `since`) et abonnements des appareils (`push_subscriptions`) | propres à l'installation ; chaque appareil se réabonne |
 | Jeton en clair d'un paiement en cours (`payment_holds.cancel_token`) | secret de passage, vidé |
 | Sessions de connexion, notifications déjà envoyées, positions de lecture du journal | mécanique interne de l'installation |
+| Jetons de l'API v1 et des flux iCalendar (`api_tokens`) | accès propres à l'installation ; à recréer dans les Réglages |
 
 Les empreintes des liens d'annulation des clients (`bookings.token_hash`, `booking_tokens`) sont
 exportées : ce ne sont pas des secrets (seule l'empreinte est gardée), et les liens déjà envoyés

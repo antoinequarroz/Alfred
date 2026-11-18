@@ -748,3 +748,52 @@ export interface ResolvedAddress {
   /** Page d'Alfred qui montre l'objet. */
   url: string;
 }
+
+// ---------------------------------------------------------------------------
+// API v1 en lecture et flux iCalendar (phase 4, ALFRED-303). Voir docs/API.md.
+
+/** api : lecture de l'API v1 (en-tête Authorization) ; feed : abonnement au flux .ics d'un calendrier. */
+export type ApiTokenKind = 'api' | 'feed';
+
+export interface ApiToken {
+  id: string;
+  name: string;
+  kind: ApiTokenKind;
+  /** Calendrier partagé par un jeton de flux, null pour un jeton d'API. */
+  calendarId: string | null;
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+/** Réponse à la création : la seule fois où le jeton en clair est donné. */
+export interface ApiTokenCreated extends ApiToken {
+  token: string;
+  /** Chemin du flux (/api/v1/feeds/<jeton>.ics) pour un jeton de flux, null sinon. */
+  feedPath: string | null;
+}
+
+/** Une occurrence d'événement, telle que l'API v1 la donne (récurrences développées). */
+export interface ApiV1Event {
+  /** Identifiant de l'événement dans Alfred (stable tant qu'il reste dans son calendrier). */
+  id: string;
+  /** Adresse stable : media://alfred/event/<UID iCalendar>. */
+  address: string;
+  /** Identifiant de l'occurrence pour une série (RECURRENCE-ID), null sinon. */
+  occurrenceId: string | null;
+  calendarId: string;
+  title: string;
+  /** Instant ISO UTC, ou date AAAA-MM-JJ pour une journée entière (fin exclusive). */
+  start: string;
+  end: string;
+  allDay: boolean;
+  location: string;
+  description: string;
+  recurring: boolean;
+}
+
+/** Une période occupée de l'agenda (calendriers qui bloquent la prise de rendez-vous), sans détail. */
+export interface ApiV1Busy {
+  start: string;
+  end: string;
+  allDay: boolean;
+}
