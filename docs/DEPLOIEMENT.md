@@ -132,7 +132,10 @@ Tout le reste (activer, nombre de participants, qualité) se règle dans l'app. 
 
 | Besoin | Commande |
 |---|---|
-| Mettre à jour | `cd /opt/alfred && git pull && bash deploy/visio.sh` (Alfred et la visio ; coupe les appels en cours). Alfred seul : `docker compose -f deploy/docker-compose.yml up -d --build alfred` |
+| Mettre à jour (depuis le Mac) | `bash deploy/mac/deployer.sh` : déploie le dernier commit de `main`, voir « Déployer depuis main » ci-dessous |
+| Revenir à la version précédente | `bash deploy/mac/deployer.sh --retour` (ou sur le VPS : `bash deploy/mise-a-jour.sh --retour`) |
+| Version en service | `ssh antoine-vps 'bash /opt/alfred/deploy/mise-a-jour.sh --etat'` |
+| Mettre à jour la visio | après un déploiement qui touche LiveKit : `bash deploy/visio.sh` sur le VPS (coupe les appels en cours) |
 | Voir les journaux | `docker logs alfred --tail 100` |
 | Sauvegarder la base et la clé (en plus de la sauvegarde quotidienne) | `bash deploy/sauvegarde.sh` |
 | Vérifier que la dernière sauvegarde se restaure | `bash deploy/restaurer.sh --essai` |
@@ -140,7 +143,29 @@ Tout le reste (activer, nombre de participants, qualité) se règle dans l'app. 
 
 **La base est à sauvegarder.** Les événements ne sont qu'une copie (la référence reste iCloud) et reviennent tout seuls à la synchro suivante, mais depuis la prise de rendez-vous la base porte aussi ce qui n'existe nulle part ailleurs : les réglages, les types, les horaires et surtout les réservations (coordonnées des clients, empreintes des liens d'annulation). Si le volume est perdu, la prise de rendez-vous se referme, les types et les horaires sont à refaire, la rubrique Rendez-vous ne liste plus aucune réservation et les liens d'annulation déjà envoyés répondent « ce lien n'est plus valable ».
 
-La commande du tableau copie tout le dossier `/data` : la base et ses fichiers `-wal` et `-shm`, à garder ensemble, et le fichier de clé `secret.key` s'il existe (il apparaît au premier mot de passe enregistré dans l'app). **La clé est à sauvegarder avec la base** : sans elle, la base restaurée fonctionne, mais les mots de passe enregistrés dans l'app (boîte d'envoi, iCloud) ne se déchiffrent plus et sont à ressaisir dans Réglages ; rien d'autre n'est perdu. La copie contient donc de quoi déchiffrer ces mots de passe : la garder dans un dossier réservé (`chmod 700`). Si la clé est fournie par `ALFRED_SECRET_KEY`, c'est le `.env` qu'il faut sauvegarder avec la base. ### Sauvegardes automatiques
+La commande du tableau copie tout le dossier `/data` : la base et ses fichiers `-wal` et `-shm`, à garder ensemble, et le fichier de clé `secret.key` s'il existe (il apparaît au premier mot de passe enregistré dans l'app). **La clé est à sauvegarder avec la base** : sans elle, la base restaurée fonctionne, mais les mots de passe enregistrés dans l'app (boîte d'envoi, iCloud) ne se déchiffrent plus et sont à ressaisir dans Réglages ; rien d'autre n'est perdu. La copie contient donc de quoi déchiffrer ces mots de passe : la garder dans un dossier réservé (`chmod 700`). Si la clé est fournie par `ALFRED_SECRET_KEY`, c'est le `.env` qu'il faut sauvegarder avec la base. ### Déployer depuis main
+
+`/opt/alfred` n'est pas un dépôt git : on y copie une version précise de `main`, jamais le dossier de travail du Mac. Depuis le clone du Mac :
+
+```bash
+bash deploy/mac/deployer.sh --simuler        # montre ce qui changerait sur le VPS, sans rien toucher
+bash deploy/mac/deployer.sh                  # déploie le dernier commit de origin/main (demande confirmation)
+bash deploy/mac/deployer.sh 47e8711          # déploie un commit précis de main
+bash deploy/mac/deployer.sh --retour         # remet la version précédente
+```
+
+Ce que fait [`deploy/mac/deployer.sh`](../deploy/mac/deployer.sh) :
+
+1. `git fetch`, puis refuse tout commit qui n'est pas sur `main` ;
+2. exporte ce commit avec `git archive` (seulement les fichiers suivis : rien de non commité, aucun secret local), et y ajoute un fichier `VERSION` ;
+3. montre la copie à blanc (`rsync -n`) et demande confirmation (`--oui` pour s'en passer) ;
+4. sur le VPS, [`deploy/mise-a-jour.sh --preparer`](../deploy/mise-a-jour.sh) : sauvegarde des données (`sauvegarde.sh`) et image de retour `alfred:retour-<version>` ;
+5. copie le code dans `/opt/alfred` (avec `--delete` : les fichiers retirés du dépôt disparaissent ; jamais touchés : `.env*`, `data/`, `node_modules/`, `dist/`) ;
+6. `mise-a-jour.sh` reconstruit le conteneur `alfred` seul (LiveKit et les appels en cours ne sont pas touchés), attend qu'il soit « healthy » (`/healthz`, 2 minutes au plus) et, sinon, remet automatiquement l'image de retour.
+
+Les 3 images de retour les plus récentes sont gardées, les plus anciennes retirées (seulement les `alfred:retour-*` ; les autres images ne sont jamais touchées). Le retour arrière remet le code précédent, pas les données : si une version a abîmé la base, restaurer en plus la sauvegarde faite juste avant (`deploy/restaurer.sh --vrai`, voir plus bas). Les migrations de la base ajoutent sans supprimer, donc l'image précédente tourne sur une base migrée.
+
+### Sauvegardes automatiques
 
 [`deploy/sauvegarde.sh`](../deploy/sauvegarde.sh) fait une archive `/opt/sauvegardes/alfred/alfred-AAAA-MM-JJ_HHMM.tar.gz` (mode 600, dossier en 700) avec :
 

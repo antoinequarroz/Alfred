@@ -7,3 +7,5 @@ data
 docs
 test
 .env.livekit
+.deploiement
+.en-service
