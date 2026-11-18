@@ -14,7 +14,7 @@ set -euo pipefail
 
 VPS=${ALFRED_VPS:-antoine-vps}
 REMOTE=${ALFRED_REMOTE_DIR:-/opt/alfred}
-REPO=$(cd "$(dirname "$0")/../.." && pwd)
+REPO=${ALFRED_REPO:-$(cd "$(dirname "$0")/../.." && pwd)}
 
 yes=""; simulate=""; ref=""
 for a in "$@"; do
