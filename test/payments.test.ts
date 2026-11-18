@@ -39,7 +39,7 @@ function fakeStripe() {
   const sessions = new Map<string, FakeSession>();
   const refunds: { pi: string; key: string }[] = [];
   const calls: { method: string; path: string; auth: string; idempotency?: string }[] = [];
-  const state = { down: false, rejectKey: false, refundError: null as null | { status: number; code: string; message: string } };
+  const state = { down: false, rejectKey: false, managedPayments: false, refundError: null as null | { status: number; code: string; message: string } };
   let n = 0;
   const reply = (status: number, body: unknown) => ({ status, json: async () => body });
   const fetchFn: FetchLike = async (url, init) => {
@@ -50,6 +50,9 @@ function fakeStripe() {
     const params = new URLSearchParams(init.body ?? u.search.slice(1));
     if (init.method === 'GET' && u.pathname === '/v1/checkout/sessions') return reply(200, { data: [] });
     if (init.method === 'POST' && u.pathname === '/v1/checkout/sessions') {
+      if (state.managedPayments && params.has('payment_method_types[0]') && params.get('managed_payments[enabled]') !== 'false') {
+        return reply(400, { error: { param: 'payment_method_types', message: 'Unsupported parameter: payment_method_types. Managed Payments, which is enabled by default on your account, handles this parameter for you. Remove payment_method_types, or pass managed_payments[enabled]=false to disable it for this request.' } });
+      }
       if (params.getAll('payment_method_types[1]').includes('twint') && params.get('line_items[0][price_data][currency]') !== 'chf') {
         return reply(400, { error: { message: 'TWINT requires CHF', param: 'payment_method_types' } });
       }
@@ -335,6 +338,20 @@ describe('paiement en ligne : réservation avec acompte', () => {
     ctx.clock.now = new Date(Date.parse(NOW) + 3 * 3_600_000);
     await ctx.booking.sweepPayments();
     expect(await slots(ctx)).not.toContain(MONDAY_9);
+  });
+
+  it('ouvre quand même la page de paiement sur un compte où Stripe active « Managed Payments »', async () => {
+    const ctx = await setup();
+    await openWithDeposit(ctx);
+    ctx.stripe.state.managedPayments = true;
+    const confirmation = await book(ctx);
+    expect(confirmation.payment!.url).toMatch(/^https:\/\/checkout\.stripe\.com\//);
+    const posts = ctx.stripe.calls.filter((c) => c.method === 'POST' && c.path === '/v1/checkout/sessions');
+    expect(posts).toHaveLength(2);
+    expect(posts[1].idempotency).not.toBe(posts[0].idempotency);
+    const [session] = [...ctx.stripe.sessions.values()];
+    expect(session.params.get('managed_payments[enabled]')).toBe('false');
+    expect(session.params.getAll('payment_method_types[1]')).toEqual(['twint']);
   });
 
   it('réserve sans paiement les types sans acompte', async () => {
