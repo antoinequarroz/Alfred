@@ -96,6 +96,11 @@ export interface BookingSettings {
    */
   allDayBlocks: boolean;
   /**
+   * Mots du titre d'une journée entière qui ne bloque jamais (anniversaire, fête…), quelle que soit
+   * sa marque « occupé / disponible ». Comparés sans majuscules ni accents. Par défaut : « anniversaire ».
+   */
+  allDayIgnore: string[];
+  /**
    * Rappels envoyés au client avant le rendez-vous, en heures (parmi REMINDER_HOURS_CHOICES),
    * du plus tôt au plus tard. Vide : aucun rappel. Par défaut : 24 h et 1 h.
    */
@@ -125,6 +130,8 @@ export interface BookingType {
   bufferAfterMin: number;
   minNoticeHours: number;
   horizonDays: number;
+  /** Acompte à payer en ligne à la réservation, en centimes (CHF) ; 0 = pas de paiement. */
+  depositCents: number;
   active: boolean;
   sort: number;
 }
@@ -137,6 +144,21 @@ export interface BookingHoursRange {
   weekday: number;
   startMin: number;
   endMin: number;
+}
+
+/** Journée entière à venir d'un calendrier bloquant, pour l'aperçu des réglages. */
+export interface AllDayPreviewItem {
+  eventId: string;
+  calendarId: string;
+  title: string;
+  /** Date AAAA-MM-JJ du premier jour. */
+  start: string;
+  /** Date AAAA-MM-JJ exclusive. */
+  end: string;
+  /** Vrai : la journée est indisponible à la réservation. */
+  blocks: boolean;
+  /** Pourquoi elle bloque ou non, en français. */
+  reason: string;
 }
 
 export interface BookingAdminState {
@@ -200,6 +222,23 @@ export interface Booking {
   remindersSent: number[];
   /** Nombre de fois où le client a déplacé lui-même ce rendez-vous. */
   clientReschedules: number;
+  /** Fiche Personne du client (annuaire), null pour une réservation antérieure sans e-mail. */
+  personId?: string | null;
+  /** Acompte payé en ligne, null si le rendez-vous n'en avait pas. */
+  payment: BookingPayment | null;
+}
+
+/** paid : encaissé ; refunded : remboursé ; refund_failed : remboursement demandé mais refusé ou en panne. */
+export type PaymentStatus = 'paid' | 'refunded' | 'refund_failed';
+
+export interface BookingPayment {
+  amountCents: number;
+  currency: string;
+  status: PaymentStatus;
+  /** Dernier refus de remboursement, en clair. */
+  error: string | null;
+  /** Lien vers le paiement dans le tableau de bord Stripe. */
+  dashboardUrl: string | null;
 }
 
 // --- partie publique --------------------------------------------------------
@@ -216,6 +255,10 @@ export interface PublicBookingType {
   phoneRequired: boolean;
   /** Nombre de jours à l'avance jusqu'où des créneaux sont proposés (borne du calendrier de la page). */
   horizonDays: number;
+  /** Acompte à payer en ligne à la réservation, en centimes ; 0 = aucun. */
+  depositCents: number;
+  /** Devise de l'acompte (CHF). */
+  currency: string;
 }
 
 export interface PublicBookingInfo {
@@ -277,6 +320,19 @@ export interface PublicBooking {
   videoUrl: string | null;
   /** Réponse à une annulation ou à un déplacement seulement : vrai si l'e-mail au client est parti. */
   emailSent?: boolean;
+  /** Acompte payé en ligne, et ce qu'il devient si le client annule maintenant. */
+  deposit?: PublicDeposit | null;
+}
+
+export interface PublicDeposit {
+  amountCents: number;
+  currency: string;
+  /** Vrai si une annulation maintenant rembourse l'acompte. */
+  refundOnCancel: boolean;
+  /** Délai minimal (heures avant le rendez-vous) pour être remboursé, null si jamais remboursé automatiquement. */
+  refundHours: number | null;
+  /** Après une annulation : l'acompte a été remboursé. */
+  refunded?: boolean;
 }
 
 export interface BookingConfirmation {
@@ -285,6 +341,57 @@ export interface BookingConfirmation {
   cancelUrl: string;
   /** Faux si l'e-mail de confirmation n'a pas pu partir : afficher le récapitulatif et le lien. */
   emailSent: boolean;
+  /**
+   * Rendez-vous avec acompte : le créneau est retenu, rien n'est confirmé tant que le paiement
+   * n'a pas abouti. Le navigateur part vers cette page de paiement (Stripe) ; le client revient
+   * ensuite sur /rdv/paiement/<ref>.
+   */
+  payment?: { url: string; ref: string; amountCents: number; currency: string; expiresAt: string };
+}
+
+/** Suivi d'un paiement d'acompte, vu du client revenu de la page de paiement. */
+export interface PublicPaymentStatus {
+  /**
+   * pending : en attente du paiement ; processing : payé, rendez-vous en cours d'enregistrement ;
+   * confirmed : rendez-vous confirmé ; expired : non payé, créneau libéré.
+   */
+  status: 'pending' | 'processing' | 'confirmed' | 'expired';
+  amountCents: number;
+  currency: string;
+  /** Récapitulatif (status = confirmed : le rendez-vous enregistré). */
+  booking: PublicBooking;
+  /** status = confirmed : faux si l'e-mail de confirmation n'est pas (encore) parti. */
+  emailSent: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Paiement en ligne (Stripe), réglé dans l'app. Voir docs/API-RDV.md.
+
+export interface PaymentSettingsState {
+  /** Vrai quand une clé Stripe lisible est enregistrée : les acomptes peuvent être encaissés. */
+  configured: boolean;
+  /** Clé enregistrée mais indéchiffrable (clé de chiffrement changée) : à ressaisir. */
+  unreadable: boolean;
+  /** Mode de la clé : test (aucun vrai paiement) ou live. null sans clé. */
+  mode: 'test' | 'live' | null;
+  /** Quatre derniers caractères de la clé, pour la reconnaître. */
+  keyHint: string | null;
+  /** TWINT proposé en plus de la carte (à activer aussi dans le tableau de bord Stripe). */
+  twint: boolean;
+  /** Le client qui annule au moins tant d'heures avant est remboursé ; null : jamais automatiquement. */
+  refundHours: number | null;
+  currency: string;
+  /** Dernier essai de la clé. */
+  lastTest: ConnectionTest | null;
+  /** Paiements commencés, pas encore aboutis (créneaux retenus). */
+  pendingCount: number;
+}
+
+export interface PaymentSettingsInput {
+  /** Nouvelle clé secrète (sk_… ou rk_…) ; absente ou vide : inchangée. */
+  secretKey?: string;
+  twint?: boolean;
+  refundHours?: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -487,6 +594,51 @@ export interface VideoJoinInfo {
   quality: VideoQuality;
 }
 
+// --- notifications (Web Push) ----------------------------------------------
+
+/** Rappels : aucun, avant les rendez-vous pris en ligne, ou avant tout événement à heure fixe. */
+export type PushReminderMode = 'off' | 'bookings' | 'all';
+
+export interface PushPrefs {
+  newBooking: boolean;
+  cancellation: boolean;
+  guestArrived: boolean;
+  reminders: PushReminderMode;
+  /** Délai du rappel : 5, 10, 15, 30 ou 60 minutes avant le début. */
+  reminderMinutes: number;
+  /** Faux : les notifications ne montrent ni nom ni titre (écran verrouillé). */
+  details: boolean;
+}
+
+export interface PushDevice {
+  id: string;
+  label: string;
+  /** Service de push de l'appareil : Apple, Google, Mozilla… */
+  service: string;
+  /** Empreinte de l'abonnement (SHA-256 de son adresse, 16 caractères) : l'app reconnaît l'appareil sur lequel elle tourne. */
+  ref: string;
+  createdAt: string;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  lastErrorAt: string | null;
+}
+
+export interface PushState {
+  /** Clé publique VAPID (applicationServerKey), en base64url. */
+  publicKey: string;
+  prefs: PushPrefs;
+  devices: PushDevice[];
+}
+
+export interface PushTestResult {
+  id: string;
+  label: string;
+  ok: boolean;
+  /** L'appareil s'était désabonné : il a été retiré de la liste. */
+  removed: boolean;
+  error: string | null;
+}
+
 /** Réponse à une demande d'entrée quand la salle d'attente est active. */
 export interface VideoWaitInfo {
   waiting: true;
@@ -510,4 +662,58 @@ export interface VideoWaiter {
   name: string;
   /** Instant ISO de sa demande. */
   since: string;
+}
+
+// ---------------------------------------------------------------------------
+// Personnes et liens (phase 4, contrat de données de la suite Media). Voir docs/DONNEES.md.
+
+/** Une fiche de l'annuaire : un client, un invité. Une seule par e-mail (normalisé). */
+export interface PersonSummary {
+  id: string;
+  /** Adresse stable : media://alfred/person/<id>. */
+  address: string;
+  name: string;
+  /** E-mail normalisé (minuscules). */
+  email: string;
+  phone: string;
+  /** Réservations, annulées comprises. */
+  bookingCount: number;
+  /** Début du prochain rendez-vous confirmé, null s'il n'y en a pas. */
+  nextAt: string | null;
+  /** Début du dernier rendez-vous passé (confirmé), null s'il n'y en a pas. */
+  lastAt: string | null;
+  createdAt: string;
+}
+
+export interface PersonDetail extends PersonSummary {
+  upcoming: Booking[];
+  past: Booking[];
+  links: LinkInfo[];
+}
+
+/** Un lien d'un objet d'Alfred vers un autre objet de la suite (note Cairn…) ou une page web. */
+export interface LinkInfo {
+  id: string;
+  /** Adresse media:// de l'objet d'Alfred d'où part le lien. */
+  from: string;
+  /** Adresse media:// de la cible, ou l'URL d'une page web. */
+  to: string;
+  kind: string;
+  /** Module de la cible (« cairn »…), « web » pour une simple page. */
+  module: string;
+  title: string;
+  /** Où l'ouvrir, null si la cible n'a pas d'adresse web connue. */
+  url: string | null;
+  createdAt: string;
+}
+
+/** Ce qu'une adresse media://alfred/… désigne (GET /api/v1/resolve). */
+export interface ResolvedAddress {
+  address: string;
+  module: string;
+  type: string;
+  id: string;
+  title: string;
+  /** Page d'Alfred qui montre l'objet. */
+  url: string;
 }

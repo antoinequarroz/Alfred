@@ -175,7 +175,7 @@ for _ in $(seq 1 30); do
       echo "celui du .env : ouvre Alfred > Réglages > Calendrier iCloud et saisis-y le nouveau."
       exit 1
     fi
-    echo "Alfred tourne. Ouvre https://alfred.antoinequarroz.ch"
+    echo "Alfred tourne. Ouvre https://alfred.postmelo.ch"
     exit 0
   fi
   echo -n "."; sleep 2

@@ -2,13 +2,15 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   CHANGE_NOTICE_CHOICES, REMINDER_HOURS_CHOICES,
   type Booking, type BookingAdminState, type BookingHoursRange, type BookingMode, type BookingSettings, type BookingStep, type BookingType,
-  type BookingTypeInput, type CalendarInfo,
+  type AllDayPreviewItem, type BookingTypeInput, type CalendarInfo,
 } from '../../../shared/types';
 import { ApiError, bookingApi } from '../api';
 import { AlertIcon, CheckIcon, Chevron, CloseIcon, CopyIcon, ExternalIcon, MenuIcon, PlusIcon } from '../icons';
 import { hoursProblems, WEEKDAYS } from './hours';
 import { SmtpCard, smtpDraftDirty, useConnections, type SmtpDraft } from '../settings/ConnectionCards';
 import { Card, Fld } from './ui';
+import { PaymentCard, usePayments } from './PaymentCard';
+import { formatAmount } from '../../../shared/money';
 import { dateTimeShortIn, dayKeyIn, dayLabel, durationLabel, timeIn } from './tz';
 import './rdv.css';
 
@@ -90,6 +92,15 @@ function Modal({ title, onClose, children, small }: { title: string; onClose: ()
 interface TypeDraft {
   name: string; durationMin: string; mode: BookingMode; location: string; description: string;
   bufferBeforeMin: string; bufferAfterMin: string; minNoticeHours: string; horizonDays: string; slug: string; active: boolean;
+  /** Acompte en francs, tel que saisi (« 50 », « 50.50 ») ; vide = aucun. */
+  deposit: string;
+}
+
+/** « 50 », « 50.5 », « 50,50 » → centimes ; '' → 0 ; NaN si illisible. */
+function depositCents(text: string): number {
+  const t = text.trim().replace(',', '.').replace(/^CHF\s*/i, '');
+  if (t === '') return 0;
+  return /^\d{1,5}(\.\d{1,2})?$/.test(t) ? Math.round(Number(t) * 100) : Number.NaN;
 }
 
 function toDraft(t: BookingType | null): TypeDraft {
@@ -97,10 +108,11 @@ function toDraft(t: BookingType | null): TypeDraft {
     name: t?.name ?? '', durationMin: String(t?.durationMin ?? 30), mode: t?.mode ?? 'cabinet', location: t?.location ?? '',
     description: t?.description ?? '', bufferBeforeMin: String(t?.bufferBeforeMin ?? 0), bufferAfterMin: String(t?.bufferAfterMin ?? 0),
     minNoticeHours: String(t?.minNoticeHours ?? 12), horizonDays: String(t?.horizonDays ?? 60), slug: t?.slug ?? '', active: t?.active ?? true,
+    deposit: t?.depositCents ? (t.depositCents / 100).toFixed(2) : '',
   };
 }
 
-function TypeDialog({ type, onSaved, onDeleted, onClose }: { type: BookingType | null; onSaved: () => void; onDeleted: () => void; onClose: () => void }) {
+function TypeDialog({ type, paymentsReady, onSaved, onDeleted, onClose }: { type: BookingType | null; paymentsReady: boolean; onSaved: () => void; onDeleted: () => void; onClose: () => void }) {
   const [d, setD] = useState(() => toDraft(type));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [failure, setFailure] = useState<string | null>(null);
@@ -119,6 +131,13 @@ function TypeDialog({ type, onSaved, onDeleted, onClose }: { type: BookingType |
       bufferBeforeMin: num(d.bufferBeforeMin), bufferAfterMin: num(d.bufferAfterMin), minNoticeHours: num(d.minNoticeHours),
       horizonDays: num(d.horizonDays), active: d.active,
     };
+    const cents = depositCents(d.deposit);
+    if (Number.isNaN(cents)) {
+      setErrors({ depositCents: 'Montant en francs, par exemple 50 ou 50.50' });
+      setBusy(false);
+      return;
+    }
+    if (cents !== (type?.depositCents ?? 0)) input.depositCents = cents;
     if (type && d.slug.trim() !== type.slug) input.slug = d.slug.trim();
     try {
       if (type) await bookingApi.updateType(type.id, input);
@@ -182,6 +201,17 @@ function TypeDialog({ type, onSaved, onDeleted, onClose }: { type: BookingType |
           <Fld label="Réservable jusqu’à (jours)" error={errors.horizonDays}>
             {(id) => <input id={id} type="number" inputMode="numeric" min={1} max={365} value={d.horizonDays} onChange={(e) => set({ horizonDays: e.target.value })} />}
           </Fld>
+          <Fld
+            label="Acompte en ligne (CHF)" error={errors.depositCents} className="span-2"
+            hint={paymentsReady || (type?.depositCents ?? 0) > 0
+              ? 'Payé par carte ou TWINT au moment de réserver ; le rendez-vous n’est confirmé qu’une fois payé. Laisse vide pour ne rien demander.'
+              : 'Pour demander un acompte, enregistre d’abord ta clé Stripe dans Réglages > Paiement en ligne.'}
+          >
+            {(id) => (
+              <input id={id} type="text" inputMode="decimal" placeholder={paymentsReady ? 'Aucun' : 'Paiement en ligne non configuré'} maxLength={9}
+                disabled={!paymentsReady && !(type?.depositCents)} value={d.deposit} onChange={(e) => set({ deposit: e.target.value })} />
+            )}
+          </Fld>
           {type && (
             <Fld label="Identifiant du lien" error={errors.slug} hint={`Lien direct : /rdv/${d.slug || '…'}. Le changer casse les liens déjà partagés.`} className="span-2">
               {(id) => <input id={id} type="text" value={d.slug} maxLength={50} spellCheck={false} autoCapitalize="none" onChange={(e) => set({ slug: e.target.value })} />}
@@ -213,7 +243,7 @@ function TypeDialog({ type, onSaved, onDeleted, onClose }: { type: BookingType |
   );
 }
 
-function TypesTab({ types, reload, notify }: { types: BookingType[]; reload: () => Promise<void>; notify: (msg: string) => void }) {
+function TypesTab({ types, paymentsReady, reload, notify }: { types: BookingType[]; paymentsReady: boolean; reload: () => Promise<void>; notify: (msg: string) => void }) {
   const [editing, setEditing] = useState<BookingType | 'new' | null>(null);
   const [local, setLocal] = useState(types);
   useEffect(() => setLocal(types), [types]);
@@ -261,6 +291,7 @@ function TypesTab({ types, reload, notify }: { types: BookingType[]; reload: () 
                     {durationLabel(t.durationMin)} · {modeLabel(t) || 'Lieu à préciser'}
                     {(t.bufferBeforeMin > 0 || t.bufferAfterMin > 0) && ` · tampons ${t.bufferBeforeMin}/${t.bufferAfterMin} min`}
                     {` · préavis ${t.minNoticeHours} h · jusqu’à ${t.horizonDays} j`}
+                    {t.depositCents > 0 && ` · acompte ${formatAmount(t.depositCents, 'CHF')}`}
                   </p>
                   <p className="bk-meta mono">/rdv/{t.slug}</p>
                 </div>
@@ -274,6 +305,7 @@ function TypesTab({ types, reload, notify }: { types: BookingType[]; reload: () 
       {editing && (
         <TypeDialog
           type={editing === 'new' ? null : editing}
+          paymentsReady={paymentsReady}
           onClose={() => setEditing(null)}
           onSaved={() => { setEditing(null); void reload(); }}
           onDeleted={() => { setEditing(null); void reload(); }}
@@ -423,9 +455,29 @@ function HoursCard({ hours, draft, setDraft, onSaved, notify }: {
   );
 }
 
-function BlockingCard({ calendars, allDayBlocks, onChange, onAllDay }: {
-  calendars: CalendarInfo[]; allDayBlocks: boolean; onChange: (c: CalendarInfo, blocks: boolean) => void; onAllDay: (blocks: boolean) => void;
+function BlockingCard({ calendars, settings, version, onChange, onSettings }: {
+  calendars: CalendarInfo[]; settings: BookingSettings; version: unknown;
+  onChange: (c: CalendarInfo, blocks: boolean) => void; onSettings: (patch: Partial<BookingSettings>) => Promise<void>;
 }) {
+  const [words, setWords] = useState(settings.allDayIgnore.join(', '));
+  const [preview, setPreview] = useState<{ horizonDays: number; items: AllDayPreviewItem[] } | null>(null);
+  const saved = settings.allDayIgnore.join(', ');
+  useEffect(() => setWords(saved), [saved]);
+  useEffect(() => {
+    let live = true;
+    bookingApi.allDay().then((p) => { if (live) setPreview(p); }, () => { if (live) setPreview(null); });
+    return () => { live = false; };
+  }, [version, saved, settings.allDayBlocks, calendars]);
+  const parsed = words.split(',').map((w) => w.trim()).filter(Boolean);
+  const dirty = parsed.join(', ') !== saved;
+  const saveWords = () => { if (dirty) void onSettings({ allDayIgnore: parsed }); };
+  const calName = (id: string) => calendars.find((c) => c.id === id)?.name ?? '';
+  const blocking = preview?.items.filter((i) => i.blocks).length ?? 0;
+  const fmt = (d: string) => new Date(`${d}T12:00:00Z`).toLocaleDateString('fr-CH', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
+  const lastDay = (i: AllDayPreviewItem) => {
+    const end = new Date(Date.parse(`${i.end}T12:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+    return end > i.start ? `${fmt(i.start)} – ${fmt(end)}` : fmt(i.start);
+  };
   return (
     <Card title="Calendriers qui bloquent les créneaux" sub="Un événement d’un calendrier coché rend le créneau indisponible, même si le calendrier est masqué. Les événements marqués « disponible » ne bloquent pas.">
       {calendars.length === 0 ? <p className="bk-empty">Aucun calendrier pour l’instant.</p> : (
@@ -441,7 +493,7 @@ function BlockingCard({ calendars, allDayBlocks, onChange, onAllDay }: {
       )}
       <div className="bk-option">
         <label className="check">
-          <input type="checkbox" checked={allDayBlocks} onChange={(e) => onAllDay(e.target.checked)} />
+          <input type="checkbox" checked={settings.allDayBlocks} onChange={(e) => void onSettings({ allDayBlocks: e.target.checked })} />
           Une journée entière bloque toujours toute la journée
         </label>
         <p className="bk-hint">
@@ -449,6 +501,37 @@ function BlockingCard({ calendars, allDayBlocks, onChange, onAllDay }: {
           Décoche-la si tes journées entières sont surtout des rappels, ou décoche plus haut le calendrier qui les porte (anniversaires, jours fériés).
         </p>
       </div>
+      <div className="bk-option">
+        <Fld label="Journées entières qui ne bloquent jamais" hint="Mots du titre, séparés par des virgules (sans tenir compte des majuscules ni des accents). Ex. : anniversaire, fête, rappel.">
+          {(id) => (
+            <div className="bk-words">
+              <input id={id} type="text" value={words} maxLength={600} placeholder="anniversaire, fête" onChange={(e) => setWords(e.target.value)}
+                onBlur={saveWords} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); saveWords(); } }} />
+              {dirty && <button className="btn primary" onMouseDown={(e) => e.preventDefault()} onClick={saveWords}>Enregistrer</button>}
+            </div>
+          )}
+        </Fld>
+      </div>
+      {preview && (
+        <div className="bk-option">
+          <strong className="bk-allday-title">
+            {preview.items.length === 0
+              ? `Aucune journée entière dans les ${preview.horizonDays} prochains jours`
+              : `Dans les ${preview.horizonDays} prochains jours : ${blocking} journée${blocking > 1 ? 's' : ''} entière${blocking > 1 ? 's' : ''} sur ${preview.items.length} bloque${blocking > 1 ? 'nt' : ''}`}
+          </strong>
+          {preview.items.length > 0 && (
+            <ul className="bk-allday">
+              {preview.items.map((i) => (
+                <li key={`${i.eventId}|${i.start}`} className={i.blocks ? 'blocks' : 'free'}>
+                  <span className="bk-allday-when">{lastDay(i)}</span>
+                  <span className="bk-allday-name" title={calName(i.calendarId)}>{i.title || 'Sans titre'}</span>
+                  <span className="bk-allday-why">{i.blocks ? 'Bloque' : 'Libre'} · {i.reason}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
     </Card>
   );
 }
@@ -589,9 +672,11 @@ function RemindersCard({ settings, mailConfigured, onChange }: {
 
 // --- réservations --------------------------------------------------------------
 
-function BookingRow({ b, timezone, mailConfigured, onCancel, onResend }: {
-  b: Booking; timezone: string; mailConfigured: boolean; onCancel: (b: Booking) => void; onResend: (b: Booking) => void;
+function BookingRow({ b, timezone, mailConfigured, onCancel, onResend, onRefund }: {
+  b: Booking; timezone: string; mailConfigured: boolean; onCancel: (b: Booking) => void; onResend: (b: Booking) => void; onRefund: (b: Booking) => void;
 }) {
+  const pay = b.payment;
+  const amount = pay ? formatAmount(pay.amountCents, pay.currency) : '';
   const confirmed = b.status === 'confirmed';
   const upcoming = confirmed && new Date(b.end).getTime() > Date.now();
   return (
@@ -601,7 +686,10 @@ function BookingRow({ b, timezone, mailConfigured, onCancel, onResend }: {
         <span className="bk-when-time">{timeIn(timezone, b.start)} – {timeIn(timezone, b.end)}</span>
       </div>
       <div className="bk-who">
-        <p className="bk-who-name">{b.name} <span className="bk-meta">· {b.typeName}</span></p>
+        <p className="bk-who-name">
+          {b.personId ? <a className="bk-person" href={`#personnes/${encodeURIComponent(b.personId)}`} title="Ouvrir sa fiche">{b.name}</a> : b.name}{' '}
+          <span className="bk-meta">· {b.typeName}</span>
+        </p>
         <p className="bk-meta bk-contacts">
           <a href={`mailto:${b.email}`}>{b.email}</a>
           {b.phone && <a href={`tel:${b.phone.replace(/[^\d+]/g, '')}`}>{b.phone}</a>}
@@ -632,7 +720,16 @@ function BookingRow({ b, timezone, mailConfigured, onCancel, onResend }: {
             <span className="tag">Rappel envoyé ({b.remindersSent.map(hoursLabel).join(', ')} avant)</span>
           )}
           {b.mailError && <span className="tag warn"><AlertIcon />{b.mailError}</span>}
+          {pay && pay.status === 'paid' && <span className="tag ok">Acompte payé : {amount}</span>}
+          {pay && pay.status === 'refunded' && <span className="tag">Acompte remboursé : {amount}</span>}
+          {pay && pay.status === 'refund_failed' && <span className="tag danger" title={pay.error ?? undefined}><AlertIcon />Remboursement de {amount} en échec{pay.error ? ` : ${pay.error.replace(/^Remboursement en échec : /, '')}` : ''}</span>}
+          {pay?.dashboardUrl && <a className="bk-meta" href={pay.dashboardUrl} target="_blank" rel="noopener">Voir dans Stripe</a>}
         </div>
+        {pay && (pay.status === 'refund_failed' || (pay.status === 'paid' && !confirmed)) && (
+          <p className="bk-hint">
+            <button type="button" className="btn ghost small" onClick={() => onRefund(b)}>{pay.status === 'refund_failed' ? 'Réessayer le remboursement' : `Rembourser ${amount}`}</button>
+          </p>
+        )}
         {b.eventState === 'missing' && <p className="bk-hint">Le créneau reste pris. Annule la réservation pour prévenir le client et libérer le créneau.</p>}
         {b.eventState === 'moved' && (
           <p className="bk-hint">
@@ -652,13 +749,15 @@ function BookingRow({ b, timezone, mailConfigured, onCancel, onResend }: {
 
 function CancelDialog({ b, timezone, mailConfigured, onDone, onClose }: { b: Booking; timezone: string; mailConfigured: boolean; onDone: () => void; onClose: () => void }) {
   const [notifyClient, setNotifyClient] = useState(mailConfigured);
+  const paid = b.payment?.status === 'paid';
+  const [refund, setRefund] = useState(true);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const confirm = async () => {
     setBusy(true);
     setFailure(null);
     try {
-      await bookingApi.cancelBooking(b.id, notifyClient);
+      await bookingApi.cancelBooking(b.id, notifyClient, paid && refund);
       onDone();
     } catch (err) {
       setFailure(message(err));
@@ -675,6 +774,12 @@ function CancelDialog({ b, timezone, mailConfigured, onDone, onClose }: { b: Boo
         Prévenir le client par e-mail
       </label>
       {!mailConfigured && <p className="bk-hint">L’envoi d’e-mails n’est pas configuré : pense à prévenir {b.name} toi-même.</p>}
+      {paid && b.payment && (
+        <label className="check">
+          <input type="checkbox" checked={refund} onChange={(e) => setRefund(e.target.checked)} />
+          Rembourser l’acompte de {formatAmount(b.payment.amountCents, b.payment.currency)}
+        </label>
+      )}
       {failure && <p className="form-error" role="alert">{failure}</p>}
       <div className="actions">
         <span className="spacer" />
@@ -700,6 +805,7 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
    */
   const [mailFocus, setMailFocus] = useState(() => (location.hash === MAIL_HASH ? 1 : 0));
   const [smtpDraft, setSmtpDraft] = useState<SmtpDraft | null>(null);
+  const payments = usePayments();
   const [state, setState] = useState<BookingAdminState | null>(null);
   const [types, setTypes] = useState<BookingType[]>([]);
   const [hours, setHours] = useState<BookingHoursRange[]>([]);
@@ -770,16 +876,6 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
     }
   };
 
-  const setAllDayBlocks = async (allDayBlocks: boolean) => {
-    setState((s) => (s ? { ...s, settings: { ...s.settings, allDayBlocks } } : s));
-    try {
-      setState(await bookingApi.saveSettings({ allDayBlocks }));
-    } catch (err) {
-      notify(message(err));
-      void reload();
-    }
-  };
-
   const saveSettings = async (patch: Partial<BookingSettings>) => {
     setState((s) => (s ? { ...s, settings: { ...s.settings, ...patch } } : s));
     try {
@@ -806,6 +902,16 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
     try {
       await bookingApi.setCalendarBlocks(c.id, blocksBooking);
       onCalendarChanged();
+    } catch (err) {
+      notify(message(err));
+    }
+    void reload();
+  };
+
+  const refund = async (b: Booking) => {
+    try {
+      await bookingApi.refundBooking(b.id);
+      notify(`Acompte remboursé à ${b.name}`);
     } catch (err) {
       notify(message(err));
     }
@@ -915,21 +1021,21 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
                   ) : (
                     <ul className="bk-list">
                       {list.map((b) => (
-                        <BookingRow key={b.id} b={b} timezone={state.timezone} mailConfigured={state.mail.configured} onCancel={setCancelling} onResend={(x) => void resend(x)} />
+                        <BookingRow key={b.id} b={b} timezone={state.timezone} mailConfigured={state.mail.configured} onCancel={setCancelling} onResend={(x) => void resend(x)} onRefund={(x) => void refund(x)} />
                       ))}
                     </ul>
                   )}
                 </Card>
               )}
-              {tab === 'types' && <TypesTab types={types} reload={reload} notify={notify} />}
+              {tab === 'types' && <TypesTab types={types} paymentsReady={payments.state?.configured ?? false} reload={reload} notify={notify} />}
               {tab === 'hours' && (
-                <>
+                <div className="bk-pair">
                   <HoursCard hours={hours} draft={hoursDraft} setDraft={setHoursDraft} onSaved={(h) => { setHours(h); void reload(); }} notify={notify} />
-                  <BlockingCard calendars={calendars} allDayBlocks={state.settings.allDayBlocks} onChange={(c, v) => void setBlocks(c, v)} onAllDay={(v) => void setAllDayBlocks(v)} />
-                </>
+                  <BlockingCard calendars={calendars} settings={state.settings} version={hours} onChange={(c, v) => void setBlocks(c, v)} onSettings={saveSettings} />
+                </div>
               )}
               {tab === 'settings' && (
-                <>
+                <div className="bk-pair">
                   <SettingsCard state={state} calendars={calendars} draft={settingsDraft} setDraft={setSettingsDraft} onSaved={setState} notify={notify} />
                   <RemindersCard settings={state.settings} mailConfigured={state.mail.configured} onChange={(patch) => void saveSettings(patch)} />
                   {connections.state ? (
@@ -958,7 +1064,10 @@ export function BookingAdmin({ onMenu, onCalendarChanged }: { onMenu: () => void
                   ) : connections.error ? (
                     <div className="bk-card"><p className="form-error" role="alert">{connections.error}</p><button className="btn" onClick={() => void connections.reload()}>Réessayer</button></div>
                   ) : null}
-                </>
+                  {payments.state && (
+                    <PaymentCard state={payments.state} notify={notify} onState={(next) => { payments.set(next); void reload(); }} />
+                  )}
+                </div>
               )}
             </>
           )}

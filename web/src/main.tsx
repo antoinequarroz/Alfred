@@ -1,6 +1,9 @@
 import { lazy, StrictMode, Suspense } from 'react';
 import { createRoot } from 'react-dom/client';
-import '@fontsource-variable/inter/opsz.css';
+// Typographie de la suite Media (Cairn, Lamio, Metricove) : Geist, Geist Mono, Instrument Serif.
+import '@fontsource-variable/geist/wght.css';
+import '@fontsource-variable/geist-mono/wght.css';
+import '@fontsource/instrument-serif/latin-400.css';
 import './styles.css';
 
 // Trois apps dans la même page : le visiteur de /rdv ou d'une salle de visio (/v/…) ne télécharge rien de privé.

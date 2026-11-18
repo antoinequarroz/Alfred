@@ -9,6 +9,7 @@ import {
   AlertIcon, BlurIcon, ChatIcon, CheckIcon, CloseIcon, CopyIcon, FlipIcon, HangupIcon, MicIcon, MicOffIcon, ScreenIcon,
   UsersIcon, VideoIcon, VideoOffIcon,
 } from '../icons';
+import { Logo } from '../Logo';
 import { MoonIcon, SunIcon, useTheme } from '../theme';
 import {
   BACKGROUND_IMAGES, BackgroundFailure, CUSTOM_ID, NO_BACKGROUND, backgroundSupported, backgroundWanted, customImageNow,
@@ -220,7 +221,7 @@ function Frame({ children, wide }: { children: React.ReactNode; wide?: boolean }
   return (
     <div className={`vc${wide ? ' vc-wide' : ''}`}>
       <header className="vc-top">
-        <span className="vc-brand"><span className="logo">A</span><span>Alfred</span></span>
+        <span className="vc-brand"><Logo /><span>Alfred</span></span>
         <button type="button" className="icon-btn" onClick={theme.toggle} aria-label={theme.dark ? 'Passer en thème clair' : 'Passer en thème sombre'}>
           {theme.dark ? <SunIcon /> : <MoonIcon />}
         </button>

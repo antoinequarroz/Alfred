@@ -1,0 +1,17 @@
+/* Carte « Notifications » de l'écran Réglages. */
+.nt-setting { display: flex; align-items: flex-start; gap: 12px; }
+.nt-setting + .nt-setting { margin-top: 12px; }
+.nt-setting-title { font-size: 13.5px; font-weight: 600; }
+.nt-here { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+.nt-here .bk-meta { flex: 1 1 240px; }
+.nt-steps { margin: 6px 0 0; padding-left: 20px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.nt-steps strong { color: var(--text); font-weight: 600; }
+.nt-device { display: flex; align-items: center; gap: 12px; }
+.nt-device > div { flex: 1; min-width: 0; }
+.nt-device-name { font-size: 13.5px; font-weight: 600; }
+.nt-tag { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent-ink); font-size: 11.5px; font-weight: 600; vertical-align: 1px; }
+.nt-err { color: var(--danger); }
+.nt-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 16px; }
+@media (max-width: 600px) { .nt-grid { grid-template-columns: minmax(0, 1fr); } }
+.bk-list > li.nt-device { display: flex; }
+.nt-device .bk-row-actions { margin-left: auto; }

@@ -1,4 +1,5 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
+import { uuidv7 } from '../ids.js';
 import type {
   PublicVideoRoom, VideoAdminState, VideoJoinInfo, VideoJoinResult, VideoQuality, VideoRoom, VideoRoomKind,
   VideoRoomStatus, VideoServerStatus, VideoSettings, VideoWaiter, VideoWaitStatus,
@@ -25,7 +26,7 @@ export interface VideoServerConfig {
   apiSecret?: string;
   /** Adresse interne de l'API (réseau Docker), par exemple http://alfred-livekit:7880. */
   internalUrl: string;
-  /** Adresse WebSocket publique donnée aux navigateurs, par exemple wss://alfred.antoinequarroz.ch. */
+  /** Adresse WebSocket publique donnée aux navigateurs, par exemple wss://alfred.postmelo.ch. */
   publicUrl: string;
 }
 
@@ -333,7 +334,7 @@ export class VideoService {
     let slug = newRoomSlug();
     while (this.bySlug(slug)) slug = newRoomSlug();
     return {
-      id: randomUUID(), slug, title, kind, booking_id: bookingId, starts_at: start, ends_at: end,
+      id: uuidv7(), slug, title, kind, booking_id: bookingId, starts_at: start, ends_at: end,
       created_at: this.now().toISOString(), closed_at: null,
     };
   }

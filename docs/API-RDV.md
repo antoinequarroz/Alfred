@@ -130,7 +130,7 @@ Réponse `201` (`BookingConfirmation`) :
     "status": "confirmed",
     "cancellable": true
   },
-  "cancelUrl": "https://alfred.antoinequarroz.ch/rdv/annulation/Jq3…43 caractères",
+  "cancelUrl": "https://alfred.postmelo.ch/rdv/annulation/Jq3…43 caractères",
   "emailSent": true
 }
 ```
@@ -209,7 +209,7 @@ Session requise (cookie de connexion, comme le reste de l'API). Sans session : `
   },
   "effectiveCalendarId": "caldav:Q2x…",
   "timezone": "Europe/Zurich",
-  "publicPageUrl": "https://alfred.antoinequarroz.ch/rdv",
+  "publicPageUrl": "https://alfred.postmelo.ch/rdv",
   "mail": { "configured": false, "from": "Antoine Quarroz <info@antoinequarroz.ch>", "notifyTo": "info@antoinequarroz.ch", "sentLast24h": 0, "dailyLimit": 200 },
   "warnings": [
     "L’envoi d’e-mails n’est pas configuré : les réservations fonctionnent, mais aucun e-mail ne part. Il se règle dans Rendez-vous > Réglages.",
@@ -485,6 +485,31 @@ Essai sans rien enregistrer, avec les valeurs fournies complétées par la confi
 
 Retire les identifiants de l'app pour revenir à ceux du `.env`. Refusé si le `.env` n'en contient pas (`409 no_env`), s'il désigne un autre compte (`409 account_change`), ou si ses identifiants ne fonctionnent plus (`422 connection_failed`) : la configuration de l'app reste alors active.
 
+## Paiement en ligne des acomptes (Stripe)
+
+Un type de rendez-vous peut demander un acompte (`depositCents`, en centimes, CHF ; 0 = aucun ; entre 0.50 et 1000.–, par pas de 5 centimes). Il se règle par carte ou TWINT sur la page Stripe Checkout. Tout se configure dans l'app : **Rendez-vous > Réglages > Paiement en ligne** (aucune variable d'environnement, aucun webhook à créer).
+
+**Parcours.**
+1. `POST /api/public/booking/book` sur un type avec acompte : le créneau est **retenu** (table `payment_holds`), rien n'est écrit dans le calendrier, aucun e-mail ne part. La réponse porte `payment: { url, ref, amountCents, currency, expiresAt }` en plus de `cancelUrl` ; le navigateur part vers `url` (Stripe).
+2. Le client revient sur `/rdv/paiement/<ref>` (ou `/rdv/paiement/<ref>?abandon=1` s'il quitte la page Stripe). La page interroge `GET /api/public/booking/payment/:ref` (`PublicPaymentStatus` : `pending`, `processing`, `confirmed`, `expired`) ; le serveur vérifie alors la session auprès de Stripe. `POST /api/public/booking/payment/:ref/abandon` ferme la page Stripe et libère le créneau aussitôt.
+3. Paiement reçu : la réservation est créée comme d'habitude (événement, salle de visio, e-mails avec le lien d'annulation reçu à l'étape 1), avec `payment_*` renseignés. Si le calendrier est indisponible, la retenue reste « payée » et l'enregistrement est réessayé.
+4. Le serveur vérifie aussi toutes les 30 s les paiements en cours (client qui a payé puis fermé l'onglet). Une page de paiement vit 31 min ; non payée, la retenue expire et le créneau est libéré. Tant que Stripe ne répond pas, le créneau reste retenu (jamais de double réservation d'un créneau payé).
+
+Seuls des moyens de paiement immédiats sont proposés (`card`, et `twint` si coché) : le résultat est connu au retour du client. TWINT doit aussi être activé dans le tableau de bord Stripe.
+
+**Remboursements.** Le client qui annule par son lien au moins `refundHours` heures avant (24 par défaut, réglable, ou jamais) est remboursé automatiquement ; sinon l'acompte est gardé, et la page d'annulation le lui dit avant qu'il confirme. Quand Antoine annule, l'acompte est remboursé sauf s'il décoche la case. Un remboursement en échec est signalé sur la réservation, avec « Réessayer le remboursement » (`POST /api/booking/bookings/:id/refund`). Stripe refuse un second remboursement du même paiement.
+
+**Réglages (session requise).**
+
+| Route | Rôle |
+|---|---|
+| `GET /api/payments` | État (`PaymentSettingsState`) : configuré, mode test/live, 4 derniers caractères de la clé, TWINT, délai de remboursement, paiements en cours. |
+| `PUT /api/payments` | `{ secretKey?, twint?, refundHours? }`. Une nouvelle clé (`sk_…` ou `rk_…`) est d'abord essayée chez Stripe, puis enregistrée chiffrée (`connection_settings`, `stripe.secretKey`). |
+| `POST /api/payments/test` | Réessaie la clé enregistrée. |
+| `DELETE /api/payments` | Retire la clé : les types avec acompte disparaissent de la page publique (avertissement dans l'admin). |
+
+Une clé restreinte suffit : droits en écriture sur Checkout Sessions et Refunds. La clé ne ressort jamais (ni réponse, ni journal).
+
 ## Codes d'erreur
 
 | `code` | Statut | Sens |
@@ -509,6 +534,9 @@ Retire les identifiants de l'app pour revenir à ceux du `.env`. Refusé si le `
 | `rate_limited` | 429 | Limite de débit atteinte (`Retry-After`) |
 | `calendar_unavailable` | 502 / 503 | Calendrier injoignable ou aucun calendrier modifiable ; rien n'a été fait |
 | `busy` | 503 | Trop de demandes simultanées |
+| `payment_unavailable` | 502 / 503 | Page de paiement Stripe impossible à ouvrir ; rien n'est retenu |
+| `no_payment` / `already_refunded` | 409 | Remboursement sans objet (admin) |
+| `refund_failed` | 502 | Stripe a refusé le remboursement ; le motif est sur la réservation |
 
 ## Comportement du moteur
 

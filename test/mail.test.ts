@@ -71,7 +71,8 @@ describe('e-mails de la prise de rendez-vous', () => {
     const event = new ICAL.Event(vevent);
     expect(event.summary).toBe('Première consultation – Antoine Quarroz');
     expect(event.location).toBe('Rue du Lac 1, 1950 Sion');
-    expect(event.uid).toBe('rdv-b-123@alfred.example.ch');
+    // L'UID ne suit pas l'adresse publique : il reste le même si Alfred change de domaine.
+    expect(event.uid).toBe('rdv-b-123@alfred.antoinequarroz.ch');
     // Une simple publication : ni organisateur ni participant, donc pas d'invitation.
     expect(vevent.hasProperty('attendee')).toBe(false);
     expect(vevent.hasProperty('organizer')).toBe(false);

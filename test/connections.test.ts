@@ -961,8 +961,9 @@ describe('migration', () => {
 
     for (let pass = 0; pass < 2; pass++) {
       const db = openDb(dir);
+      // space_id : ajoutée à toute table qui n'en a pas (phase 4, server/migrations.ts).
       const columns = (db.prepare('PRAGMA table_info(connection_settings)').all() as unknown as { name: string }[]).map((c) => c.name);
-      expect(columns).toEqual(['key', 'value', 'secret', 'updated_at']);
+      expect(columns).toEqual(['key', 'value', 'secret', 'updated_at', 'space_id']);
       expect(new Store(db).listCalendars()).toHaveLength(calendars);
       expect((db.prepare('SELECT COUNT(*) AS n FROM booking_hours').get() as { n: number }).n).toBe(hours);
       expect((db.prepare("SELECT value FROM booking_settings WHERE key = 'publicName'").get() as { value: string }).value).toBe('Antoine Quarroz');

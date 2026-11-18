@@ -1,7 +1,10 @@
 import type {
+  AllDayPreviewItem,
   Booking, BookingAdminState, BookingHoursRange, BookingSettings, BookingType, BookingTypeInput,
   CalendarInfo, CaldavSaveResult, CaldavSettingsInput, ConnectionsState, ConnectionTest, EditScope, EventInput, Occurrence, PublicSlots,
-  SmtpSaveResult, SmtpSettingsInput, SyncStatus, VideoAdminState, VideoRoom, VideoRoomInput, VideoSettings,
+  PaymentSettingsInput, PaymentSettingsState,
+  PushPrefs, PushState, PushTestResult, SmtpSaveResult, SmtpSettingsInput, SyncStatus, VideoAdminState, VideoRoom, VideoRoomInput, VideoSettings,
+  LinkInfo, PersonDetail, PersonSummary,
 } from '../../shared/types';
 
 import { ApiError, requestJson } from './http';
@@ -13,7 +16,7 @@ function request<T>(method: string, path: string, body?: unknown): Promise<T> {
 }
 
 export const api = {
-  me: () => request<{ authenticated: boolean }>('GET', '/api/me'),
+  me: () => request<{ authenticated: boolean; compte?: boolean }>('GET', '/api/me'),
   login: (password: string) => request<{ ok: true }>('POST', '/api/login', { password }),
   logout: () => request<{ ok: true }>('POST', '/api/logout'),
   calendars: () => request<CalendarInfo[]>('GET', '/api/calendars'),
@@ -47,11 +50,13 @@ export const bookingApi = {
   hours: () => request<BookingHoursRange[]>('GET', '/api/booking/hours'),
   saveHours: (hours: BookingHoursRange[]) => request<BookingHoursRange[]>('PUT', '/api/booking/hours', hours),
   calendars: () => request<CalendarInfo[]>('GET', '/api/booking/calendars'),
+  allDay: () => request<{ horizonDays: number; items: AllDayPreviewItem[] }>('GET', '/api/booking/all-day'),
   setCalendarBlocks: (id: string, blocksBooking: boolean) =>
     request<CalendarInfo>('PATCH', `/api/booking/calendars/${encodeURIComponent(id)}`, { blocksBooking }),
   bookings: (scope: 'upcoming' | 'past') => request<Booking[]>('GET', `/api/booking/bookings?scope=${scope}&limit=200`),
-  cancelBooking: (id: string, notifyClient: boolean) =>
-    request<Booking>('POST', `/api/booking/bookings/${encodeURIComponent(id)}/cancel`, { notifyClient }),
+  cancelBooking: (id: string, notifyClient: boolean, refund = true) =>
+    request<Booking>('POST', `/api/booking/bookings/${encodeURIComponent(id)}/cancel`, { notifyClient, refund }),
+  refundBooking: (id: string) => request<Booking>('POST', `/api/booking/bookings/${encodeURIComponent(id)}/refund`, {}),
   resendConfirmation: (id: string) => request<Booking>('POST', `/api/booking/bookings/${encodeURIComponent(id)}/resend`, {}),
 };
 
@@ -66,6 +71,14 @@ export const connectionsApi = {
   clearCaldav: () => request<CaldavSaveResult>('DELETE', '/api/connections/caldav'),
 };
 
+/** Paiement en ligne des acomptes (Stripe). La clé n'est jamais renvoyée. */
+export const paymentsApi = {
+  state: () => request<PaymentSettingsState>('GET', '/api/payments'),
+  save: (input: PaymentSettingsInput) => request<{ state: PaymentSettingsState; test: ConnectionTest | null }>('PUT', '/api/payments', input),
+  test: () => request<{ state: PaymentSettingsState; test: ConnectionTest }>('POST', '/api/payments/test', {}),
+  clear: () => request<{ state: PaymentSettingsState }>('DELETE', '/api/payments'),
+};
+
 /** Visioconférence : réglages et salles (session requise). */
 export const videoApi = {
   state: () => request<VideoAdminState>('GET', '/api/video'),
@@ -74,4 +87,25 @@ export const videoApi = {
   personalRoom: (renew = false) => request<VideoRoom>('POST', '/api/video/personal', { renew }),
   endMeeting: (id: string) => request<{ ok: true }>('POST', `/api/video/rooms/${encodeURIComponent(id)}/end`, {}),
   deleteRoom: (id: string) => request<{ ok: true }>('DELETE', `/api/video/rooms/${encodeURIComponent(id)}`),
+};
+
+/** Notifications sur les appareils (Web Push, session requise). */
+export const pushApi = {
+  state: () => request<PushState>('GET', '/api/push'),
+  savePrefs: (patch: Partial<PushPrefs>) => request<PushState>('PUT', '/api/push/prefs', patch),
+  addDevice: (sub: PushSubscriptionJSON, label: string) => request<PushState>('POST', '/api/push/devices', { endpoint: sub.endpoint, keys: sub.keys, label }),
+  removeDevice: (id: string) => request<PushState>('DELETE', `/api/push/devices/${encodeURIComponent(id)}`),
+  test: (id?: string) => request<{ results: PushTestResult[]; state: PushState }>('POST', '/api/push/test', id ? { id } : {}),
+};
+
+/** Fiches Personnes et liens vers les autres modules (notes Cairn…). */
+export type LinkSource = { from: string } | { eventId: string };
+
+export const peopleApi = {
+  list: (q = '') => request<PersonSummary[]>('GET', `/api/people${q ? `?q=${encodeURIComponent(q)}` : ''}`),
+  get: (id: string) => request<PersonDetail>('GET', `/api/people/${encodeURIComponent(id)}`),
+  links: (source: LinkSource) =>
+    request<LinkInfo[]>('GET', `/api/links?${'from' in source ? `from=${encodeURIComponent(source.from)}` : `eventId=${encodeURIComponent(source.eventId)}`}`),
+  addLink: (source: LinkSource, target: string, title = '') => request<LinkInfo>('POST', '/api/links', { ...source, target, title }),
+  removeLink: (id: string) => request<{ ok: true }>('DELETE', `/api/links/${encodeURIComponent(id)}`),
 };
