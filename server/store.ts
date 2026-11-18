@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { uuidv7 } from './ids.js';
 import type { CalendarInfo, CalendarSource, Occurrence } from '../shared/types.js';
 import type { Db } from './db.js';
+import { ALL_SPACES } from './sql.js';
 import { expand, expandBusy, summarize, type BusyOccurrence } from './ics.js';
 
 export interface CalendarRow {
@@ -67,6 +68,11 @@ export class Store {
 
   constructor(readonly db: Db) {}
 
+  /** Espace dont ce magasin lit et écrit les données. */
+  get space(): string {
+    return this.db.spaceId;
+  }
+
   get version(): number {
     return this.changes;
   }
@@ -74,44 +80,43 @@ export class Store {
   // --- calendriers -------------------------------------------------------
 
   listCalendars(): CalendarRow[] {
-    return this.db.prepare('SELECT * FROM calendars ORDER BY sort, name').all() as unknown as CalendarRow[];
+    return this.db.all<CalendarRow>('SELECT * FROM calendars WHERE space_id = ? ORDER BY sort, name', this.space);
   }
 
   getCalendar(id: string): CalendarRow | undefined {
-    return this.db.prepare('SELECT * FROM calendars WHERE id = ?').get(id) as unknown as CalendarRow | undefined;
+    return this.db.get<CalendarRow>('SELECT * FROM calendars WHERE id = ? AND space_id = ?', id, this.space);
   }
 
   upsertCalendar(cal: Omit<CalendarRow, 'visible' | 'ctag' | 'blocks_booking'> & { ctag?: string | null }): void {
-    this.db
-      .prepare(
-        `INSERT INTO calendars (id, source, url, name, color, read_only, sort)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET name = excluded.name, color = excluded.color,
-           url = excluded.url, read_only = excluded.read_only, sort = excluded.sort`,
-      )
-      .run(cal.id, cal.source, cal.url, cal.name, cal.color, cal.read_only, cal.sort);
+    this.db.run(
+      `INSERT INTO calendars (id, source, url, name, color, read_only, sort, space_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET name = excluded.name, color = excluded.color,
+         url = excluded.url, read_only = excluded.read_only, sort = excluded.sort
+       WHERE calendars.space_id = excluded.space_id`,
+      cal.id, cal.source, cal.url, cal.name, cal.color, cal.read_only, cal.sort, this.space);
   }
 
   setCalendarCtag(id: string, ctag: string | null): void {
-    this.db.prepare('UPDATE calendars SET ctag = ? WHERE id = ?').run(ctag, id);
+    this.db.run('UPDATE calendars SET ctag = ? WHERE id = ? AND space_id = ?', ctag, id, this.space);
   }
 
   setCalendarVisible(id: string, visible: boolean): void {
-    this.db.prepare('UPDATE calendars SET visible = ? WHERE id = ?').run(visible ? 1 : 0, id);
+    this.db.run('UPDATE calendars SET visible = ? WHERE id = ? AND space_id = ?', visible ? 1 : 0, id, this.space);
   }
 
   setCalendarBlocksBooking(id: string, blocks: boolean): void {
-    this.db.prepare('UPDATE calendars SET blocks_booking = ? WHERE id = ?').run(blocks ? 1 : 0, id);
+    this.db.run('UPDATE calendars SET blocks_booking = ? WHERE id = ? AND space_id = ?', blocks ? 1 : 0, id, this.space);
     this.changes++;
   }
 
   deleteCalendar(id: string): void {
-    this.db.prepare('DELETE FROM calendars WHERE id = ?').run(id);
+    this.db.run('DELETE FROM calendars WHERE id = ? AND space_id = ?', id, this.space);
     this.changes++;
   }
 
   ensureLocalCalendar(): void {
-    const any = this.db.prepare('SELECT 1 FROM calendars LIMIT 1').get();
+    const any = this.db.get('SELECT 1 AS ok FROM calendars WHERE space_id = ? LIMIT 1', this.space);
     if (any) return;
     this.upsertCalendar({ id: `local:${uuidv7()}`, source: 'local', url: null, name: 'Personnel', color: DEFAULT_COLORS[0], read_only: 0, sort: 0 });
   }
@@ -119,14 +124,13 @@ export class Store {
   // --- événements --------------------------------------------------------
 
   getEvent(id: string): EventRow | undefined {
-    return this.db.prepare('SELECT id, calendar_id, href, etag, uid, ics FROM events WHERE id = ?').get(id) as unknown as EventRow | undefined;
+    return this.db.get<EventRow>('SELECT id, calendar_id, href, etag, uid, ics FROM events WHERE id = ? AND space_id = ?', id, this.space);
   }
 
   /** Paires href → etag d'un calendrier, pour comparer avec le serveur. */
   etagsForCalendar(calendarId: string): Map<string, { id: string; etag: string | null }> {
-    const rows = this.db
-      .prepare('SELECT id, href, etag FROM events WHERE calendar_id = ? AND href IS NOT NULL')
-      .all(calendarId) as unknown as { id: string; href: string; etag: string | null }[];
+    const rows = this.db.all<{ id: string; href: string; etag: string | null }>(
+      'SELECT id, href, etag FROM events WHERE calendar_id = ? AND href IS NOT NULL AND space_id = ?', calendarId, this.space);
     return new Map(rows.map((r) => [r.href, { id: r.id, etag: r.etag }]));
   }
 
@@ -134,38 +138,36 @@ export class Store {
   saveEvent(ev: { id?: string; calendarId: string; href: string | null; etag: string | null; ics: string }): string {
     const s = summarize(ev.ics);
     const id = ev.id ?? (ev.href ? eventIdForHref(ev.href) : uuidv7());
-    this.db
-      .prepare(
-        `INSERT INTO events (id, calendar_id, href, etag, uid, ics, summary, start_ms, end_ms, recurring, recur_end_ms, busy, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET calendar_id = excluded.calendar_id, href = excluded.href, etag = excluded.etag,
-           uid = excluded.uid, ics = excluded.ics, summary = excluded.summary, start_ms = excluded.start_ms,
-           end_ms = excluded.end_ms, recurring = excluded.recurring, recur_end_ms = excluded.recur_end_ms,
-           busy = excluded.busy, updated_at = excluded.updated_at`,
-      )
-      .run(id, ev.calendarId, ev.href, ev.etag, s.uid, ev.ics, s.summary, s.startMs, s.endMs, s.recurring ? 1 : 0, s.recurEndMs,
-        s.busy ? packBusy(s.busy) : null, Date.now());
+    this.db.run(
+      `INSERT INTO events (id, calendar_id, href, etag, uid, ics, summary, start_ms, end_ms, recurring, recur_end_ms, busy, updated_at, space_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET calendar_id = excluded.calendar_id, href = excluded.href, etag = excluded.etag,
+         uid = excluded.uid, ics = excluded.ics, summary = excluded.summary, start_ms = excluded.start_ms,
+         end_ms = excluded.end_ms, recurring = excluded.recurring, recur_end_ms = excluded.recur_end_ms,
+         busy = excluded.busy, updated_at = excluded.updated_at
+       WHERE events.space_id = excluded.space_id`,
+      id, ev.calendarId, ev.href, ev.etag, s.uid, ev.ics, s.summary, s.startMs, s.endMs, s.recurring ? 1 : 0, s.recurEndMs,
+      s.busy ? packBusy(s.busy) : null, Date.now(), this.space);
     this.changes++;
     return id;
   }
 
   deleteEvent(id: string): void {
-    this.db.prepare('DELETE FROM events WHERE id = ?').run(id);
+    this.db.run('DELETE FROM events WHERE id = ? AND space_id = ?', id, this.space);
     this.changes++;
   }
 
   /** Occurrences visibles sur une période. */
   occurrences(from: Date, to: Date, calendarIds?: string[]): Occurrence[] {
     const margin = 86_400_000; // journées entières indexées en heure locale
-    const rows = this.db
-      .prepare(
-        `SELECT e.id, e.calendar_id, e.ics FROM events e JOIN calendars c ON c.id = e.calendar_id
-         WHERE c.visible = 1
-           AND e.start_ms < ?
-           AND ((e.recurring = 0 AND e.end_ms > ?)
-             OR (e.recurring = 1 AND (e.recur_end_ms IS NULL OR e.recur_end_ms > ?)))`,
-      )
-      .all(to.getTime() + margin, from.getTime() - margin, from.getTime() - margin) as unknown as { id: string; calendar_id: string; ics: string }[];
+    const rows = this.db.all<{ id: string; calendar_id: string; ics: string }>(
+      `SELECT e.id, e.calendar_id, e.ics FROM events e JOIN calendars c ON c.id = e.calendar_id AND c.space_id = e.space_id
+       WHERE e.space_id = ? AND c.visible = 1
+         AND e.start_ms < ?
+         AND ((e.recurring = 0 AND e.end_ms > ?)
+           OR (e.recurring = 1 AND (e.recur_end_ms IS NULL OR e.recur_end_ms > ?)))
+       ORDER BY e.start_ms, e.id`,
+      this.space, to.getTime() + margin, from.getTime() - margin, from.getTime() - margin);
     const allowed = calendarIds ? new Set(calendarIds) : null;
     const out: Occurrence[] = [];
     for (const row of rows) {
@@ -209,17 +211,15 @@ export class Store {
 
   private eachBusy(from: Date, to: Date, visit: (o: BusyOccurrence, title: string, eventId: string, calendarId: string) => void): void {
     const margin = 86_400_000;
-    const rows = this.db
-      .prepare(
-        `SELECT e.id, e.calendar_id, e.summary, e.recurring, e.busy, CASE WHEN e.busy IS NULL THEN e.ics END AS ics
-         FROM events e JOIN calendars c ON c.id = e.calendar_id
-         WHERE c.blocks_booking = 1
-           AND e.start_ms < ?
-           AND ((e.recurring = 0 AND e.end_ms > ?)
-             OR (e.recurring = 1 AND (e.recur_end_ms IS NULL OR e.recur_end_ms > ?)))`,
-      )
-      .all(to.getTime() + margin, from.getTime() - margin, from.getTime() - margin) as unknown as
-        { id: string; calendar_id: string; summary: string; recurring: number; busy: string | null; ics: string | null }[];
+    const rows = this.db.all<{ id: string; calendar_id: string; summary: string; recurring: number; busy: string | null; ics: string | null }>(
+      `SELECT e.id, e.calendar_id, e.summary, e.recurring, e.busy, CASE WHEN e.busy IS NULL THEN e.ics END AS ics
+       FROM events e JOIN calendars c ON c.id = e.calendar_id AND c.space_id = e.space_id
+       WHERE e.space_id = ? AND c.blocks_booking = 1
+         AND e.start_ms < ?
+         AND ((e.recurring = 0 AND e.end_ms > ?)
+           OR (e.recurring = 1 AND (e.recur_end_ms IS NULL OR e.recur_end_ms > ?)))
+       ORDER BY e.start_ms, e.id`,
+      this.space, to.getTime() + margin, from.getTime() - margin, from.getTime() - margin);
     for (const row of rows) {
       try {
         let list: BusyOccurrence[];
@@ -231,7 +231,7 @@ export class Store {
         } else {
           // Ligne antérieure à la colonne « busy » : calculée une fois, puis mémorisée.
           list = summarize(row.ics!).busy ?? [];
-          this.db.prepare('UPDATE events SET busy = ? WHERE id = ?').run(packBusy(list), row.id);
+          this.db.run('UPDATE events SET busy = ? WHERE id = ? AND space_id = ?', packBusy(list), row.id, this.space);
         }
         for (const o of list) visit(o, row.summary ?? '', row.id, row.calendar_id);
       } catch (err) {
@@ -247,36 +247,37 @@ export class Store {
   findEvent(id: string | null, uid: string | null): { id: string; calendarId: string; uid: string; startMs: number; endMs: number } | undefined {
     type Row = { id: string; calendar_id: string; uid: string; start_ms: number; end_ms: number };
     const columns = 'id, calendar_id, uid, start_ms, end_ms';
-    let row = id ? (this.db.prepare(`SELECT ${columns} FROM events WHERE id = ?`).get(id) as Row | undefined) : undefined;
-    if (!row && uid) row = this.db.prepare(`SELECT ${columns} FROM events WHERE uid = ? ORDER BY updated_at DESC LIMIT 1`).get(uid) as Row | undefined;
+    let row = id ? this.db.get<Row>(`SELECT ${columns} FROM events WHERE id = ? AND space_id = ?`, id, this.space) : undefined;
+    if (!row && uid) row = this.db.get<Row>(`SELECT ${columns} FROM events WHERE uid = ? AND space_id = ? ORDER BY updated_at DESC, id LIMIT 1`, uid, this.space);
     return row && { id: row.id, calendarId: row.calendar_id, uid: row.uid, startMs: row.start_ms, endMs: row.end_ms };
   }
 
   /** Événements d'un calendrier qui portent cet UID. */
   eventIdsByUid(calendarId: string, uid: string): string[] {
-    return (this.db.prepare('SELECT id FROM events WHERE calendar_id = ? AND uid = ?').all(calendarId, uid) as { id: string }[]).map((r) => r.id);
+    return this.db.all<{ id: string }>('SELECT id FROM events WHERE calendar_id = ? AND uid = ? AND space_id = ? ORDER BY id', calendarId, uid, this.space).map((r) => r.id);
   }
 
   // --- sessions ----------------------------------------------------------
+  // Une session de connexion appartient à la personne, pas à un espace : elle ouvre tous les siens.
 
   createSession(days: number): { id: string; expires: Date } {
     const id = randomUUID() + randomUUID();
     const expires = new Date(Date.now() + days * 86_400_000);
-    this.db.prepare('INSERT INTO sessions (id, expires_ms) VALUES (?, ?)').run(hashToken(id), expires.getTime());
+    this.db.run(`INSERT INTO sessions (id, expires_ms) VALUES (?, ?) ${ALL_SPACES}`, hashToken(id), expires.getTime());
     return { id, expires };
   }
 
   isSessionValid(id: string): boolean {
-    const row = this.db.prepare('SELECT expires_ms FROM sessions WHERE id = ?').get(hashToken(id)) as { expires_ms: number } | undefined;
+    const row = this.db.get<{ expires_ms: number }>(`SELECT expires_ms FROM sessions WHERE id = ? ${ALL_SPACES}`, hashToken(id));
     return Boolean(row && row.expires_ms > Date.now());
   }
 
   deleteSession(id: string): void {
-    this.db.prepare('DELETE FROM sessions WHERE id = ?').run(hashToken(id));
+    this.db.run(`DELETE FROM sessions WHERE id = ? ${ALL_SPACES}`, hashToken(id));
   }
 
   purgeSessions(): void {
-    this.db.prepare('DELETE FROM sessions WHERE expires_ms < ?').run(Date.now());
+    this.db.run(`DELETE FROM sessions WHERE expires_ms < ? ${ALL_SPACES}`, Date.now());
   }
 }
 

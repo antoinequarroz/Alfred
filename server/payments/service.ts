@@ -53,17 +53,19 @@ export class PaymentsService {
   }
 
   private row(key: string): string | undefined {
-    return (this.db.prepare('SELECT value FROM connection_settings WHERE key = ?').get(key) as { value: string } | undefined)?.value;
+    return this.db.get<{ value: string }>('SELECT value FROM connection_settings WHERE key = ? AND space_id = ?', key, this.db.spaceId)?.value;
   }
 
   private put(key: string, value: string, secret = false): void {
-    this.db.prepare(
-      'INSERT INTO connection_settings (key, value, secret, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, secret = excluded.secret, updated_at = excluded.updated_at',
-    ).run(key, value, secret ? 1 : 0, new Date().toISOString());
+    this.db.run(
+      `INSERT INTO connection_settings (key, value, secret, updated_at, space_id) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, secret = excluded.secret, updated_at = excluded.updated_at
+       WHERE connection_settings.space_id = excluded.space_id`,
+      key, value, secret ? 1 : 0, new Date().toISOString(), this.db.spaceId);
   }
 
   private drop(key: string): void {
-    this.db.prepare('DELETE FROM connection_settings WHERE key = ?').run(key);
+    this.db.run('DELETE FROM connection_settings WHERE key = ? AND space_id = ?', key, this.db.spaceId);
   }
 
   /** Clé secrète en clair, ou null (absente ou indéchiffrable). */

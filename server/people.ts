@@ -2,7 +2,6 @@ import type { LinkInfo, PersonDetail, PersonSummary, ResolvedAddress } from '../
 import type { BookingService } from './booking/service.js';
 import type { Db } from './db.js';
 import { addressOf, MODULE, parseAddress, uuidv7 } from './ids.js';
-import { DEFAULT_SPACE_ID } from './migrations.js';
 import type { Store } from './store.js';
 
 // Annuaire des personnes et liens vers les objets des autres modules (phase 4, E4.2).
@@ -58,20 +57,21 @@ export class PeopleService {
 
   constructor(private readonly opts: PeopleOptions) {
     this.db = opts.db;
-    this.spaceId = opts.spaceId ?? DEFAULT_SPACE_ID;
+    this.spaceId = opts.spaceId ?? opts.db.spaceId;
     this.now = opts.now ?? (() => new Date());
   }
 
   // --- personnes -----------------------------------------------------------
 
+  /** Requête des fiches ; ses trois premiers paramètres sont : maintenant, maintenant, espace. */
   private summaryQuery(where: string): string {
     return `SELECT p.id, p.email, p.name, p.phone, p.created_at,
         (SELECT COUNT(*) FROM bookings b WHERE b.person_id = p.id AND b.space_id = p.space_id) AS booking_count,
         (SELECT MIN(b.start_utc) FROM bookings b WHERE b.person_id = p.id AND b.space_id = p.space_id
-           AND b.status = 'confirmed' AND b.end_utc > :now) AS next_at,
+           AND b.status = 'confirmed' AND b.end_utc > ?) AS next_at,
         (SELECT MAX(b.start_utc) FROM bookings b WHERE b.person_id = p.id AND b.space_id = p.space_id
-           AND b.status = 'confirmed' AND b.end_utc <= :now) AS last_at
-      FROM people p WHERE p.space_id = :space ${where}`;
+           AND b.status = 'confirmed' AND b.end_utc <= ?) AS last_at
+      FROM people p WHERE p.space_id = ? ${where}`;
   }
 
   private toSummary(r: PersonRow): PersonSummary {
@@ -85,19 +85,19 @@ export class PeopleService {
   list(query = '', limit = 500): PersonSummary[] {
     const q = query.trim().toLowerCase().slice(0, 100);
     const like = `%${q.replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
-    const where = q ? "AND (lower(p.name) LIKE :like ESCAPE '\\' OR p.email LIKE :like ESCAPE '\\' OR p.phone LIKE :like ESCAPE '\\')" : '';
-    const rows = this.db
-      .prepare(`${this.summaryQuery(where)} ORDER BY COALESCE(next_at, last_at, p.created_at) DESC LIMIT :limit`)
-      .all({ space: this.spaceId, now: this.now().toISOString(), limit, ...(q ? { like } : {}) } as never) as unknown as PersonRow[];
+    const where = q ? "AND (lower(p.name) LIKE ? ESCAPE '\\' OR lower(p.email) LIKE ? ESCAPE '\\' OR lower(p.phone) LIKE ? ESCAPE '\\')" : '';
+    const now = this.now().toISOString();
+    const rows = this.db.all<PersonRow>(
+      `SELECT * FROM (${this.summaryQuery(where)}) s ORDER BY COALESCE(s.next_at, s.last_at, s.created_at) DESC, s.id LIMIT ?`,
+      now, now, this.spaceId, ...(q ? [like, like, like] : []), limit);
     // Prochain RDV d'abord (le plus proche en tête), puis les autres par activité récente.
     const upcoming = rows.filter((r) => r.next_at).sort((a, b) => a.next_at!.localeCompare(b.next_at!));
     return [...upcoming, ...rows.filter((r) => !r.next_at)].map((r) => this.toSummary(r));
   }
 
   private findRow(id: string): PersonRow | undefined {
-    return this.db
-      .prepare(`${this.summaryQuery('AND p.id = :id')}`)
-      .get({ space: this.spaceId, now: this.now().toISOString(), id } as never) as unknown as PersonRow | undefined;
+    const now = this.now().toISOString();
+    return this.db.get<PersonRow>(this.summaryQuery('AND p.id = ?'), now, now, this.spaceId, id);
   }
 
   get(id: string): PersonDetail {
@@ -127,15 +127,14 @@ export class PeopleService {
         return row ? { ...base, title: row.name || row.email, url: `/#personnes/${encodeURIComponent(a.id)}` } : null;
       }
       case 'booking': {
-        const b = this.db.prepare('SELECT 1 FROM bookings WHERE id = ? AND space_id = ?').get(a.id, this.spaceId);
+        const b = this.db.get('SELECT 1 AS ok FROM bookings WHERE id = ? AND space_id = ?', a.id, this.spaceId);
         const d = b ? this.opts.booking.describeBooking(a.id) : null;
         if (!d) return null;
         return { ...base, title: d.title, url: d.personId ? `/#personnes/${encodeURIComponent(d.personId)}` : '/#rendez-vous' };
       }
       case 'event': {
-        const ev = this.db
-          .prepare('SELECT id, summary, start_ms FROM events WHERE uid = ? AND space_id = ? ORDER BY updated_at DESC LIMIT 1')
-          .get(a.id, this.spaceId) as { id: string; summary: string; start_ms: number } | undefined;
+        const ev = this.db.get<{ id: string; summary: string; start_ms: number }>(
+          'SELECT id, summary, start_ms FROM events WHERE uid = ? AND space_id = ? ORDER BY updated_at DESC, id LIMIT 1', a.id, this.spaceId);
         if (!ev) return null;
         return { ...base, title: ev.summary || 'Événement', url: '/' };
       }
@@ -207,9 +206,7 @@ export class PeopleService {
 
   /** Liens d'un objet, dans les deux sens (un lien posé depuis l'autre objet apparaît aussi). */
   listLinks(from: string): LinkInfo[] {
-    const rows = this.db
-      .prepare('SELECT * FROM links WHERE space_id = ? AND (from_ref = ? OR to_ref = ?) ORDER BY created_at, id')
-      .all(this.spaceId, from, from) as unknown as LinkRow[];
+    const rows = this.db.all<LinkRow>('SELECT * FROM links WHERE space_id = ? AND (from_ref = ? OR to_ref = ?) ORDER BY created_at, id', this.spaceId, from, from);
     return rows.map((r) => this.toLink(r, from));
   }
 
@@ -220,24 +217,21 @@ export class PeopleService {
     const { to, url } = this.parseTarget(target);
     if (to === source.address) throw new PeopleError(400, 'invalid', 'Un objet ne peut pas être relié à lui-même', { target: 'Choisis un autre lien' });
     const cleanTitle = title.replace(/[\r\n]+/g, ' ').trim().slice(0, 200);
-    const existing = this.db
-      .prepare("SELECT * FROM links WHERE space_id = ? AND from_ref = ? AND to_ref = ? AND kind = 'related'")
-      .get(this.spaceId, source.address, to) as unknown as LinkRow | undefined;
+    const existing = this.db.get<LinkRow>("SELECT * FROM links WHERE space_id = ? AND from_ref = ? AND to_ref = ? AND kind = 'related'", this.spaceId, source.address, to);
     if (existing) return this.toLink(existing, source.address);
-    const count = (this.db.prepare('SELECT COUNT(*) AS n FROM links WHERE space_id = ? AND from_ref = ?').get(this.spaceId, source.address) as { n: number }).n;
+    const count = this.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM links WHERE space_id = ? AND from_ref = ?', this.spaceId, source.address)!.n;
     if (count >= MAX_LINKS_PER_OBJECT) throw new PeopleError(409, 'too_many', `${MAX_LINKS_PER_OBJECT} liens au plus par objet`);
     const row: LinkRow = {
       id: uuidv7(), from_ref: source.address, to_ref: to, kind: 'related', title: cleanTitle,
       url: parseAddress(to) ? null : url, created_at: this.now().toISOString(),
     };
-    this.db
-      .prepare('INSERT INTO links (id, space_id, from_ref, to_ref, kind, title, url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(row.id, this.spaceId, row.from_ref, row.to_ref, row.kind, row.title, row.url, row.created_at);
+    this.db.run('INSERT INTO links (id, space_id, from_ref, to_ref, kind, title, url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      row.id, this.spaceId, row.from_ref, row.to_ref, row.kind, row.title, row.url, row.created_at);
     return this.toLink(row, source.address);
   }
 
   removeLink(id: string): void {
-    const res = this.db.prepare('DELETE FROM links WHERE id = ? AND space_id = ?').run(id, this.spaceId);
+    const res = this.db.run('DELETE FROM links WHERE id = ? AND space_id = ?', id, this.spaceId);
     if (res.changes === 0) throw new PeopleError(404, 'not_found', 'Lien introuvable');
   }
 }

@@ -1,4 +1,6 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import { uuidv7 } from '../ids.js';
+import { onFacts, OutboxReader } from '../outbox.js';
 import type { PushPrefs, PushReminderMode, PushState, PushDevice, PushTestResult } from '../../shared/types.js';
 import type { Db } from '../db.js';
 import type { Store } from '../store.js';
@@ -8,9 +10,11 @@ import { allowedEndpoint, generateVapidKeys, sendPush, validPushKeys, type Fetch
  * Notifications d'Alfred sur les appareils d'Antoine (iPhone, Mac, navigateur) :
  * nouveau rendez-vous, annulation par un client, rappel avant un rendez-vous, invité arrivé en visio.
  *
- * Les rendez-vous ne sont pas signalés par la prise de RDV elle-même : une tâche relit régulièrement
- * la table des réservations. Une notification n'est donc jamais perdue si l'envoi échoue au moment de
- * la réservation, et la prise de RDV ne dépend pas des services de push.
+ * Les rendez-vous et les invités ne sont pas signalés par la prise de RDV ou la visio elles-mêmes :
+ * les notifications lisent le journal d'événements (server/outbox.ts), en retenant leur position.
+ * Une notification n'est donc jamais perdue si l'envoi échoue au moment du fait, et la prise de RDV
+ * ne dépend pas des services de push. Les rappels, eux, dépendent de l'heure : ils sont calculés à
+ * chaque passe depuis l'agenda et les réservations.
  */
 
 export class PushError extends Error {
@@ -23,28 +27,6 @@ export class PushError extends Error {
   }
 }
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS push_settings (
-  key   TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS push_subscriptions (
-  id              TEXT PRIMARY KEY,
-  endpoint        TEXT NOT NULL UNIQUE,
-  p256dh          TEXT NOT NULL,
-  auth            TEXT NOT NULL,
-  label           TEXT NOT NULL,
-  created_at      TEXT NOT NULL,
-  last_success_at TEXT,
-  last_error      TEXT,
-  last_error_at   TEXT
-);
--- Notifications déjà traitées (envoyées, ou volontairement tues) : une clé par événement signalé.
-CREATE TABLE IF NOT EXISTS push_sent (
-  key     TEXT PRIMARY KEY,
-  sent_at TEXT NOT NULL
-);
-`;
 
 export const DEFAULT_PREFS: PushPrefs = {
   newBooking: true,
@@ -60,6 +42,8 @@ const MAX_DEVICES = 20;
 const DAY_MS = 86_400_000;
 /** Un invité qui recharge sa page ne déclenche pas une notification à chaque fois. */
 const GUEST_QUIET_MS = 2 * 60_000;
+/** Arrivée d'un invité encore signalée si elle date de moins de 5 minutes. */
+const GUEST_FRESH_MS = 5 * 60_000;
 
 export interface PushPayload {
   title: string;
@@ -126,6 +110,8 @@ export class PushService {
   private readonly vapid: VapidKeys;
   private readonly guestSeen = new Map<string, number>();
   private ticking: Promise<void> | null = null;
+  private again = false;
+  private readonly reader: OutboxReader;
 
   constructor(opts: PushOptions) {
     this.db = opts.db;
@@ -135,7 +121,6 @@ export class PushService {
     this.now = opts.now ?? (() => new Date());
     this.fetchImpl = opts.fetch;
     this.bookingVideoUrl = opts.bookingVideoUrl ?? (() => null);
-    this.db.exec(SCHEMA);
     // Paire de clés VAPID créée une fois pour toutes : la changer désabonnerait tous les appareils.
     // Elle n'est pas chiffrée : qui lit la base y trouve aussi les abonnements et leurs clés.
     const stored = this.setting<VapidKeys>('vapid');
@@ -143,6 +128,17 @@ export class PushService {
     if (!stored) this.saveSetting('vapid', this.vapid);
     // Les rendez-vous antérieurs à l'activation des notifications ne sont jamais signalés.
     if (!this.setting<string>('since')) this.saveSetting('since', this.now().toISOString());
+    this.reader = new OutboxReader(this.db, 'push');
+    // Un invité qui arrive en visio est signalé tout de suite, sans attendre la passe régulière.
+    onFacts(this.db, (types) => {
+      if (types.some((t) => t === 'video.guest_waiting' || t === 'video.guest_joined')) {
+        void this.tick().catch((err) => console.error('[alfred] notifications :', err));
+      }
+    });
+  }
+
+  private get space(): string {
+    return this.db.spaceId;
   }
 
   get publicKey(): string {
@@ -152,7 +148,7 @@ export class PushService {
   // --- réglages --------------------------------------------------------------
 
   private setting<T>(key: string): T | null {
-    const row = this.db.prepare('SELECT value FROM push_settings WHERE key = ?').get(key) as { value: string } | undefined;
+    const row = this.db.get<{ value: string }>('SELECT value FROM push_settings WHERE key = ? AND space_id = ?', key, this.space);
     if (!row) return null;
     try {
       return JSON.parse(row.value) as T;
@@ -162,7 +158,10 @@ export class PushService {
   }
 
   private saveSetting(key: string, value: unknown): void {
-    this.db.prepare('INSERT INTO push_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, JSON.stringify(value));
+    this.db.run(
+      `INSERT INTO push_settings (key, value, space_id) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE push_settings.space_id = excluded.space_id`,
+      key, JSON.stringify(value), this.space);
   }
 
   getPrefs(): PushPrefs {
@@ -197,7 +196,7 @@ export class PushService {
   // --- appareils -------------------------------------------------------------
 
   private rows(): SubRow[] {
-    return this.db.prepare('SELECT * FROM push_subscriptions ORDER BY created_at').all() as unknown as SubRow[];
+    return this.db.all<SubRow>('SELECT * FROM push_subscriptions WHERE space_id = ? ORDER BY created_at, id', this.space);
   }
 
   private toDevice(r: SubRow): PushDevice {
@@ -222,24 +221,24 @@ export class PushService {
     const rawLabel = typeof b.label === 'string' ? b.label.replace(/[\u0000-\u001f\u007f]/g, '').trim() : '';
     const replaces = typeof b.replaces === 'string' ? b.replaces : null;
     // Un abonnement renouvelé par le navigateur garde le nom de l'appareil.
-    const previous = replaces ? (this.db.prepare('SELECT label FROM push_subscriptions WHERE endpoint = ?').get(replaces) as { label: string } | undefined) : undefined;
+    const previous = replaces ? this.db.get<{ label: string }>('SELECT label FROM push_subscriptions WHERE endpoint = ? AND space_id = ?', replaces, this.space) : undefined;
     const label = (rawLabel || previous?.label || 'Appareil').slice(0, 60);
 
-    const existing = this.db.prepare('SELECT * FROM push_subscriptions WHERE endpoint = ?').get(endpoint) as SubRow | undefined;
+    const existing = this.db.get<SubRow>('SELECT * FROM push_subscriptions WHERE endpoint = ? AND space_id = ?', endpoint, this.space);
     if (existing) {
-      this.db.prepare('UPDATE push_subscriptions SET p256dh = ?, auth = ?, label = ? WHERE id = ?').run(keys.p256dh, keys.auth, label, existing.id);
+      this.db.run('UPDATE push_subscriptions SET p256dh = ?, auth = ?, label = ? WHERE id = ? AND space_id = ?', keys.p256dh, keys.auth, label, existing.id, this.space);
     } else {
-      if (replaces) this.db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(replaces);
-      const count = (this.db.prepare('SELECT COUNT(*) AS n FROM push_subscriptions').get() as { n: number }).n;
+      if (replaces) this.db.run('DELETE FROM push_subscriptions WHERE endpoint = ? AND space_id = ?', replaces, this.space);
+      const count = this.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM push_subscriptions WHERE space_id = ?', this.space)!.n;
       if (count >= MAX_DEVICES) throw new PushError(409, 'too_many', `${MAX_DEVICES} appareils au plus : retire d’abord un appareil que tu n’utilises plus.`);
-      this.db.prepare('INSERT INTO push_subscriptions (id, endpoint, p256dh, auth, label, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(randomUUID(), endpoint, keys.p256dh, keys.auth, label, this.now().toISOString());
+      this.db.run('INSERT INTO push_subscriptions (id, endpoint, p256dh, auth, label, created_at, space_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        uuidv7(this.now().getTime()), endpoint, keys.p256dh, keys.auth, label, this.now().toISOString(), this.space);
     }
-    return this.toDevice(this.db.prepare('SELECT * FROM push_subscriptions WHERE endpoint = ?').get(endpoint) as unknown as SubRow);
+    return this.toDevice(this.db.get<SubRow>('SELECT * FROM push_subscriptions WHERE endpoint = ? AND space_id = ?', endpoint, this.space)!);
   }
 
   remove(id: string): void {
-    const r = this.db.prepare('DELETE FROM push_subscriptions WHERE id = ?').run(id);
+    const r = this.db.run('DELETE FROM push_subscriptions WHERE id = ? AND space_id = ?', id, this.space);
     if (r.changes === 0) throw new PushError(404, 'not_found', 'Appareil introuvable');
   }
 
@@ -255,14 +254,14 @@ export class PushService {
       });
       const at = this.now().toISOString();
       if (outcome.ok) {
-        this.db.prepare('UPDATE push_subscriptions SET last_success_at = ?, last_error = NULL, last_error_at = NULL WHERE id = ?').run(at, r.id);
+        this.db.run('UPDATE push_subscriptions SET last_success_at = ?, last_error = NULL, last_error_at = NULL WHERE id = ? AND space_id = ?', at, r.id, this.space);
         return { id: r.id, label: r.label, ok: true, removed: false, error: null };
       }
       if (outcome.gone) {
         // L'appareil s'est désabonné (ou l'app a été supprimée) : il est oublié.
-        this.db.prepare('DELETE FROM push_subscriptions WHERE id = ?').run(r.id);
+        this.db.run('DELETE FROM push_subscriptions WHERE id = ? AND space_id = ?', r.id, this.space);
       } else {
-        this.db.prepare('UPDATE push_subscriptions SET last_error = ?, last_error_at = ? WHERE id = ?').run(outcome.error, at, r.id);
+        this.db.run('UPDATE push_subscriptions SET last_error = ?, last_error_at = ? WHERE id = ? AND space_id = ?', outcome.error, at, r.id, this.space);
         console.warn(`[alfred] notification non envoyée à « ${r.label} » : ${outcome.error}`);
       }
       return { id: r.id, label: r.label, ok: false, removed: outcome.gone, error: outcome.error };
@@ -278,7 +277,7 @@ export class PushService {
 
   /** Marque une clé comme traitée. false si elle l'était déjà. */
   private claim(key: string): boolean {
-    const r = this.db.prepare('INSERT OR IGNORE INTO push_sent (key, sent_at) VALUES (?, ?)').run(key, this.now().toISOString());
+    const r = this.db.run('INSERT INTO push_sent (key, sent_at, space_id) VALUES (?, ?, ?) ON CONFLICT (key) DO NOTHING', key, this.now().toISOString(), this.space);
     return r.changes > 0;
   }
 
@@ -313,10 +312,24 @@ export class PushService {
 
   /** Une passe : nouveaux rendez-vous, annulations, rappels. Jamais deux passes en même temps. */
   tick(): Promise<void> {
-    this.ticking ??= this.runTick().finally(() => {
+    if (this.ticking) {
+      // Demandée pendant une passe : une autre suit, pour ne pas attendre la passe régulière.
+      this.again = true;
+      return this.ticking;
+    }
+    this.ticking = (async () => {
+      do {
+        this.again = false;
+        await this.runTick();
+      } while (this.again);
+    })().finally(() => {
       this.ticking = null;
     });
     return this.ticking;
+  }
+
+  private booking(id: string): BookingRow | undefined {
+    return this.db.get<BookingRow>('SELECT * FROM bookings WHERE id = ? AND space_id = ?', id, this.space);
   }
 
   private async runTick(): Promise<void> {
@@ -325,15 +338,18 @@ export class PushService {
     const nowMs = now.getTime();
     const since = new Date(Math.max(Date.parse(this.setting<string>('since') ?? now.toISOString()), nowMs - DAY_MS)).toISOString();
     const jobs: Promise<unknown>[] = [];
-    const hasTable = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bookings'").get();
-
-    if (hasTable) {
-      const created = this.db.prepare('SELECT * FROM bookings WHERE created_at >= ? ORDER BY created_at').all(since) as unknown as BookingRow[];
-      for (const b of created) {
-        if (!this.claim(`new:${b.id}`)) continue;
+    // Nouveaux rendez-vous, annulations et invités en visio : lus dans le journal d'événements.
+    const facts = this.reader.pending(500);
+    for (const fact of facts) {
+      if (fact.occurredAt < since) continue;
+      const d = fact.data as { bookingId?: string; name?: string; typeName?: string; start?: string; by?: string; slug?: string; title?: string; guestName?: string };
+      if (fact.type === 'booking.created' && d.bookingId) {
+        if (!this.claim(`new:${d.bookingId}`)) continue;
+        // Horaire et statut actuels : la réservation a pu être déplacée ou annulée depuis.
+        const b = this.booking(d.bookingId);
         // Réservé puis annulé avant même d'avoir été signalé : rien à dire.
-        if (b.status !== 'confirmed') {
-          this.claim(`cancel:${b.id}`);
+        if (!b || b.status !== 'confirmed') {
+          this.claim(`cancel:${d.bookingId}`);
           continue;
         }
         if (!prefs.newBooking) continue;
@@ -341,17 +357,23 @@ export class PushService {
           ? { title: 'Nouveau rendez-vous', body: `${b.name} · ${b.type_name}, ${this.when(b.start_utc)}`, url: '/#rendez-vous', tag: `rdv-${b.id}` }
           : { title: 'Nouveau rendez-vous', body: `Un rendez-vous a été pris pour ${this.when(b.start_utc)}.`, url: '/#rendez-vous', tag: `rdv-${b.id}` },
         { ttl: DAY_MS / 1000 }));
-      }
-
-      const cancelled = this.db.prepare("SELECT * FROM bookings WHERE status = 'cancelled' AND cancelled_by = 'client' AND cancelled_at >= ?").all(since) as unknown as BookingRow[];
-      for (const b of cancelled) {
-        if (!this.claim(`cancel:${b.id}`) || !prefs.cancellation) continue;
+      } else if (fact.type === 'booking.cancelled' && d.bookingId && d.by === 'client') {
+        if (!this.claim(`cancel:${d.bookingId}`) || !prefs.cancellation) continue;
+        const b = this.booking(d.bookingId);
+        const name = b?.name ?? d.name ?? '';
+        const typeName = b?.type_name ?? d.typeName ?? '';
+        const start = b?.start_utc ?? d.start ?? fact.occurredAt;
         jobs.push(this.deliver(prefs.details
-          ? { title: 'Rendez-vous annulé', body: `${b.name} a annulé : ${b.type_name}, ${this.when(b.start_utc)}`, url: '/#rendez-vous', tag: `rdv-${b.id}` }
-          : { title: 'Rendez-vous annulé', body: `Le rendez-vous du ${this.when(b.start_utc)} a été annulé.`, url: '/#rendez-vous', tag: `rdv-${b.id}` },
+          ? { title: 'Rendez-vous annulé', body: `${name} a annulé : ${typeName}, ${this.when(start)}`, url: '/#rendez-vous', tag: `rdv-${d.bookingId}` }
+          : { title: 'Rendez-vous annulé', body: `Le rendez-vous du ${this.when(start)} a été annulé.`, url: '/#rendez-vous', tag: `rdv-${d.bookingId}` },
         { ttl: DAY_MS / 1000 }));
+      } else if ((fact.type === 'video.guest_waiting' || fact.type === 'video.guest_joined') && d.slug && d.guestName) {
+        // Un invité arrivé il y a plus de 5 minutes (Alfred arrêté entre-temps) n'est plus signalé.
+        if (Date.parse(fact.occurredAt) < nowMs - GUEST_FRESH_MS) continue;
+        jobs.push(this.guestArrived({ slug: d.slug, title: d.title ?? '' }, d.guestName, fact.type === 'video.guest_waiting'));
       }
     }
+    if (facts.length > 0) this.reader.ack(facts[facts.length - 1].seq);
 
     if (prefs.reminders !== 'off') {
       const windowMs = prefs.reminderMinutes * 60_000;
@@ -370,9 +392,9 @@ export class PushService {
         }, { ttl: Math.max(60, Math.round((Date.parse(startIso) - nowMs) / 1000) + 300), urgency: 'high' }));
       };
 
-      if (prefs.reminders === 'bookings' && hasTable) {
-        const rows = this.db.prepare("SELECT * FROM bookings WHERE status = 'confirmed' AND start_utc > ? AND start_utc <= ?")
-          .all(new Date(nowMs - 60_000).toISOString(), new Date(nowMs + windowMs).toISOString()) as unknown as BookingRow[];
+      if (prefs.reminders === 'bookings') {
+        const rows = this.db.all<BookingRow>("SELECT * FROM bookings WHERE space_id = ? AND status = 'confirmed' AND start_utc > ? AND start_utc <= ? ORDER BY start_utc, id",
+          this.space, new Date(nowMs - 60_000).toISOString(), new Date(nowMs + windowMs).toISOString());
         for (const b of rows) {
           if (!due(Date.parse(b.start_utc))) continue;
           const video = this.localPath(this.bookingVideoUrl(b.id));
@@ -387,7 +409,7 @@ export class PushService {
       }
     }
 
-    this.db.prepare('DELETE FROM push_sent WHERE sent_at < ?').run(new Date(nowMs - 3 * DAY_MS).toISOString());
+    this.db.run('DELETE FROM push_sent WHERE sent_at < ? AND space_id = ?', new Date(nowMs - 3 * DAY_MS).toISOString(), this.space);
     await Promise.all(jobs);
   }
 

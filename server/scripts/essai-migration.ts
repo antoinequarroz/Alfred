@@ -24,7 +24,7 @@ const dir = mkdtempSync(join(tmpdir(), 'alfred-essai-'));
 try {
   const original = new DatabaseSync(source, { readOnly: true });
   original.exec(`VACUUM INTO '${join(dir, 'alfred.db').replace(/'/g, "''")}'`);
-  const count = (db: DatabaseSync, sql: string) => (db.prepare(sql).get() as { n: number }).n;
+  const count = (db: { prepare(sql: string): { get(): unknown } }, sql: string) => (db.prepare(sql).get() as { n: number }).n;
   const before = {
     bookings: count(original, 'SELECT COUNT(*) AS n FROM bookings'),
     emails: count(original, 'SELECT COUNT(DISTINCT lower(trim(email))) AS n FROM bookings'),

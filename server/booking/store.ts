@@ -4,7 +4,14 @@ import {
   type PaymentStatus,
 } from '../../shared/types.js';
 import { tx, type Db } from '../db.js';
-import { DEFAULT_SPACE_ID, upsertPerson } from '../migrations.js';
+import { upsertPerson } from '../migrations.js';
+import type { Param } from '../sql.js';
+import { recordFact } from '../outbox.js';
+
+/** Détails d'une réservation repris dans les faits du journal (jamais l'e-mail ni le téléphone). */
+function bookingFact(b: Pick<BookingRow, 'id' | 'type_name' | 'start_utc' | 'end_utc' | 'name' | 'status'> & { person_id?: string | null }): Record<string, unknown> {
+  return { bookingId: b.id, typeName: b.type_name, start: b.start_utc, end: b.end_utc, name: b.name, personId: b.person_id ?? null, status: b.status };
+}
 
 export interface BookingRow {
   id: string;
@@ -135,10 +142,14 @@ function toType(r: TypeRow): BookingType {
 export class BookingStore {
   constructor(private readonly db: Db) {}
 
+  private get space(): string {
+    return this.db.spaceId;
+  }
+
   // --- réglages ------------------------------------------------------------
 
   getSettings(defaults: { publicName: string }): BookingSettings {
-    const rows = this.db.prepare('SELECT key, value FROM booking_settings').all() as unknown as { key: string; value: string }[];
+    const rows = this.db.all<{ key: string; value: string }>('SELECT key, value FROM booking_settings WHERE space_id = ?', this.space);
     const map = new Map(rows.map((r) => [r.key, r.value]));
     const step = Number(map.get('slot_step_min'));
     const reminders = map.has('reminder_hours') ? parseReminderHours(map.get('reminder_hours')) : [24, 1];
@@ -158,7 +169,11 @@ export class BookingStore {
   }
 
   saveSettings(s: BookingSettings): void {
-    const set = this.db.prepare('INSERT INTO booking_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+    // La clé reste unique pour toute la base (schéma d'origine) : la clause WHERE empêche
+    // d'écrire sur la ligne d'un autre espace.
+    const set = { run: (key: string, value: string) => this.db.run(
+      `INSERT INTO booking_settings (key, value, space_id) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE booking_settings.space_id = excluded.space_id`, key, value, this.space) };
     tx(this.db, () => {
       set.run('enabled', s.enabled ? '1' : '0');
       set.run('public_name', s.publicName);
@@ -176,62 +191,61 @@ export class BookingStore {
   // --- types ---------------------------------------------------------------
 
   listTypes(): BookingType[] {
-    return (this.db.prepare('SELECT * FROM booking_types ORDER BY sort, name').all() as unknown as TypeRow[]).map(toType);
+    return this.db.all<TypeRow>('SELECT * FROM booking_types WHERE space_id = ? ORDER BY sort, name', this.space).map(toType);
   }
 
   getType(id: string): BookingType | undefined {
-    const row = this.db.prepare('SELECT * FROM booking_types WHERE id = ?').get(id) as unknown as TypeRow | undefined;
+    const row = this.db.get<TypeRow>('SELECT * FROM booking_types WHERE id = ? AND space_id = ?', id, this.space);
     return row && toType(row);
   }
 
   getTypeBySlug(slug: string): BookingType | undefined {
-    const row = this.db.prepare('SELECT * FROM booking_types WHERE slug = ?').get(slug) as unknown as TypeRow | undefined;
+    const row = this.db.get<TypeRow>('SELECT * FROM booking_types WHERE slug = ? AND space_id = ?', slug, this.space);
     return row && toType(row);
   }
 
   nextTypeSort(): number {
-    const row = this.db.prepare('SELECT COALESCE(MAX(sort), -1) + 1 AS n FROM booking_types').get() as { n: number };
+    const row = this.db.get<{ n: number }>('SELECT COALESCE(MAX(sort), -1) + 1 AS n FROM booking_types WHERE space_id = ?', this.space)!;
     return row.n;
   }
 
   saveType(t: BookingType): void {
-    this.db
-      .prepare(
-        `INSERT INTO booking_types (id, slug, name, duration_min, description, mode, location, buffer_before_min,
-           buffer_after_min, min_notice_hours, horizon_days, deposit_cents, active, sort)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET slug = excluded.slug, name = excluded.name, duration_min = excluded.duration_min,
-           description = excluded.description, mode = excluded.mode, location = excluded.location,
-           buffer_before_min = excluded.buffer_before_min, buffer_after_min = excluded.buffer_after_min,
-           min_notice_hours = excluded.min_notice_hours, horizon_days = excluded.horizon_days,
-           deposit_cents = excluded.deposit_cents, active = excluded.active, sort = excluded.sort`,
-      )
-      .run(t.id, t.slug, t.name, t.durationMin, t.description, t.mode, t.location, t.bufferBeforeMin, t.bufferAfterMin,
-        t.minNoticeHours, t.horizonDays, t.depositCents, t.active ? 1 : 0, t.sort);
+    this.db.run(
+      `INSERT INTO booking_types (id, slug, name, duration_min, description, mode, location, buffer_before_min,
+         buffer_after_min, min_notice_hours, horizon_days, deposit_cents, active, sort, space_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET slug = excluded.slug, name = excluded.name, duration_min = excluded.duration_min,
+         description = excluded.description, mode = excluded.mode, location = excluded.location,
+         buffer_before_min = excluded.buffer_before_min, buffer_after_min = excluded.buffer_after_min,
+         min_notice_hours = excluded.min_notice_hours, horizon_days = excluded.horizon_days,
+         deposit_cents = excluded.deposit_cents, active = excluded.active, sort = excluded.sort
+       WHERE booking_types.space_id = excluded.space_id`,
+      t.id, t.slug, t.name, t.durationMin, t.description, t.mode, t.location, t.bufferBeforeMin, t.bufferAfterMin,
+      t.minNoticeHours, t.horizonDays, t.depositCents, t.active ? 1 : 0, t.sort, this.space);
   }
 
   deleteType(id: string): void {
-    this.db.prepare('DELETE FROM booking_types WHERE id = ?').run(id);
+    this.db.run('DELETE FROM booking_types WHERE id = ? AND space_id = ?', id, this.space);
   }
 
   setTypeOrder(ids: string[]): void {
-    const set = this.db.prepare('UPDATE booking_types SET sort = ? WHERE id = ?');
-    tx(this.db, () => ids.forEach((id, index) => set.run(index, id)));
+    tx(this.db, () => ids.forEach((id, index) => this.db.run('UPDATE booking_types SET sort = ? WHERE id = ? AND space_id = ?', index, id, this.space)));
   }
 
   // --- horaires ------------------------------------------------------------
 
   getHours(): BookingHoursRange[] {
-    const rows = this.db.prepare('SELECT weekday, start_min, end_min FROM booking_hours ORDER BY weekday, start_min').all() as unknown as
-      { weekday: number; start_min: number; end_min: number }[];
+    const rows = this.db.all<{ weekday: number; start_min: number; end_min: number }>(
+      'SELECT weekday, start_min, end_min FROM booking_hours WHERE space_id = ? ORDER BY weekday, start_min', this.space);
     return rows.map((r) => ({ weekday: r.weekday, startMin: r.start_min, endMin: r.end_min }));
   }
 
   setHours(hours: BookingHoursRange[]): void {
-    const insert = this.db.prepare('INSERT INTO booking_hours (weekday, start_min, end_min) VALUES (?, ?, ?)');
     tx(this.db, () => {
-      this.db.exec('DELETE FROM booking_hours');
-      for (const h of hours) insert.run(h.weekday, h.startMin, h.endMin);
+      this.db.run('DELETE FROM booking_hours WHERE space_id = ?', this.space);
+      for (const h of hours) {
+        this.db.run('INSERT INTO booking_hours (weekday, start_min, end_min, space_id) VALUES (?, ?, ?, ?)', h.weekday, h.startMin, h.endMin, this.space);
+      }
     });
   }
 
@@ -240,83 +254,83 @@ export class BookingStore {
   /** Enregistre la réservation et la rattache à la fiche de la personne (créée au besoin, reconnue par son e-mail). */
   insertBooking(b: BookingRow): void {
     tx(this.db, () => {
-      const personId = upsertPerson(this.db, { spaceId: DEFAULT_SPACE_ID, email: b.email, name: b.name, phone: b.phone, at: b.created_at });
+      const personId = upsertPerson(this.db, { spaceId: this.space, email: b.email, name: b.name, phone: b.phone, at: b.created_at });
       b.person_id = personId;
-      this.db
-        .prepare(
-          `INSERT INTO bookings (id, type_id, type_name, location, buffer_before_min, buffer_after_min, event_id, event_uid, calendar_id,
-             start_utc, end_utc, name, email, phone, message, status, token_hash, created_at, cancelled_at, cancelled_by, mail_error,
-             notified_start, person_id, payment_amount_cents, payment_currency, payment_intent, payment_status, payment_error)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(b.id, b.type_id, b.type_name, b.location, b.buffer_before_min, b.buffer_after_min, b.event_id, b.event_uid, b.calendar_id,
+      this.db.run(
+        `INSERT INTO bookings (id, type_id, type_name, location, buffer_before_min, buffer_after_min, event_id, event_uid, calendar_id,
+           start_utc, end_utc, name, email, phone, message, status, token_hash, created_at, cancelled_at, cancelled_by, mail_error,
+           notified_start, person_id, payment_amount_cents, payment_currency, payment_intent, payment_status, payment_error, space_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        b.id, b.type_id, b.type_name, b.location, b.buffer_before_min, b.buffer_after_min, b.event_id, b.event_uid, b.calendar_id,
           b.start_utc, b.end_utc, b.name, b.email, b.phone, b.message, b.status, b.token_hash, b.created_at, b.cancelled_at,
           b.cancelled_by, b.mail_error, b.notified_start, personId, b.payment_amount_cents ?? null, b.payment_currency ?? null,
-          b.payment_intent ?? null, b.payment_status ?? null, b.payment_error ?? null);
+          b.payment_intent ?? null, b.payment_status ?? null, b.payment_error ?? null, this.space);
+      recordFact(this.db, 'booking.created', b.id, { ...bookingFact(b), deposit: b.payment_amount_cents ? { amountCents: b.payment_amount_cents, currency: b.payment_currency } : null }, b.created_at);
     });
   }
 
   /** Réservations d'une personne (toutes, annulées comprises), les plus récentes d'abord. */
-  listForPerson(personId: string, spaceId: string = DEFAULT_SPACE_ID): BookingRow[] {
-    return this.db
-      .prepare('SELECT * FROM bookings WHERE person_id = ? AND space_id = ? ORDER BY start_utc DESC')
-      .all(personId, spaceId) as unknown as BookingRow[];
+  listForPerson(personId: string): BookingRow[] {
+    return this.db.all<BookingRow>('SELECT * FROM bookings WHERE person_id = ? AND space_id = ? ORDER BY start_utc DESC, id', personId, this.space);
   }
 
   getBooking(id: string): BookingRow | undefined {
-    return this.db.prepare('SELECT * FROM bookings WHERE id = ?').get(id) as unknown as BookingRow | undefined;
+    return this.db.get<BookingRow>('SELECT * FROM bookings WHERE id = ? AND space_id = ?', id, this.space);
   }
 
   /** Réservation d'un jeton : celui de la confirmation, ou l'un de ceux des e-mails suivants (rappels, déplacement). */
   getBookingByTokenHash(hash: string): BookingRow | undefined {
-    const row = this.db.prepare('SELECT * FROM bookings WHERE token_hash = ?').get(hash) as unknown as BookingRow | undefined;
+    const row = this.db.get<BookingRow>('SELECT * FROM bookings WHERE token_hash = ? AND space_id = ?', hash, this.space);
     if (row) return row;
-    return this.db
-      .prepare('SELECT b.* FROM booking_tokens t JOIN bookings b ON b.id = t.booking_id WHERE t.token_hash = ?')
-      .get(hash) as unknown as BookingRow | undefined;
+    return this.db.get<BookingRow>(
+      'SELECT b.* FROM booking_tokens t JOIN bookings b ON b.id = t.booking_id AND b.space_id = t.space_id WHERE t.token_hash = ? AND t.space_id = ?',
+      hash, this.space);
   }
 
   /** Ajoute un lien vers la réservation, sans retirer les précédents. */
   addToken(bookingId: string, hash: string, atIso: string): void {
-    this.db.prepare('INSERT INTO booking_tokens (token_hash, booking_id, created_at) VALUES (?, ?, ?)').run(hash, bookingId, atIso);
+    this.db.run('INSERT INTO booking_tokens (token_hash, booking_id, created_at, space_id) VALUES (?, ?, ?, ?)', hash, bookingId, atIso, this.space);
   }
 
   /** Réservations confirmées dont le début tombe dans ]from, to] (instants ISO UTC), les plus proches d'abord. */
   confirmedStartingBetween(fromIso: string, toIso: string): BookingRow[] {
-    return this.db
-      .prepare("SELECT * FROM bookings WHERE status = 'confirmed' AND start_utc > ? AND start_utc <= ? ORDER BY start_utc")
-      .all(fromIso, toIso) as unknown as BookingRow[];
+    return this.db.all<BookingRow>(
+      "SELECT * FROM bookings WHERE space_id = ? AND status = 'confirmed' AND start_utc > ? AND start_utc <= ? ORDER BY start_utc, id",
+      this.space, fromIso, toIso);
   }
 
   setRemindersSent(id: string, hours: number[]): void {
-    this.db.prepare('UPDATE bookings SET reminders_sent = ? WHERE id = ?').run(hours.join(','), id);
+    this.db.run('UPDATE bookings SET reminders_sent = ? WHERE id = ? AND space_id = ?', hours.join(','), id, this.space);
   }
 
   /** Le client connaît un nouvel horaire depuis atIso : les rappels repartent de zéro pour cet horaire. */
   resetReminders(id: string, atIso: string): void {
-    this.db.prepare("UPDATE bookings SET reminders_sent = '', reminder_ref = ? WHERE id = ?").run(atIso, id);
+    this.db.run("UPDATE bookings SET reminders_sent = '', reminder_ref = ? WHERE id = ? AND space_id = ?", atIso, id, this.space);
   }
 
   /** Déplacement par le client : nouvel horaire, connu de lui, et compteur augmenté. */
   rescheduleByClient(id: string, startIso: string, endIso: string, atIso: string): void {
-    this.db
-      .prepare(
+    tx(this.db, () => {
+      const before = this.getBooking(id);
+      this.db.run(
         `UPDATE bookings SET start_utc = ?, end_utc = ?, notified_start = NULL, reminders_sent = '', reminder_ref = ?,
-           client_reschedules = client_reschedules + 1 WHERE id = ?`,
-      )
-      .run(startIso, endIso, atIso, id);
+           client_reschedules = client_reschedules + 1 WHERE id = ? AND space_id = ?`,
+        startIso, endIso, atIso, id, this.space);
+      const b = this.getBooking(id);
+      if (b) recordFact(this.db, 'booking.rescheduled', id, { ...bookingFact(b), by: 'client', previousStart: before?.start_utc ?? null }, atIso);
+    });
   }
 
   /** Réservations confirmées qui recoupent [from, to) (instants ISO UTC). */
   confirmedBetween(fromIso: string, toIso: string): BookingRow[] {
-    return this.db
-      .prepare("SELECT * FROM bookings WHERE status = 'confirmed' AND start_utc < ? AND end_utc > ? ORDER BY start_utc")
-      .all(toIso, fromIso) as unknown as BookingRow[];
+    return this.db.all<BookingRow>(
+      "SELECT * FROM bookings WHERE space_id = ? AND status = 'confirmed' AND start_utc < ? AND end_utc > ? ORDER BY start_utc, id",
+      this.space, toIso, fromIso);
   }
 
   /** Réservations confirmées qui se terminent après un instant donné (ISO UTC). */
   confirmedEndingAfter(iso: string): BookingRow[] {
-    return this.db.prepare("SELECT * FROM bookings WHERE status = 'confirmed' AND end_utc > ? ORDER BY start_utc").all(iso) as unknown as BookingRow[];
+    return this.db.all<BookingRow>("SELECT * FROM bookings WHERE space_id = ? AND status = 'confirmed' AND end_utc > ? ORDER BY start_utc, id", this.space, iso);
   }
 
   /**
@@ -324,96 +338,123 @@ export class BookingStore {
    * annulées comprises : annuler ne redonne pas le droit d'en créer.
    */
   countCreatedForEmailSince(email: string, sinceIso: string): number {
-    const row = this.db
-      .prepare('SELECT COUNT(*) AS n FROM bookings WHERE created_at > ? AND email = ? COLLATE NOCASE')
-      .get(sinceIso, email) as { n: number };
+    const row = this.db.get<{ n: number }>(
+      'SELECT COUNT(*) AS n FROM bookings WHERE space_id = ? AND created_at > ? AND lower(email) = lower(?)', this.space, sinceIso, email)!;
     return row.n;
   }
 
   /** À venir : confirmées non terminées, de la plus proche à la plus lointaine. */
   listUpcoming(nowIso: string, limit: number): BookingRow[] {
-    return this.db
-      .prepare("SELECT * FROM bookings WHERE status = 'confirmed' AND end_utc > ? ORDER BY start_utc LIMIT ?")
-      .all(nowIso, limit) as unknown as BookingRow[];
+    return this.db.all<BookingRow>(
+      "SELECT * FROM bookings WHERE space_id = ? AND status = 'confirmed' AND end_utc > ? ORDER BY start_utc, id LIMIT ?", this.space, nowIso, limit);
   }
 
   /** Passées ou annulées, de la plus récente à la plus ancienne. */
   listPast(nowIso: string, limit: number, offset: number): BookingRow[] {
-    return this.db
-      .prepare("SELECT * FROM bookings WHERE status = 'cancelled' OR end_utc <= ? ORDER BY start_utc DESC LIMIT ? OFFSET ?")
-      .all(nowIso, limit, offset) as unknown as BookingRow[];
+    return this.db.all<BookingRow>(
+      "SELECT * FROM bookings WHERE space_id = ? AND (status = 'cancelled' OR end_utc <= ?) ORDER BY start_utc DESC, id LIMIT ? OFFSET ?",
+      this.space, nowIso, limit, offset);
   }
 
   markCancelled(id: string, by: 'client' | 'admin', atIso: string): void {
-    this.db.prepare("UPDATE bookings SET status = 'cancelled', cancelled_at = ?, cancelled_by = ? WHERE id = ?").run(atIso, by, id);
+    tx(this.db, () => {
+      const r = this.db.run("UPDATE bookings SET status = 'cancelled', cancelled_at = ?, cancelled_by = ? WHERE id = ? AND space_id = ? AND status <> 'cancelled'", atIso, by, id, this.space);
+      const b = r.changes > 0 ? this.getBooking(id) : undefined;
+      if (b) recordFact(this.db, 'booking.cancelled', id, { ...bookingFact(b), by }, atIso);
+    });
   }
 
   setMailError(id: string, error: string | null): void {
-    this.db.prepare('UPDATE bookings SET mail_error = ? WHERE id = ?').run(error, id);
+    this.db.run('UPDATE bookings SET mail_error = ? WHERE id = ? AND space_id = ?', error, id, this.space);
   }
 
   /** Rattache la réservation à l'événement retrouvé (nouvel identifiant après un changement de calendrier). */
   setEvent(id: string, eventId: string, calendarId: string, uid: string): void {
-    this.db.prepare('UPDATE bookings SET event_id = ?, calendar_id = ?, event_uid = ? WHERE id = ?').run(eventId, calendarId, uid, id);
+    this.db.run('UPDATE bookings SET event_id = ?, calendar_id = ?, event_uid = ? WHERE id = ? AND space_id = ?', eventId, calendarId, uid, id, this.space);
   }
 
   /** L'événement a été déplacé : la réservation suit, et garde l'horaire que le client connaît. */
   reschedule(id: string, startIso: string, endIso: string, notifiedStart: string | null): void {
-    this.db.prepare('UPDATE bookings SET start_utc = ?, end_utc = ?, notified_start = ? WHERE id = ?').run(startIso, endIso, notifiedStart, id);
+    tx(this.db, () => {
+      const before = this.getBooking(id);
+      this.db.run('UPDATE bookings SET start_utc = ?, end_utc = ?, notified_start = ? WHERE id = ? AND space_id = ?', startIso, endIso, notifiedStart, id, this.space);
+      const b = this.getBooking(id);
+      if (b && before && (before.start_utc !== startIso || before.end_utc !== endIso)) {
+        recordFact(this.db, 'booking.rescheduled', id, { ...bookingFact(b), by: 'agenda', previousStart: before.start_utc });
+      }
+    });
   }
 
   setNotifiedStart(id: string, notifiedStart: string | null): void {
-    this.db.prepare('UPDATE bookings SET notified_start = ? WHERE id = ?').run(notifiedStart, id);
+    this.db.run('UPDATE bookings SET notified_start = ? WHERE id = ? AND space_id = ?', notifiedStart, id, this.space);
   }
 
   setTokenHash(id: string, hash: string): void {
-    this.db.prepare('UPDATE bookings SET token_hash = ? WHERE id = ?').run(hash, id);
+    this.db.run('UPDATE bookings SET token_hash = ? WHERE id = ? AND space_id = ?', hash, id, this.space);
   }
 
   setPaymentStatus(id: string, status: PaymentStatus, error: string | null): void {
-    this.db.prepare('UPDATE bookings SET payment_status = ?, payment_error = ? WHERE id = ?').run(status, error, id);
+    tx(this.db, () => {
+      const before = this.getBooking(id);
+      this.db.run('UPDATE bookings SET payment_status = ?, payment_error = ? WHERE id = ? AND space_id = ?', status, error, id, this.space);
+      if (status === 'refunded' && before && before.payment_status !== 'refunded') {
+        recordFact(this.db, 'payment.refunded', id, {
+          ...bookingFact(before), amountCents: before.payment_amount_cents ?? null, currency: before.payment_currency ?? null,
+        });
+      }
+    });
   }
 
   // --- retenues pendant le paiement ------------------------------------------
 
   insertHold(h: HoldRow): void {
-    const cols = Object.keys(h) as (keyof HoldRow)[];
-    this.db
-      .prepare(`INSERT INTO payment_holds (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
-      .run(...cols.map((c) => h[c]));
+    const cols = (Object.keys(h) as (keyof HoldRow)[]).filter((c) => (c as string) !== 'space_id');
+    this.db.run(
+      `INSERT INTO payment_holds (${cols.join(', ')}, space_id) VALUES (${cols.map(() => '?').join(', ')}, ?)`,
+      ...cols.map((c) => h[c] as Param), this.space);
   }
 
   getHold(id: string): HoldRow | undefined {
-    return this.db.prepare('SELECT * FROM payment_holds WHERE id = ?').get(id) as unknown as HoldRow | undefined;
+    return this.db.get<HoldRow>('SELECT * FROM payment_holds WHERE id = ? AND space_id = ?', id, this.space);
   }
 
   getHoldByRefHash(hash: string): HoldRow | undefined {
-    return this.db.prepare('SELECT * FROM payment_holds WHERE ref_hash = ?').get(hash) as unknown as HoldRow | undefined;
+    return this.db.get<HoldRow>('SELECT * FROM payment_holds WHERE ref_hash = ? AND space_id = ?', hash, this.space);
   }
 
   /** Retenues encore actives (paiement en cours, ou payé mais réservation pas encore enregistrée). */
   activeHolds(): HoldRow[] {
-    return this.db.prepare("SELECT * FROM payment_holds WHERE status IN ('pending', 'paid') ORDER BY created_at").all() as unknown as HoldRow[];
+    return this.db.all<HoldRow>("SELECT * FROM payment_holds WHERE space_id = ? AND status IN ('pending', 'paid') ORDER BY created_at, id", this.space);
   }
 
   /** Retenues actives qui recoupent [from, to) : elles bloquent le créneau comme une réservation. */
   activeHoldsBetween(fromIso: string, toIso: string): HoldRow[] {
-    return this.db
-      .prepare("SELECT * FROM payment_holds WHERE status IN ('pending', 'paid') AND start_utc < ? AND end_utc > ?")
-      .all(toIso, fromIso) as unknown as HoldRow[];
+    return this.db.all<HoldRow>(
+      "SELECT * FROM payment_holds WHERE space_id = ? AND status IN ('pending', 'paid') AND start_utc < ? AND end_utc > ? ORDER BY start_utc, id",
+      this.space, toIso, fromIso);
   }
 
   /** Retenues sans réservation créées pour une adresse depuis un instant donné (plafond par adresse). */
   countHoldsForEmailSince(email: string, sinceIso: string): number {
-    const row = this.db
-      .prepare("SELECT COUNT(*) AS n FROM payment_holds WHERE status <> 'completed' AND created_at > ? AND email = ? COLLATE NOCASE")
-      .get(sinceIso, email) as { n: number };
+    const row = this.db.get<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM payment_holds WHERE space_id = ? AND status <> 'completed' AND created_at > ? AND lower(email) = lower(?)",
+      this.space, sinceIso, email)!;
     return row.n;
   }
 
   updateHold(id: string, patch: Partial<Omit<HoldRow, 'id'>>): void {
     const cols = Object.keys(patch) as (keyof typeof patch)[];
     if (cols.length === 0) return;
-    this.db.prepare(`UPDATE payment_holds SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`).run(...cols.map((c) => patch[c] ?? null), id);
+    tx(this.db, () => {
+      const before = patch.status === 'paid' ? this.getHold(id) : undefined;
+      this.db.run(`UPDATE payment_holds SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ? AND space_id = ?`,
+        ...cols.map((c) => (patch[c] ?? null) as Param), id, this.space);
+      if (before && before.status === 'pending') {
+        recordFact(this.db, 'payment.received', id, {
+          holdId: id, amountCents: before.amount_cents, currency: before.currency, typeName: before.type_name,
+          start: before.start_utc, end: before.end_utc, name: before.name,
+        });
+      }
+    });
   }
 }

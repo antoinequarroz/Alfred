@@ -2,24 +2,23 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
-import { openDb } from '../server/db.js';
+import { openDb, type Db } from '../server/db.js';
 import { addressOf, isUuidv7, parseAddress, uuidv7 } from '../server/ids.js';
 import { DEFAULT_SPACE_ID, MIGRATIONS, migrateDown, migrateUp, normalizeEmail, schemaVersion } from '../server/migrations.js';
 
 const LATEST = Math.max(...MIGRATIONS.map((m) => m.version));
 
-function columns(db: DatabaseSync, table: string): string[] {
-  return (db.prepare(`PRAGMA table_info(${table})`).all() as unknown as { name: string }[]).map((c) => c.name);
+function columns(db: Db, table: string): string[] {
+  return db.columns(table);
 }
 
-function userTables(db: DatabaseSync): string[] {
-  return (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as unknown as { name: string }[]).map((r) => r.name);
+function userTables(db: Db): string[] {
+  return db.tables().filter((t) => t !== 'sqlite_sequence');
 }
 
 /** Réservation insérée comme le faisait le code d'avant la phase 4 (sans person_id ni space_id). */
-function oldBooking(db: DatabaseSync, id: string, email: string, name: string, createdAt: string, phone = '') {
+function oldBooking(db: Db, id: string, email: string, name: string, createdAt: string, phone = '') {
   db.prepare(
     `INSERT INTO bookings (id, type_id, type_name, location, start_utc, end_utc, name, email, phone, message, status, token_hash, created_at)
      VALUES (?, NULL, 'Consultation', '', ?, ?, ?, ?, ?, '', 'confirmed', ?, ?)`,
@@ -66,7 +65,7 @@ describe('migrations numérotées', () => {
     expect(schemaVersion(db)).toBe(LATEST);
     expect(migrateUp(db)).toEqual([]);
     const versions = (db.prepare('SELECT version, name FROM schema_migrations ORDER BY version').all() as unknown as { version: number; name: string }[]);
-    expect(versions.map((v) => v.name)).toEqual(['espaces', 'personnes', 'liens', 'acomptes']);
+    expect(versions.map((v) => v.name)).toEqual(['espaces', 'personnes', 'liens', 'acomptes', 'journal']);
     db.close();
   });
 
@@ -78,12 +77,12 @@ describe('migrations numérotées', () => {
       expect(columns(db, table), table).toContain('space_id');
     }
     expect(db.prepare('SELECT id, name FROM spaces').all()).toEqual([{ id: DEFAULT_SPACE_ID, name: 'Personnel' }]);
-    // Une autre branche du code crée sa table (ex. réglages des notifications) : elle reçoit sa colonne au démarrage suivant.
-    db.exec("CREATE TABLE push_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
-    db.exec("INSERT INTO push_settings VALUES ('vapid', 'x')");
+    // Une autre branche du code crée sa table : elle reçoit sa colonne au démarrage suivant.
+    db.exec("CREATE TABLE futurs_reglages (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    db.exec("INSERT INTO futurs_reglages VALUES ('vapid', 'x')");
     db.close();
     const again = openDb(dir);
-    expect(again.prepare('SELECT space_id FROM push_settings').get()).toEqual({ space_id: DEFAULT_SPACE_ID });
+    expect(again.prepare('SELECT space_id FROM futurs_reglages').get()).toEqual({ space_id: DEFAULT_SPACE_ID });
     again.close();
   });
 
@@ -121,7 +120,7 @@ describe('migrations numérotées', () => {
     const dir = mkdtempSync(join(tmpdir(), 'alfred-mig-'));
     const db = openDb(dir);
     oldBooking(db, 'b1', 'a@example.org', 'A', '2026-11-01T10:00:00.000Z');
-    expect(migrateDown(db, 0)).toEqual([4, 3, 2, 1]);
+    expect(migrateDown(db, 0)).toEqual([5, 4, 3, 2, 1]);
     expect(schemaVersion(db)).toBe(0);
     for (const t of ['people', 'links', 'spaces', 'payment_holds']) expect(userTables(db)).not.toContain(t);
     for (const table of userTables(db)) expect(columns(db, table), table).not.toContain('space_id');
@@ -129,7 +128,7 @@ describe('migrations numérotées', () => {
     expect(columns(db, 'bookings')).not.toContain('payment_status');
     expect(columns(db, 'booking_types')).not.toContain('deposit_cents');
     expect(db.prepare('SELECT id, email FROM bookings').all()).toEqual([{ id: 'b1', email: 'a@example.org' }]);
-    expect(migrateUp(db)).toEqual([1, 2, 3, 4]);
+    expect(migrateUp(db)).toEqual([1, 2, 3, 4, 5]);
     expect(columns(db, 'payment_holds')).toContain('space_id');
     expect((db.prepare('SELECT COUNT(*) AS n FROM people').get() as { n: number }).n).toBe(1);
     db.close();
@@ -137,7 +136,7 @@ describe('migrations numérotées', () => {
 
   it('une migration en échec ne laisse rien à moitié fait', () => {
     const db = openDb(':memory:');
-    const broken = [{ version: 99, name: 'cassée', up: (d: DatabaseSync) => { d.exec('CREATE TABLE moitie (x)'); throw new Error('boum'); }, down: () => undefined }];
+    const broken = [{ version: 99, name: 'cassée', up: (d: Db) => { d.exec('CREATE TABLE moitie (x TEXT)'); throw new Error('boum'); }, down: () => undefined }];
     expect(() => migrateUp(db, Infinity, broken)).toThrow('boum');
     expect(userTables(db)).not.toContain('moitie');
     expect(schemaVersion(db)).toBe(LATEST);
