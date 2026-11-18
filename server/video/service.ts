@@ -1,3 +1,4 @@
+import { Settings } from '../settings.js';
 import { randomBytes } from 'node:crypto';
 import { ALL_SPACES } from '../sql.js';
 import { recordFact } from '../outbox.js';
@@ -206,9 +207,9 @@ export class VideoService {
   // --- réglages ------------------------------------------------------------
 
   getSettings(): VideoSettings {
-    const rows = this.db.all<{ key: string; value: string }>('SELECT key, value FROM video_settings WHERE space_id = ? ORDER BY key', this.db.spaceId);
     const out: VideoSettings = { ...DEFAULTS };
-    for (const r of rows) {
+    for (const [key, value] of new Settings(this.db, 'video').all()) {
+      const r = { key, value };
       try {
         const v = JSON.parse(r.value) as unknown;
         if (r.key === 'enabled' && typeof v === 'boolean') out.enabled = v;
@@ -245,12 +246,10 @@ export class VideoService {
       else fields.waitingRoom = 'Valeur invalide';
     }
     if (Object.keys(fields).length > 0) throw new VideoError(400, 'invalid', Object.values(fields)[0], fields);
-    for (const [key, value] of Object.entries(patch)) {
-      this.db.run(
-        `INSERT INTO video_settings (key, value, space_id) VALUES (?, ?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE video_settings.space_id = excluded.space_id`,
-        key, JSON.stringify(value), this.db.spaceId);
-    }
+    const settings = new Settings(this.db, 'video');
+    this.db.tx(() => {
+      for (const [key, value] of Object.entries(patch)) settings.set(key, JSON.stringify(value));
+    });
     return this.getSettings();
   }
 

@@ -1,6 +1,7 @@
 import ICAL from 'ical.js';
 import { toInstant } from './instants.js';
 import { schemaVersion } from './migrations.js';
+import { LEGACY_SETTINGS_TABLES, Settings, type SettingsModule } from './settings.js';
 import { ALL_SPACES, type Param, type Sql } from './sql.js';
 
 // Export et import complets des données d'un espace (phase 4, ALFRED-304). Format : docs/EXPORT.md.
@@ -29,21 +30,22 @@ interface TableSpec {
  * Tables exportées, dans l'ordre d'import (une table avant celles qui la référencent).
  * Toute table de la base doit être ici ou dans NOT_EXPORTED : un test le vérifie.
  */
+/** Réglages exportés : pas les secrets, ni la date de départ des notifications (propre à l'installation). */
+const EXPORTED_SETTINGS = "secret = 0 AND NOT (module = 'push' AND key IN ('vapid', 'since'))";
+
 export const EXPORTED_TABLES: Record<string, TableSpec> = {
   calendars: { order: 'sort, id' },
   events: { order: 'id', omit: ['start_ms', 'end_ms', 'recur_end_ms', 'updated_at'] },
-  booking_settings: { order: 'key' },
   booking_types: { order: 'sort, id' },
   booking_hours: { order: 'weekday, start_min, end_min', omit: ['id'] },
   people: { order: 'id' },
   bookings: { order: 'id' },
   booking_tokens: { order: 'token_hash' },
   payment_holds: { order: 'id', blank: ['cancel_token'] },
-  video_settings: { order: 'key' },
   video_rooms: { order: 'id' },
   links: { order: 'id' },
-  connection_settings: { order: 'key', where: 'secret = 0' },
-  push_settings: { order: 'key', where: "key NOT IN ('vapid', 'since')" },
+  // Réglages de tous les modules, sans les secrets ni la date de départ des notifications.
+  settings: { order: 'module, key', where: EXPORTED_SETTINGS, omit: ['updated_at'] },
   outbox: { order: 'seq', omit: ['seq'] },
 };
 
@@ -56,17 +58,17 @@ export const NOT_EXPORTED: Record<string, string> = {
   push_sent: 'mémoire interne des notifications déjà envoyées',
   outbox_readers: 'positions de lecture internes du journal',
   sqlite_sequence: 'mécanique interne de SQLite',
+  booking_settings: 'ancienne copie des réglages (retour arrière), voir la table settings',
+  video_settings: 'ancienne copie des réglages (retour arrière), voir la table settings',
+  connection_settings: 'ancienne copie des réglages (retour arrière), voir la table settings',
+  push_settings: 'ancienne copie des réglages (retour arrière), voir la table settings',
 };
 
 /** Tables qui doivent être vides pour accepter un import (les réglages, eux, sont remplacés). */
 const CONTENT_TABLES = ['events', 'bookings', 'booking_types', 'booking_tokens', 'people', 'links', 'video_rooms', 'payment_holds', 'outbox'];
-/** Tables de réglages : remplacées par celles du fichier, en gardant les secrets déjà enregistrés. */
-const SETTINGS_TABLES: Record<string, string> = {
-  booking_settings: '1 = 1',
-  video_settings: '1 = 1',
-  connection_settings: 'secret = 0',
-  push_settings: "key NOT IN ('vapid', 'since')",
-};
+/** Exports d'avant la table settings (schéma < 7) : anciennes tables de réglages → module. */
+const LEGACY_SETTINGS_MODULES = Object.fromEntries(
+  Object.entries(LEGACY_SETTINGS_TABLES).map(([module, table]) => [table, module as SettingsModule])) as Record<string, SettingsModule>;
 
 /** Lecteurs du journal : placés après les faits importés, pour ne pas les traiter une seconde fois. */
 const OUTBOX_READERS = ['push'];
@@ -146,10 +148,11 @@ export function parseExport(value: unknown, db: Sql): AlfredExport {
   if (!v.tables || typeof v.tables !== 'object') throw bad('Fichier incomplet : les tables manquent.');
   const present = new Set(db.tables());
   for (const [table, rows] of Object.entries(v.tables)) {
+    const legacy = table in LEGACY_SETTINGS_MODULES;
     const spec = EXPORTED_TABLES[table];
-    if (!spec || !present.has(table)) throw bad(`Table inconnue dans l’export : ${table}.`);
+    if ((!spec && !legacy) || !present.has(table)) throw bad(`Table inconnue dans l’export : ${table}.`);
     if (!Array.isArray(rows)) throw bad(`Table ${table} illisible.`);
-    const allowed = new Set(exportColumns(db, table, spec));
+    const allowed = new Set(legacy ? db.columns(table).filter((c) => c !== 'space_id') : exportColumns(db, table, spec));
     for (const row of rows) {
       if (!row || typeof row !== 'object' || Array.isArray(row)) throw bad(`Ligne illisible dans ${table}.`);
       for (const [k, val] of Object.entries(row)) {
@@ -177,12 +180,23 @@ export function importSpace(db: Sql, value: unknown): Record<string, number> {
     // proposés et les réglages. Remplacés par ceux du fichier.
     if ((data.tables.calendars ?? []).length > 0) db.run('DELETE FROM calendars WHERE space_id = ?', db.spaceId);
     if (data.tables.booking_hours) db.run('DELETE FROM booking_hours WHERE space_id = ?', db.spaceId);
-    for (const [table, where] of Object.entries(SETTINGS_TABLES)) {
-      if (data.tables[table]) db.run(`DELETE FROM ${table} WHERE space_id = ? AND ${where}`, db.spaceId);
+    // Réglages : ceux du fichier remplacent ceux d'ici, sauf les secrets enregistrés ici.
+    const settingsRows = importedSettings(data);
+    if (settingsRows) {
+      for (const r of db.all<{ module: SettingsModule; key: string }>(`SELECT module, key FROM settings WHERE space_id = ? AND ${EXPORTED_SETTINGS}`, db.spaceId)) {
+        new Settings(db, r.module).delete(r.key);
+      }
+      for (const r of settingsRows) {
+        const settings = new Settings(db, r.module);
+        // Une clé secrète déjà enregistrée ici n'est pas écrasée par une valeur en clair.
+        if (db.get('SELECT 1 AS ok FROM settings WHERE space_id = ? AND module = ? AND key = ? AND secret = 1', db.spaceId, r.module, r.key)) continue;
+        settings.set(r.key, r.value);
+      }
+      counts.settings = settingsRows.length;
     }
     for (const table of Object.keys(EXPORTED_TABLES)) {
       const rows = data.tables[table];
-      if (!rows) continue;
+      if (!rows || table === 'settings') continue;
       for (const row of rows) insertRow(db, table, row);
       counts[table] = rows.length;
     }
@@ -211,10 +225,34 @@ function insertRow(db: Sql, table: string, row: Row): void {
   }
   const cols = Object.keys(values);
   const params: Param[] = cols.map((c) => values[c]);
-  // Une clé de réglage déjà prise (secret gardé ici, ou réglage d'un autre espace) n'est pas écrasée.
-  const settings = table in SETTINGS_TABLES ? ' ON CONFLICT (key) DO NOTHING' : '';
-  db.run(`INSERT INTO ${table} (${[...cols, 'space_id'].join(', ')}) VALUES (${[...cols, 'space_id'].map(() => '?').join(', ')})${settings}`,
+  db.run(`INSERT INTO ${table} (${[...cols, 'space_id'].join(', ')}) VALUES (${[...cols, 'space_id'].map(() => '?').join(', ')})`,
     ...params, db.spaceId);
+}
+
+/** Réglages du fichier : table settings, ou anciennes tables d'un export d'avant le schéma 7. null : aucun. */
+function importedSettings(data: AlfredExport): { module: SettingsModule; key: string; value: string }[] | null {
+  const out: { module: SettingsModule; key: string; value: string }[] = [];
+  let found = false;
+  const valid = (m: unknown): m is SettingsModule => typeof m === 'string' && m in LEGACY_SETTINGS_TABLES;
+  if (data.tables.settings) {
+    found = true;
+    for (const r of data.tables.settings) {
+      if (!valid(r.module) || typeof r.key !== 'string' || typeof r.value !== 'string') throw new ImportError(400, 'invalid_export', 'Réglage illisible dans l’export.');
+      if (Number(r.secret ?? 0) !== 0) continue;
+      out.push({ module: r.module, key: r.key, value: r.value });
+    }
+  }
+  for (const [table, module] of Object.entries(LEGACY_SETTINGS_MODULES)) {
+    const rows = data.tables[table];
+    if (!rows) continue;
+    found = true;
+    for (const r of rows) {
+      if (typeof r.key !== 'string' || typeof r.value !== 'string') throw new ImportError(400, 'invalid_export', 'Réglage illisible dans l’export.');
+      if (Number(r.secret ?? 0) !== 0 || (module === 'push' && (r.key === 'vapid' || r.key === 'since'))) continue;
+      out.push({ module, key: r.key, value: r.value });
+    }
+  }
+  return found ? out : null;
 }
 
 /**

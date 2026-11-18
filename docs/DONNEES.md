@@ -31,6 +31,7 @@ l'adresse de la note et le lien pour l'ouvrir.
 | 4 | acomptes | table `payment_holds`, colonnes de paiement | retire les colonnes et la table |
 | 5 | journal | tables `outbox` et `outbox_readers` | retire les tables |
 | 6 | instants | `events.start_at/end_at/recur_end_at/modified_at/tzid`, `sessions.expires_at`, `booking_hours.tzid`, textes ISO mis au format exact | retire les colonnes |
+| 7 | reglages | table `settings (space_id, module, key, value, secret, updated_at)`, reprise des quatre anciennes tables de réglages | retire la table |
 
 Règle : une migration n'enlève ni ne renomme rien de ce que lit le code précédent. Remettre
 l'image précédente d'Alfred fonctionne donc sans restaurer la base.
@@ -81,11 +82,13 @@ Chaque `Sql` porte un espace (`db.spaceId`) ; `db.inSpace(id)` donne la même ba
 espace. Une requête qui doit voir tous les espaces le dit avec `ALL_SPACES` (sessions de connexion,
 unicité des liens de visio, migrations).
 
-Limite connue : les tables de réglages (`booking_settings`, `connection_settings`, `video_settings`,
-`push_settings`) gardent une clé unique dans toute la base, pour que l'image précédente d'Alfred
-reste utilisable sans restaurer. Un autre espace ne peut donc pas encore y écrire ses propres
-réglages ; il ne lit et n'écrase jamais ceux d'Antoine (testé). La clé (espace, réglage) viendra
-avec la table de réglages unique (ALFRED-298).
+Réglages : une seule table `settings (space_id, module, key, value, secret, updated_at)`, clé
+(espace, module, réglage), modules `booking`, `video`, `connections` et `push` (`server/settings.ts`).
+Chaque espace a ses propres réglages. Les valeurs secrètes (`secret = 1`) sont chiffrées
+(`server/secrets.ts`) et ne sortent jamais (ni export, ni navigateur). Les quatre anciennes tables
+(`booking_settings`, `video_settings`, `connection_settings`, `push_settings`) ne sont plus lues ;
+chaque écriture y est recopiée pour l'espace d'Antoine, et ce que l'image précédente y change après
+un retour arrière est repris au démarrage suivant.
 
 ### Lancer les tests sur PostgreSQL
 
@@ -105,6 +108,5 @@ Chaque base ouverte par un test devient un schéma neuf de cette base PostgreSQL
 
 ## Reste à faire (phase 4)
 
-- Une seule table de réglages (ANT-298), à faire après la fusion des PR 4 et 6 qui en ajoutent.
 - Participants visio et invités iCloud reliés aux Personnes (ANT-300), distribution du journal (ALFRED-308), API v1 complète.
 - Côté Cairn : bouton « Note de réunion » qui crée la note et le lien d'un coup (ANT-175).

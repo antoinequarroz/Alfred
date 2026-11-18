@@ -65,7 +65,7 @@ describe('migrations numérotées', () => {
     expect(schemaVersion(db)).toBe(LATEST);
     expect(migrateUp(db)).toEqual([]);
     const versions = (db.prepare('SELECT version, name FROM schema_migrations ORDER BY version').all() as unknown as { version: number; name: string }[]);
-    expect(versions.map((v) => v.name)).toEqual(['espaces', 'personnes', 'liens', 'acomptes', 'journal', 'instants']);
+    expect(versions.map((v) => v.name)).toEqual(['espaces', 'personnes', 'liens', 'acomptes', 'journal', 'instants', 'reglages']);
     db.close();
   });
 
@@ -120,7 +120,7 @@ describe('migrations numérotées', () => {
     const dir = mkdtempSync(join(tmpdir(), 'alfred-mig-'));
     const db = openDb(dir);
     oldBooking(db, 'b1', 'a@example.org', 'A', '2026-11-01T10:00:00.000Z');
-    expect(migrateDown(db, 0)).toEqual([6, 5, 4, 3, 2, 1]);
+    expect(migrateDown(db, 0)).toEqual([7, 6, 5, 4, 3, 2, 1]);
     expect(schemaVersion(db)).toBe(0);
     for (const t of ['people', 'links', 'spaces', 'payment_holds']) expect(userTables(db)).not.toContain(t);
     for (const table of userTables(db)) expect(columns(db, table), table).not.toContain('space_id');
@@ -128,7 +128,7 @@ describe('migrations numérotées', () => {
     expect(columns(db, 'bookings')).not.toContain('payment_status');
     expect(columns(db, 'booking_types')).not.toContain('deposit_cents');
     expect(db.prepare('SELECT id, email FROM bookings').all()).toEqual([{ id: 'b1', email: 'a@example.org' }]);
-    expect(migrateUp(db)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(migrateUp(db)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     expect(columns(db, 'payment_holds')).toContain('space_id');
     expect((db.prepare('SELECT COUNT(*) AS n FROM people').get() as { n: number }).n).toBe(1);
     db.close();
@@ -201,6 +201,50 @@ describe('instants : un seul format en base (migration 6, ALFRED-296)', () => {
     const third = openDb(dir);
     expect(third.prepare("SELECT start_at FROM events WHERE id = 'e1'").get()).toEqual({ start_at: '2026-12-02T09:00:00.000Z' });
     expect(third.prepare('SELECT expires_at FROM sessions').get()).toEqual({ expires_at: '2026-12-01T09:00:00.000Z' });
+    third.close();
+  });
+});
+
+describe('réglages : une seule table (migration 7, ALFRED-298)', () => {
+  it('reprend les quatre anciennes tables sans perte, secrets compris', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'alfred-mig-'));
+    const before = openDb(dir);
+    migrateDown(before, 6);
+    before.prepare("INSERT INTO booking_settings (key, value) VALUES ('public_name', 'Antoine Q.')").run();
+    before.prepare(`INSERT INTO video_settings (key, value) VALUES ('quality', '"eco"')`).run();
+    before.prepare("INSERT INTO connection_settings (key, value, secret, updated_at) VALUES ('smtp.host', 'mail.example.ch', 0, '2026-11-01T10:00:00.000Z'), ('smtp.password', 'v1:scellé', 1, '')").run();
+    before.prepare(`INSERT INTO push_settings (key, value) VALUES ('prefs', '{"cancellation":true}')`).run();
+    before.close();
+
+    const db = openDb(dir);
+    const rows = db.prepare("SELECT module, key, value, secret FROM settings WHERE key <> 'hours_seeded' ORDER BY module, key").all();
+    expect(rows).toEqual([
+      { module: 'booking', key: 'public_name', value: 'Antoine Q.', secret: 0 },
+      { module: 'connections', key: 'smtp.host', value: 'mail.example.ch', secret: 0 },
+      { module: 'connections', key: 'smtp.password', value: 'v1:scellé', secret: 1 },
+      { module: 'push', key: 'prefs', value: '{"cancellation":true}', secret: 0 },
+      { module: 'video', key: 'quality', value: '"eco"', secret: 0 },
+    ]);
+    expect(db.prepare("SELECT updated_at FROM settings WHERE key = 'smtp.host'").get()).toEqual({ updated_at: '2026-11-01T10:00:00.000Z' });
+    expect(db.prepare("SELECT updated_at FROM settings WHERE key = 'smtp.password'").get()).toEqual({ updated_at: expect.stringMatching(/Z$/) });
+    db.close();
+  });
+
+  it('reprend au démarrage ce que l’image précédente a changé ou retiré', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'alfred-mig-'));
+    const db = openDb(dir);
+    db.prepare("INSERT INTO booking_settings (key, value) VALUES ('public_name', 'Avant')").run();
+    db.prepare(`INSERT INTO video_settings (key, value) VALUES ('quality', '"eco"')`).run();
+    db.close();
+    const again = openDb(dir);
+    expect(again.prepare("SELECT value FROM settings WHERE module = 'booking' AND key = 'public_name'").get()).toEqual({ value: 'Avant' });
+    // L'image précédente change un réglage et en retire un autre.
+    again.prepare("UPDATE booking_settings SET value = 'Après' WHERE key = 'public_name'").run();
+    again.prepare("DELETE FROM video_settings WHERE key = 'quality'").run();
+    again.close();
+    const third = openDb(dir);
+    expect(third.prepare("SELECT value FROM settings WHERE module = 'booking' AND key = 'public_name'").get()).toEqual({ value: 'Après' });
+    expect(third.prepare("SELECT COUNT(*) AS n FROM settings WHERE module = 'video'").get()).toEqual({ n: 0 });
     third.close();
   });
 });

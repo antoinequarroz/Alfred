@@ -53,6 +53,7 @@ export const INSTANT_COLUMNS: Record<string, readonly string[]> = {
   payment_holds: ['start_utc', 'end_utc', 'created_at', 'expires_at'],
   outbox: ['occurred_at'],
   outbox_readers: ['updated_at'],
+  settings: ['updated_at'],
 };
 
 /** Anciennes colonnes en millisecondes → colonne ISO qui les remplace. Écrites, plus lues. */

@@ -1,6 +1,7 @@
 import { summarize } from './ics.js';
 import { uuidv7 } from './ids.js';
 import { INSTANT_COLUMNS, isInstant, toInstant } from './instants.js';
+import { copyLegacySettings } from './settings.js';
 import { ALL_SPACES, SPACELESS_TABLES, type Sql } from './sql.js';
 
 // Migrations numérotées (phase 4 : données prêtes pour la suite Media).
@@ -254,6 +255,27 @@ export const MIGRATIONS: Migration[] = [
       db.exec('ALTER TABLE sessions DROP COLUMN expires_at');
       db.exec('DROP INDEX events_span');
       for (const c of ['tzid', 'modified_at', 'recur_end_at', 'end_at', 'start_at']) db.exec(`ALTER TABLE events DROP COLUMN ${c}`);
+    },
+  },
+  {
+    version: 7,
+    name: 'reglages',
+    up(db) {
+      // Une seule table de réglages, par espace et par module (voir server/settings.ts). Les
+      // anciennes tables restent, recopiées à chaque écriture, pour l'image précédente d'Alfred.
+      db.exec(`CREATE TABLE settings (
+        space_id   TEXT NOT NULL DEFAULT '${DEFAULT_SPACE_ID}',
+        module     TEXT NOT NULL,             -- 'booking' | 'video' | 'connections' | 'push'
+        key        TEXT NOT NULL,
+        value      TEXT NOT NULL,
+        secret     INTEGER NOT NULL DEFAULT 0, -- 1 : valeur chiffrée (server/secrets.ts)
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (space_id, module, key)
+      )`);
+      copyLegacySettings(db);
+    },
+    down(db) {
+      db.exec('DROP TABLE settings');
     },
   },
 ];

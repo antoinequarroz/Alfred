@@ -279,7 +279,7 @@ describe('API des connexions : priorité app > .env > défaut', () => {
     const smtp = await fakeSmtp();
     const ctx = await setup({ allowPrivateHosts: true });
     await ctx.admin('/api/connections/smtp', 'PUT', { host: '127.0.0.1', port: smtp.port, user: BOX, password: SMTP_PASS });
-    const sealed = () => (ctx.db.prepare("SELECT value FROM connection_settings WHERE key = 'smtp.password'").get() as { value: string }).value;
+    const sealed = () => (ctx.db.prepare("SELECT value FROM settings WHERE module = 'connections' AND key = 'smtp.password'").get() as { value: string }).value;
     const before = sealed();
     for (const body of [{ user: 'autre@antoinequarroz.ch', password: '' }, { notifyTo: 'avis@exemple.ch' }, { password: '   ' }, { password: null }]) {
       expect((await ctx.admin('/api/connections/smtp', 'PUT', body)).status).toBe(200);
@@ -420,14 +420,14 @@ describe('les mots de passe ne sortent jamais du serveur', () => {
     const ctx = await setup();
     await ctx.admin('/api/connections/smtp', 'PUT', { user: BOX, password: SMTP_PASS });
     await ctx.admin('/api/connections/caldav', 'PUT', { username: 'a@b.ch', password: CALDAV_PASS });
-    const rows = ctx.db.prepare('SELECT key, value, secret FROM connection_settings ORDER BY key').all() as { key: string; value: string; secret: number }[];
+    const rows = ctx.db.prepare("SELECT key, value, secret FROM settings WHERE module = 'connections' ORDER BY key").all() as { key: string; value: string; secret: number }[];
     expect(rows.map((r) => [r.key, r.secret])).toEqual([['caldav.password', 1], ['caldav.username', 0], ['smtp.password', 1], ['smtp.passwordFor', 0], ['smtp.user', 0]]);
     const dump = JSON.stringify(rows);
     for (const secret of [SMTP_PASS, CALDAV_PASS]) for (const form of forms(secret)) expect(dump).not.toContain(form);
     for (const r of rows.filter((x) => x.secret)) expect(r.value).toMatch(/^v1:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$/);
     // Recopié dans l'autre champ, le chiffré ne s'ouvre pas : le mot de passe d'envoi ne devient pas celui du calendrier.
     const smtpSealed = rows.find((r) => r.key === 'smtp.password')!.value;
-    ctx.db.prepare("UPDATE connection_settings SET value = ? WHERE key = 'caldav.password'").run(smtpSealed);
+    ctx.db.prepare("UPDATE settings SET value = ? WHERE module = 'connections' AND key = 'caldav.password'").run(smtpSealed);
     const s = await ctx.state();
     expect(s.caldav.password).toEqual({ configured: false, source: 'app', unreadable: true, otherServer: false });
     expect(s.smtp.password).toEqual({ configured: true, source: 'app', unreadable: false, otherServer: false });
@@ -555,7 +555,7 @@ describe('SMTP réglé à chaud', () => {
     // À l'enregistrement, le nom résout vers une adresse publique (résolveur du test) ; à l'envoi,
     // la résolution réelle de « localhost » donne le bouclage : l'envoi doit être refusé.
     const ctx = await setup({ allowPrivateHosts: false });
-    ctx.db.prepare("INSERT INTO connection_settings (key, value, secret, updated_at) VALUES ('smtp.host', 'localhost', 0, '')").run();
+    ctx.db.prepare("INSERT INTO settings (module, key, value, secret, updated_at) VALUES ('connections', 'smtp.host', 'localhost', 0, '2026-11-16T00:00:00.000Z')").run();
     await ctx.admin('/api/connections/smtp', 'PUT', { port: smtp.port, user: BOX, password: SMTP_PASS });
     const test = ((await (await ctx.admin('/api/connections/smtp/test', 'POST')).json()) as { test: ConnectionTest }).test;
     expect(test).toMatchObject({ ok: false, code: 'host_refused' });
@@ -824,7 +824,7 @@ describe('un mot de passe ne part que vers le serveur pour lequel il a été sai
 
     // Hôte ou port modifié sans passer par l'enregistrement (réglage retiré, ligne changée en base) :
     // le mot de passe, lié à sa destination, n'est plus utilisé.
-    ctx.db.prepare("UPDATE connection_settings SET value = ? WHERE key = 'smtp.port'").run(String(thief.port));
+    ctx.db.prepare("UPDATE settings SET value = ? WHERE module = 'connections' AND key = 'smtp.port'").run(String(thief.port));
     await ctx.admin('/api/connections/smtp', 'PUT', {}); // vide le cache de l'expéditeur
     let s = await ctx.state();
     expect(s.smtp).toMatchObject({ configured: false, password: { configured: false, source: 'app', unreadable: false, otherServer: true } });
@@ -832,14 +832,14 @@ describe('un mot de passe ne part que vers le serveur pour lequel il a été sai
     expect(ctx.connections.smtpOptions()).toBeNull();
     expect(((await (await ctx.admin('/api/connections/smtp/test', 'POST')).json()) as { test: ConnectionTest }).test).toMatchObject({ ok: false, code: 'not_configured' });
     // Même en recopiant la destination à la main, le chiffré ne s'ouvre pas : elle fait partie des données authentifiées.
-    ctx.db.prepare("UPDATE connection_settings SET value = ? WHERE key = 'smtp.passwordFor'").run(`127.0.0.1:${thief.port}`);
+    ctx.db.prepare("UPDATE settings SET value = ? WHERE module = 'connections' AND key = 'smtp.passwordFor'").run(`127.0.0.1:${thief.port}`);
     s = await ctx.state();
     expect(s.smtp.password).toMatchObject({ configured: false, unreadable: true });
     expect(thief.logins).toEqual([]);
 
     // Retirer le serveur de l'app (retour à celui par défaut) n'emmène pas non plus le mot de passe.
-    ctx.db.prepare("UPDATE connection_settings SET value = ? WHERE key = 'smtp.passwordFor'").run(`127.0.0.1:${legit.port}`);
-    ctx.db.prepare("UPDATE connection_settings SET value = ? WHERE key = 'smtp.port'").run(String(legit.port));
+    ctx.db.prepare("UPDATE settings SET value = ? WHERE module = 'connections' AND key = 'smtp.passwordFor'").run(`127.0.0.1:${legit.port}`);
+    ctx.db.prepare("UPDATE settings SET value = ? WHERE module = 'connections' AND key = 'smtp.port'").run(String(legit.port));
     expect((await ctx.state()).smtp.configured).toBe(true);
     await ctx.admin('/api/connections/smtp/host', 'DELETE');
     expect((await ctx.state()).smtp).toMatchObject({ configured: false, host: { value: 'mail.infomaniak.com' }, password: { otherServer: true } });
@@ -920,7 +920,7 @@ describe('dernier essai d’envoi', () => {
     w = await warnings();
     expect(w.some((x) => x.startsWith('Le dernier essai d’envoi d’e-mails a échoué'))).toBe(true);
     // Ce qui est gardé en base est le diagnostic, sans rien de sensible, et ne compte pas comme un réglage.
-    const row = ctx.db.prepare("SELECT value, secret FROM connection_settings WHERE key = 'status.smtp.lastTest'").get() as { value: string };
+    const row = ctx.db.prepare("SELECT value, secret FROM settings WHERE module = 'connections' AND key = 'status.smtp.lastTest'").get() as { value: string };
     for (const form of [...forms(SMTP_PASS_2), ...forms(SMTP_PASS)]) expect(row.value).not.toContain(form);
 
     // Bon mot de passe, essai réussi : l'avertissement disparaît, et le reste après un redémarrage.

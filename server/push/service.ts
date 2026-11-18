@@ -1,3 +1,4 @@
+import { Settings } from '../settings.js';
 import { createHash } from 'node:crypto';
 import { uuidv7 } from '../ids.js';
 import { onFacts, OutboxReader } from '../outbox.js';
@@ -148,20 +149,17 @@ export class PushService {
   // --- réglages --------------------------------------------------------------
 
   private setting<T>(key: string): T | null {
-    const row = this.db.get<{ value: string }>('SELECT value FROM push_settings WHERE key = ? AND space_id = ?', key, this.space);
-    if (!row) return null;
+    const value = new Settings(this.db, 'push').get(key);
+    if (value === undefined) return null;
     try {
-      return JSON.parse(row.value) as T;
+      return JSON.parse(value) as T;
     } catch {
       return null;
     }
   }
 
   private saveSetting(key: string, value: unknown): void {
-    this.db.run(
-      `INSERT INTO push_settings (key, value, space_id) VALUES (?, ?, ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE push_settings.space_id = excluded.space_id`,
-      key, JSON.stringify(value), this.space);
+    new Settings(this.db, 'push').set(key, JSON.stringify(value), key === 'vapid');
   }
 
   getPrefs(): PushPrefs {
