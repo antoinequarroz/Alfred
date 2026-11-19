@@ -17,6 +17,8 @@
 #  6. la visio est recréée (deploy/visio.sh) pour lire livekit.yaml (relais) et les nouveaux tampons.
 # Peut être relancé : ce qui est déjà en place est laissé tel quel.
 set -euo pipefail
+# Attention avec pipefail : pas de « … | head » ni de « … | grep -q » (le premier maillon reçoit SIGPIPE,
+# le tube renvoie 141 et set -e arrête le script) ; capturer la sortie dans une variable d'abord.
 
 TURN_DOMAIN=turn.postmelo.ch
 IMAGE=alfred-caddy-l4:2.10.2
@@ -46,7 +48,7 @@ compose() {
   docker compose --project-directory "$VITRINE" -f "$VITRINE/docker-compose.yml" -f "$OVERLAY" "$@"
 }
 
-caddy_container() { compose ps -q caddy 2>/dev/null | head -1; }
+caddy_container() { compose ps -q caddy 2>/dev/null | sed -n 1p || true; }
 
 # Répond 0 si les sites passent par Caddy (on interroge 127.0.0.1:443 avec le vrai nom).
 sites_ok() {
@@ -98,7 +100,7 @@ node_ip=$(grep -m1 -E '^NODE_IP=' "$ALFRED/.env.livekit" 2>/dev/null | cut -d= -
 [[ -n "$node_ip" ]] || die "NODE_IP absent de $ALFRED/.env.livekit (la visio est-elle installée ?)"
 grep -q "^turn:" "$ALFRED/deploy/livekit.yaml" || die "$ALFRED/deploy/livekit.yaml n'a pas encore le relais : déploie d'abord Alfred (deploy/mac/deployer.sh)"
 [[ -f "$ALFRED/deploy/caddy-l4/Dockerfile" ]] || die "$ALFRED/deploy/caddy-l4/Dockerfile manquant : déploie d'abord Alfred"
-dns=$(getent ahostsv4 "$TURN_DOMAIN" | awk '{print $1; exit}' || true)
+dns=$(getent ahostsv4 "$TURN_DOMAIN" 2>/dev/null | awk 'NR == 1 {print $1}' || true)
 if [[ "$dns" == "$node_ip" ]]; then
   echo "DNS : $TURN_DOMAIN → $dns (OK)"
 else
@@ -108,7 +110,7 @@ if grep -qF "$MARK" "$CADDYFILE"; then
   caddy_done=1; echo "Caddyfile : relais déjà en place"
 else
   caddy_done=0
-  first=$(grep -v -E '^[[:space:]]*(#|$)' "$CADDYFILE" | head -1)
+  first=$(awk 'NF && $1 !~ /^#/ {print; exit}' "$CADDYFILE")
   [[ "$first" =~ ^[[:space:]]*\{[[:space:]]*$ ]] && die "le Caddyfile a déjà un bloc d'options globales : à fusionner à la main (voir deploy/Caddyfile.snippet)"
   grep -q -E "^[[:space:]]*$TURN_DOMAIN[[:space:]]*\{" "$CADDYFILE" && die "le Caddyfile a déjà un bloc $TURN_DOMAIN : à regarder à la main"
   echo "Caddyfile : options globales et bloc $TURN_DOMAIN à ajouter"
@@ -133,7 +135,8 @@ else
   echo "Construction (4 à 6 minutes, une compilation à la fois)…"
   nice -n 10 docker build -q -t "$IMAGE" "$ALFRED/deploy/caddy-l4"
 fi
-docker run --rm "$IMAGE" caddy list-modules | grep -q '^caddy.listeners.layer4$' || die "l'image $IMAGE n'a pas le module layer4"
+modules=$(docker run --rm "$IMAGE" caddy list-modules)
+grep -q '^caddy.listeners.layer4$' <<<"$modules" || die "l'image $IMAGE n'a pas le module layer4"
 docker run --rm "$IMAGE" caddy version
 
 # --- Nouvelle configuration, préparée à côté et validée -----------------------------------------------
@@ -221,8 +224,9 @@ fi
 echo -n "Certificat de $TURN_DOMAIN"
 cert_ok=0
 for _ in $(seq 1 30); do
-  if echo | timeout 5 openssl s_client -connect 127.0.0.1:443 -servername "$TURN_DOMAIN" -verify_return_error 2>/dev/null \
-     | openssl x509 -noout -ext subjectAltName 2>/dev/null | grep -q "DNS:$TURN_DOMAIN"; then cert_ok=1; break; fi
+  san=$(echo | timeout 5 openssl s_client -connect 127.0.0.1:443 -servername "$TURN_DOMAIN" -verify_return_error 2>/dev/null \
+     | openssl x509 -noout -ext subjectAltName 2>/dev/null || true)
+  if grep -q "DNS:$TURN_DOMAIN" <<<"$san"; then cert_ok=1; break; fi
   echo -n "."; sleep 3
 done
 if [[ "$cert_ok" == 1 ]]; then echo " : OK"; else echo " : pas encore (voir docker logs antoinequarroz-caddy | grep $TURN_DOMAIN)"; fi
@@ -232,7 +236,8 @@ say "6. Visio (les appels en cours sont coupés)"
 bash "$ALFRED/deploy/visio.sh"
 sleep 2
 docker logs alfred-livekit 2>&1 | grep -E 'Starting TURN server|UDP receive buffer' | tail -3 | cut -c1-220 || true
-if docker logs alfred-livekit 2>&1 | grep -q 'Starting TURN server'; then echo "Relais TURN : démarré"; else echo "Relais TURN : absent des journaux (docker logs alfred-livekit)"; fi
+lk_logs=$(docker logs alfred-livekit 2>&1 || true)
+if grep -q 'Starting TURN server' <<<"$lk_logs"; then echo "Relais TURN : démarré"; else echo "Relais TURN : absent des journaux (docker logs alfred-livekit)"; fi
 echo
 echo "Fini. Essai : rejoindre une visio avec un téléphone sur un réseau qui ne laisse passer que le web."
 echo "Retour possible pour Caddy : bash $ALFRED/deploy/relais-visio.sh --retour"
