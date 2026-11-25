@@ -753,7 +753,8 @@ export interface ResolvedAddress {
 // API v1 en lecture et flux iCalendar (phase 4, ALFRED-303). Voir docs/API.md.
 
 /** api : lecture de l'API v1 (en-tête Authorization) ; feed : abonnement au flux .ics d'un calendrier. */
-export type ApiTokenKind = 'api' | 'feed';
+/** 'api' : lecture de /api/v1 ; 'write' : lecture et écriture des événements ; 'feed' : flux .ics d'un calendrier. */
+export type ApiTokenKind = 'api' | 'write' | 'feed';
 
 export interface ApiToken {
   id: string;
@@ -789,6 +790,8 @@ export interface ApiV1Event {
   location: string;
   description: string;
   recurring: boolean;
+  /** Règle de répétition simple reconnue, sinon 'custom' (pour préremplir un formulaire de modification). */
+  repeat: RepeatRule;
 }
 
 /** Une période occupée de l'agenda (calendriers qui bloquent la prise de rendez-vous), sans détail. */

@@ -10,6 +10,8 @@ import type { Sql } from './sql.js';
 // Deux sortes de jetons :
 //   - 'api'  : lecture de l'API v1 (en-tête « Authorization: Bearer alf_… »), pour la suite
 //              PostMelo en attendant la connexion unique ;
+//   - 'write': lecture de l'API v1 et écriture des événements (« Bearer alfw_… »), pour que Lamio
+//              crée et modifie les événements sans ouvrir Alfred (ALFRED-312) ;
 //   - 'feed' : abonnement au flux iCalendar d'un seul calendrier (le jeton est dans l'adresse,
 //              qu'Apple Calendrier ne sait pas accompagner d'un en-tête).
 // Le jeton n'est montré qu'une fois, à sa création ; seule son empreinte SHA-256 est gardée.
@@ -31,7 +33,7 @@ interface TokenRow {
   last_used_at: string | null;
 }
 
-const PREFIX: Record<ApiTokenKind, string> = { api: 'alf_', feed: 'alfcal_' };
+const PREFIX: Record<ApiTokenKind, string> = { api: 'alf_', write: 'alfw_', feed: 'alfcal_' };
 const MAX_TOKENS = 50;
 /** La date de dernière utilisation n'est réécrite qu'une fois par minute au plus. */
 const TOUCH_MS = 60_000;
@@ -52,8 +54,8 @@ export class ApiTokens {
   /** Crée un jeton ; la valeur en clair n'est renvoyée qu'ici. */
   create(body: unknown): ApiTokenCreated {
     const b = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
-    const kind = b.kind === 'feed' ? 'feed' : b.kind === 'api' || b.kind === undefined ? 'api' : null;
-    if (!kind) throw new TokenError(400, 'invalid', 'Sorte de jeton inconnue', { kind: 'api ou feed' });
+    const kind = b.kind === 'feed' || b.kind === 'write' ? b.kind : b.kind === 'api' || b.kind === undefined ? 'api' : null;
+    if (!kind) throw new TokenError(400, 'invalid', 'Sorte de jeton inconnue', { kind: 'api, write ou feed' });
     const name = typeof b.name === 'string' ? b.name.trim().replace(/[\u0000-\u001f\u007f]/g, '') : '';
     if (!name || name.length > 80) throw new TokenError(400, 'invalid', 'Donne un nom au jeton (80 caractères au plus)', { name: 'Donne un nom au jeton (80 caractères au plus)' });
     let calendarId: string | null = null;

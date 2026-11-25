@@ -1,4 +1,4 @@
-# API v1 d'Alfred (lecture) et flux iCalendar
+# API v1 d'Alfred (lecture, écriture des événements) et flux iCalendar
 
 Pour que la suite PostMelo affiche l'agenda d'Alfred sans le recopier (LAMIO-259), et pour
 s'abonner à un calendrier d'Alfred depuis Apple Calendrier. Phase 4, ALFRED-303.
@@ -17,6 +17,12 @@ Deux façons d'appeler `/api/v1` :
   Authorization: Bearer alf_…
   ```
 
+Un **jeton d'écriture** (`alfw_…`, « API en lecture et écriture » dans les Réglages) lit comme
+un jeton d'API et peut en plus **créer, modifier et supprimer des événements**
+(`POST`, `PUT`, `DELETE /api/v1/events`), rien d'autre (ALFRED-312). Lamio s'en sert pour son
+onglet Calendrier. Ces requêtes viennent d'un autre serveur : la protection CSRF ne s'applique
+pas aux requêtes de `/api/v1` qui portent un jeton (un navigateur n'ajoute jamais cet en-tête).
+
 Un jeton d'API ne fait que **lire** : toute autre méthode que `GET` répond `405`, et il n'ouvre
 aucune autre route que `/api/v1` (`/api/people`, `/api/tokens`… répondent `401`). Le jeton n'est
 montré qu'une fois, à sa création ; Alfred ne garde que son empreinte SHA-256. Le retirer dans
@@ -28,7 +34,7 @@ Réponses d'erreur : `{ "error": "message lisible", "code": "code_stable" }`.
 | -- | -- | -- |
 | 401 | `unauthorized` | ni session ni jeton |
 | 401 | `invalid_token` | jeton inconnu, retiré, ou jeton de flux présenté comme jeton d'API |
-| 405 | `read_only` | jeton d'API sur une autre méthode que GET |
+| 405 | `read_only` | jeton d'API sur une autre méthode que GET, ou jeton d'écriture hors de `/api/v1/events` |
 | 400 | `invalid_range` | période absente, illisible, à l'envers ou de plus de 400 jours |
 | 404 | `unknown_calendar` | calendrier demandé inconnu |
 
@@ -63,6 +69,33 @@ affichés ou masqués dans Alfred ; `calendar` (identifiants séparés par des v
 
 `address` est l'adresse stable de l'événement dans la suite (par son UID iCalendar).
 `occurrenceId` distingue les occurrences d'une série (null pour un événement simple).
+
+Chaque événement porte aussi `repeat` (`none`, `daily`, `weekly`, `monthly`, `yearly`, ou
+`custom` pour une règle qu'Alfred ne sait pas résumer), pour préremplir un formulaire.
+
+### `POST /api/v1/events` (jeton d'écriture ou session)
+
+Crée un événement. Corps :
+
+```json
+{ "calendarId": "local:…", "title": "Tournage", "start": "2026-11-17T09:00:00.000Z", "end": "2026-11-17T11:00:00.000Z",
+  "allDay": false, "location": "Sion", "description": "", "repeat": "none" }
+```
+
+Journée entière : `allDay: true` et des dates (`2026-11-20` → `2026-11-21`, fin exclusive).
+Répond `201 { "id" }`. Un calendrier iCloud est écrit par CalDAV ; un calendrier en lecture
+seule répond `403`, un calendrier inconnu `404`, un champ manquant `400`.
+
+### `PUT /api/v1/events/:id` (jeton d'écriture ou session)
+
+`{ "event": { …même forme… }, "scope": "all" | "this", "occurrenceId": "…" }`. Pour une série,
+`scope: "this"` avec l'`occurrenceId` de l'occurrence ne modifie qu'elle. Changer `calendarId`
+déplace l'événement (toute la série seulement) ; l'`id` renvoyé est alors le nouveau.
+`repeat` absent ou `custom` garde la règle existante. Conflit avec iCloud : `409`.
+
+### `DELETE /api/v1/events/:id?scope=&occurrenceId=` (jeton d'écriture ou session)
+
+Supprime l'événement, ou une seule occurrence avec `scope=this&occurrenceId=…`.
 
 ### `GET /api/v1/busy?start=&end=`
 
@@ -106,7 +139,7 @@ ce flux, pas à l'API. Retirer l'accès arrête le flux (`404`).
 ## Gestion des jetons (session requise)
 
 - `GET /api/tokens` : liste (jamais le jeton lui-même).
-- `POST /api/tokens { name, kind: 'api' | 'feed', calendarId? }` → `201`, avec `token` (montré
+- `POST /api/tokens { name, kind: 'api' | 'write' | 'feed', calendarId? }` → `201`, avec `token` (montré
   cette fois seulement) et `feedPath` pour un flux.
 - `DELETE /api/tokens/:id`.
 

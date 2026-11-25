@@ -142,6 +142,66 @@ describe('API v1 : lecture', () => {
   });
 });
 
+describe('API v1 : écriture (ALFRED-312)', () => {
+  it('un jeton d’écriture crée, modifie et supprime des événements, depuis un autre serveur', async () => {
+    const ctx = await setup();
+    const writer = await ctx.newToken({ name: 'Lamio', kind: 'write' });
+    expect(writer.token).toMatch(/^alfw_[A-Za-z0-9_-]{43}$/);
+    // Comme Lamio : ni cookie, ni en-tête Sec-Fetch-Site ou Origin.
+    const call = (path: string, method = 'GET', body?: unknown) =>
+      ctx.app.request(path, {
+        method,
+        headers: { authorization: `Bearer ${writer.token}`, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      });
+    const period = '/api/v1/events?start=2026-11-16T00:00:00Z&end=2026-11-30T00:00:00Z';
+
+    const input = { calendarId: ctx.calendarId, title: 'Tournage', start: '2026-11-17T09:00:00.000Z', end: '2026-11-17T11:00:00.000Z', allDay: false, location: 'Sion' };
+    const created = await call('/api/v1/events', 'POST', input);
+    expect(created.status).toBe(201);
+    const { id } = (await created.json()) as { id: string };
+    let events = (await (await call(period)).json()) as ApiV1Event[];
+    expect(events).toEqual([expect.objectContaining({ id, title: 'Tournage', location: 'Sion', repeat: 'none', recurring: false })]);
+
+    const moved = await call(`/api/v1/events/${id}`, 'PUT', { event: { ...input, title: 'Tournage clip', start: '2026-11-18T13:00:00.000Z', end: '2026-11-18T15:00:00.000Z', repeat: 'weekly' } });
+    expect(moved.status).toBe(200);
+    events = (await (await call(period)).json()) as ApiV1Event[];
+    expect(events.map((e) => [e.title, e.start, e.repeat])).toEqual([
+      ['Tournage clip', '2026-11-18T13:00:00.000Z', 'weekly'],
+      ['Tournage clip', '2026-11-25T13:00:00.000Z', 'weekly'],
+    ]);
+
+    // Une seule occurrence d'une série, puis tout l'événement.
+    const second = events[1];
+    expect((await call(`/api/v1/events/${id}?scope=this&occurrenceId=${encodeURIComponent(second.occurrenceId!)}`, 'DELETE')).status).toBe(200);
+    expect(((await (await call(period)).json()) as ApiV1Event[]).map((e) => e.start)).toEqual(['2026-11-18T13:00:00.000Z']);
+    expect((await call(`/api/v1/events/${id}`, 'DELETE')).status).toBe(200);
+    expect((await (await call(period)).json()) as ApiV1Event[]).toEqual([]);
+
+    // Entrées invalides et événement inconnu.
+    expect((await call('/api/v1/events', 'POST', { title: 'x' })).status).toBe(400);
+    expect((await call('/api/v1/events', 'POST', { ...input, calendarId: 'inconnu' })).status).toBe(404);
+    expect((await call('/api/v1/events/inconnu', 'DELETE')).status).toBe(404);
+  });
+
+  it('un jeton d’écriture n’écrit que les événements ; un jeton d’API reste en lecture', async () => {
+    const ctx = await setup();
+    const writer = await ctx.newToken({ name: 'Lamio', kind: 'write' });
+    const reader = await ctx.newToken({ name: 'Suite' });
+    const input = { calendarId: ctx.calendarId, title: 'Réunion', start: '2026-11-17T09:00:00.000Z', end: '2026-11-17T10:00:00.000Z', allDay: false };
+    expect((await ctx.request('/api/v1/events', { method: 'POST', bearer: reader.token, body: input })).status).toBe(405);
+    expect((await ctx.request('/api/v1/calendars', { method: 'POST', bearer: writer.token, body: {} })).status).toBe(405);
+    expect((await ctx.request('/api/events', { method: 'POST', bearer: writer.token, body: input })).status).toBe(401);
+    expect((await ctx.request('/api/tokens', { method: 'POST', bearer: writer.token, body: { name: 'x' } })).status).toBe(401);
+    expect((await ctx.request('/api/v1/calendars', { bearer: writer.token })).status).toBe(200);
+    // La session de l'app peut aussi écrire par la v1.
+    expect((await ctx.admin('/api/v1/events', 'POST', input)).status).toBe(201);
+    // Retiré : plus d'écriture.
+    expect((await ctx.admin(`/api/tokens/${writer.id}`, 'DELETE')).status).toBe(200);
+    expect((await ctx.request('/api/v1/events', { method: 'POST', bearer: writer.token, body: input })).status).toBe(401);
+  });
+});
+
 describe('flux iCalendar', () => {
   it('sert un calendrier à un jeton de flux, et à lui seul', async () => {
     const ctx = await setup();

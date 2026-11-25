@@ -112,7 +112,7 @@ export function AccessCard({ notify }: { notify: (msg: string) => void }) {
           {tokens.map((t) => (
             <li key={t.id} className="cx-token">
               <span className="pp-what">
-                <span>{t.name} <span className="tag">{t.kind === 'feed' ? `Flux · ${calendarName(t.calendarId)}` : 'API en lecture'}</span></span>
+                <span>{t.name} <span className="tag">{t.kind === 'feed' ? `Flux · ${calendarName(t.calendarId)}` : t.kind === 'write' ? 'API en écriture' : 'API en lecture'}</span></span>
                 <span className="bk-meta">
                   Créé le {dateTimeShortIn(TZ, t.createdAt)} · {t.lastUsedAt ? `utilisé le ${dateTimeShortIn(TZ, t.lastUsedAt)}` : 'jamais utilisé'}
                 </span>
@@ -130,6 +130,7 @@ export function AccessCard({ notify }: { notify: (msg: string) => void }) {
               <select id={fid} value={kind} onChange={(e) => setKind(e.target.value as ApiTokenKind)}>
                 <option value="feed">Flux d’un calendrier (.ics)</option>
                 <option value="api">API en lecture (suite PostMelo)</option>
+                <option value="write">API en lecture et écriture (Lamio)</option>
               </select>
             )}
           </Fld>
