@@ -1,5 +1,5 @@
 import { Settings } from '../settings.js';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { ALL_SPACES } from '../sql.js';
 import { recordFact } from '../outbox.js';
 import { uuidv7 } from '../ids.js';
@@ -77,6 +77,9 @@ interface RoomRow {
 const GRACE_MS = 6 * 3_600_000;
 /** Une réunion instantanée est prévue pour 12 heures. */
 const INSTANT_MS = 12 * 3_600_000;
+/** Durée d'un laissez-passer de la suite (ALFRED-313) : le temps d'une réunion, rechargements compris. */
+const PASS_MS = 12 * 3_600_000;
+const PASS_MAX = 2000;
 /**
  * Validité d'un jeton d'entrée : le temps de se connecter, pas plus. Une fois connecté, le serveur
  * de visio renouvelle lui-même le jeton ; un jeton copié ne sert donc plus à rien deux minutes après.
@@ -178,6 +181,12 @@ export class VideoService {
   private readonly pending = new Map<string, Map<string, number>>();
   /** Salle d'attente, en mémoire : ticket → invité. Un redémarrage d'Alfred la vide (l'invité redemande à entrer). */
   private readonly waiters = new Map<string, Waiter>();
+  /**
+   * Laissez-passer remis à la suite (Lamio) pour une personne qu'elle a déjà reconnue : entrée sans
+   * salle d'attente, sous le nom donné par la suite. Gardés en mémoire : un redémarrage les oublie,
+   * la suite en redemande un à chaque « Rejoindre ».
+   */
+  private readonly passes = new Map<string, { slug: string; name: string; expires: number }>();
   private readonly hostCache = new Map<string, { at: number; present: boolean | null }>();
 
   constructor(opts: VideoOptions) {
@@ -501,9 +510,55 @@ export class VideoService {
     for (const row of rows) this.close(row);
   }
 
+  // --- suite (ALFRED-313) ----------------------------------------------------
+
+  /** Le laissez-passer, s'il est valable pour cette salle. */
+  private passFor(slug: string, pass: unknown) {
+    if (typeof pass !== 'string' || pass.length > 100) return null;
+    const p = this.passes.get(pass);
+    if (!p || p.slug !== slug) return null;
+    if (p.expires <= this.now().getTime()) {
+      this.passes.delete(pass);
+      return null;
+    }
+    return p;
+  }
+
+  /**
+   * Lien d'entrée d'une personne de la suite dans une salle ouverte : /v/<salle>?pass=…
+   * La suite l'ouvre dans sa fenêtre d'appel ; la personne entre sans salle d'attente.
+   */
+  issuePass(slug: string, body: unknown): { url: string; expiresAt: string } {
+    const row = this.openRoom(slug);
+    const b = (body && typeof body === 'object' && !Array.isArray(body) ? body : {}) as Record<string, unknown>;
+    const name = cleanGuestName(b.name);
+    if (!name) throw new VideoError(400, 'invalid', 'Nom de la personne : 50 caractères au plus', { name: 'Nom invalide' });
+    const nowMs = this.now().getTime();
+    for (const [k, p] of this.passes) if (p.expires <= nowMs) this.passes.delete(k);
+    if (this.passes.size >= PASS_MAX) this.passes.delete(this.passes.keys().next().value!);
+    const pass = randomBytes(24).toString('base64url');
+    const expires = nowMs + PASS_MS;
+    this.passes.set(pass, { slug: row.slug, name, expires });
+    return { url: `${this.roomUrl(row.slug)}?pass=${pass}`, expiresAt: new Date(expires).toISOString() };
+  }
+
+  /** Ce que la suite affiche d'une salle : son état et le nombre de personnes connectées. */
+  async suiteRoom(slug: string): Promise<{ slug: string; title: string; status: string; live: number | null }> {
+    const row = isRoomSlug(slug) ? this.bySlug(slug) : undefined;
+    if (!row) throw new VideoError(404, 'not_found', 'Salle introuvable');
+    let live: number | null = null;
+    try {
+      const rooms = this.backend ? await this.backend.listRooms() : null;
+      live = rooms ? (rooms.find((r) => r.name === this.livekitName(row))?.numParticipants ?? 0) : null;
+    } catch {
+      live = null;
+    }
+    return { slug: row.slug, title: row.title, status: this.status(row), live };
+  }
+
   // --- partie publique -----------------------------------------------------
 
-  publicRoom(slug: string, isHost: boolean): PublicVideoRoom {
+  publicRoom(slug: string, isHost: boolean, pass?: unknown): PublicVideoRoom {
     const row = isRoomSlug(slug) ? this.bySlug(slug) : undefined;
     if (!row) throw new VideoError(404, 'not_found', 'Ce lien de visio n’existe pas.');
     const s = this.schedule(row);
@@ -515,7 +570,8 @@ export class VideoService {
       endsAt: row.kind === 'instant' ? null : s.end,
       timezone: this.timezone,
       isHost,
-      waitingRoom: !isHost && this.getSettings().waitingRoom,
+      waitingRoom: !isHost && !this.passFor(slug, pass) && this.getSettings().waitingRoom,
+      ...(!isHost && this.passFor(slug, pass) ? { passName: this.passFor(slug, pass)!.name } : {}),
     };
   }
 
@@ -539,8 +595,12 @@ export class VideoService {
     const row = this.openRoom(slug);
     const b = (body && typeof body === 'object' && !Array.isArray(body) ? body : {}) as Record<string, unknown>;
     let name: string;
+    // Une personne de la suite, avec son laissez-passer : son nom vient de la suite.
+    const pass = isHost ? null : this.passFor(row.slug, b.pass);
     if (isHost) {
       name = cleanGuestName(b.name) ?? (this.hostName() || 'Hôte');
+    } else if (pass) {
+      name = pass.name;
     } else {
       const n = cleanGuestName(b.name);
       if (!n) throw new VideoError(400, 'invalid', 'Indiquez votre nom (50 caractères au plus)', { name: 'Indiquez votre nom (50 caractères au plus)' });
@@ -554,8 +614,9 @@ export class VideoService {
     }
     const settings = this.getSettings();
     // L'hôte garde la même identité : s'il rejoint depuis un autre appareil, l'ancienne connexion est remplacée.
-    const identity = isHost ? 'host' : `invite-${randomBytes(6).toString('hex')}`;
-    if (!isHost && settings.waitingRoom) {
+    // Avec un laissez-passer, la même identité à chaque entrée : un rechargement remplace l'ancienne connexion.
+    const identity = isHost ? 'host' : pass ? `suite-${createHash('sha256').update(String(b.pass)).digest('hex').slice(0, 12)}` : `invite-${randomBytes(6).toString('hex')}`;
+    if (!isHost && !pass && settings.waitingRoom) {
       const nowMs = this.now().getTime();
       this.pruneWaiters(nowMs);
       const mine = this.waitersOf(row.id).filter((w) => w.ip === ip);

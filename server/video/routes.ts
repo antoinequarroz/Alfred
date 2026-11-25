@@ -35,7 +35,7 @@ export function registerPublicVideoRoutes(app: Hono, video: VideoService, isHost
     return c.json({ error: 'Trop de demandes. Réessayez un peu plus tard.', code: 'rate_limited' }, 429);
   };
 
-  app.get('/api/public/video/rooms/:slug', (c) => limited(c, read) ?? c.json(video.publicRoom(c.req.param('slug'), isHost(c))));
+  app.get('/api/public/video/rooms/:slug', (c) => limited(c, read) ?? c.json(video.publicRoom(c.req.param('slug'), isHost(c), c.req.query('pass'))));
 
   app.post('/api/public/video/rooms/:slug/join', async (c) => {
     const blocked = limited(c, join);

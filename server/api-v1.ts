@@ -4,6 +4,7 @@ import { ApiTokens } from './api-tokens.js';
 import type { BookingService } from './booking/service.js';
 import { parseInput, parseScope } from './event-input.js';
 import type { CalendarService } from './service.js';
+import type { VideoService } from './video/service.js';
 import { exportIcs } from './export.js';
 import { addressOf } from './ids.js';
 import { toCalendarInfo, type Store } from './store.js';
@@ -45,6 +46,7 @@ export interface ApiV1Deps {
   booking: BookingService;
   tokens: ApiTokens;
   service: CalendarService;
+  video: VideoService;
   /** Vrai si la requête porte une session d'Alfred valide. */
   authed: (c: Context) => boolean;
 }
@@ -68,7 +70,7 @@ export function registerApiV1Guard(app: Hono, deps: ApiV1Deps): void {
       if (c.req.method === 'GET' || c.req.method === 'HEAD') return next();
       // Un jeton d'API ne fait que lire ; un jeton d'écriture n'écrit que les événements.
       if (!writer) return c.json({ error: 'API en lecture seule', code: 'read_only' }, 405);
-      if (!/^\/api\/v1\/events(\/[^/]+)?$/.test(c.req.path)) return c.json({ error: 'Écriture non permise ici', code: 'read_only' }, 405);
+      if (!/^\/api\/v1\/(events(\/[^/]+)?|video\/rooms(\/[^/]+\/passes)?)$/.test(c.req.path)) return c.json({ error: 'Écriture non permise ici', code: 'read_only' }, 405);
       return next();
     }
     if (deps.authed(c)) return next();
@@ -78,7 +80,7 @@ export function registerApiV1Guard(app: Hono, deps: ApiV1Deps): void {
 }
 
 export function registerApiV1Routes(app: Hono, deps: ApiV1Deps): void {
-  const { store, booking, tokens, service } = deps;
+  const { store, booking, tokens, service, video } = deps;
 
   app.get('/api/v1', (c) => c.json({
     version: API_VERSION,
@@ -89,6 +91,9 @@ export function registerApiV1Routes(app: Hono, deps: ApiV1Deps): void {
       'POST /api/v1/events',
       'PUT /api/v1/events/:id',
       'DELETE /api/v1/events/:id?scope=&occurrenceId=',
+      'POST /api/v1/video/rooms',
+      'GET /api/v1/video/rooms/:slug',
+      'POST /api/v1/video/rooms/:slug/passes',
       'GET /api/v1/busy?start=&end=',
       'GET /api/v1/booking-types',
       'GET /api/v1/booking-types/:id/slots?from=&to=',
@@ -163,6 +168,12 @@ export function registerApiV1Routes(app: Hono, deps: ApiV1Deps): void {
       eventId: b.eventId, calendarId: b.calendarId, videoUrl: b.videoUrl ?? null, createdAt: b.createdAt, cancelledAt: b.cancelledAt,
     })));
   });
+
+  // Visio pour la suite (ALFRED-313) : Lamio crée la salle d'un appel, puis demande pour chaque
+  // personne qui rejoint un lien d'entrée sans salle d'attente. Le moteur reste celui d'Alfred.
+  app.post('/api/v1/video/rooms', async (c) => c.json(video.createRoom(await c.req.json().catch(() => ({}))), 201));
+  app.get('/api/v1/video/rooms/:slug', async (c) => c.json(await video.suiteRoom(c.req.param('slug'))));
+  app.post('/api/v1/video/rooms/:slug/passes', async (c) => c.json(video.issuePass(c.req.param('slug'), await c.req.json().catch(() => ({}))), 201));
 
   // Flux iCalendar d'un calendrier : webcal://<hôte>/api/v1/feeds/<jeton>.ics dans Apple Calendrier.
   app.get('/api/v1/feeds/:file', (c) => {

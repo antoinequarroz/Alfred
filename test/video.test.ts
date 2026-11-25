@@ -555,3 +555,73 @@ describe('participations (historique des Personnes)', () => {
     expect(names()[0].left_at).not.toBeNull();
   });
 });
+
+describe('visio pour la suite (ALFRED-313)', () => {
+  it('Lamio crée la salle d’un appel et fait entrer ses membres sans salle d’attente', async () => {
+    const ctx = await setup({ waitingRoom: true });
+    const created = await ctx.admin('/api/tokens', 'POST', { name: 'Lamio', kind: 'write' });
+    const { token } = (await created.json()) as { token: string };
+    // Comme Lamio : un autre serveur, avec le jeton, sans en-têtes de navigateur.
+    const suite = (path: string, method = 'GET', body?: unknown) =>
+      ctx.app.request(path, { method, headers: { authorization: `Bearer ${token}`, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) }, body: body !== undefined ? JSON.stringify(body) : undefined });
+
+    const res = await suite('/api/v1/video/rooms', 'POST', { title: '#general' });
+    expect(res.status).toBe(201);
+    const room = (await res.json()) as VideoRoom;
+    expect(room).toMatchObject({ title: '#general', kind: 'instant' });
+    const slug = slugOf(room);
+    expect(await (await suite(`/api/v1/video/rooms/${slug}`)).json()).toEqual({ slug, title: '#general', status: 'open', live: 0 });
+
+    const passRes = await suite(`/api/v1/video/rooms/${slug}/passes`, 'POST', { name: 'Léa Martin' });
+    expect(passRes.status).toBe(201);
+    const { url } = (await passRes.json()) as { url: string };
+    expect(url).toMatch(new RegExp(`^https://alfred\\.example\\.ch/v/${slug}\\?pass=[A-Za-z0-9_-]{32}$`));
+    const pass = new URL(url).searchParams.get('pass')!;
+
+    // La page de la salle, ouverte avec le laissez-passer : pas de salle d'attente, nom connu.
+    const pub = (await (await ctx.json(`/api/public/video/rooms/${slug}?pass=${pass}`)).json()) as PublicVideoRoom;
+    expect(pub).toMatchObject({ waitingRoom: false, passName: 'Léa Martin', isHost: false });
+    expect(((await (await ctx.json(`/api/public/video/rooms/${slug}`)).json()) as PublicVideoRoom).waitingRoom).toBe(true);
+
+    // Le nom envoyé par le navigateur est ignoré : c'est celui de la suite qui compte.
+    const join = (await (await ctx.json(`/api/public/video/rooms/${slug}/join`, 'POST', { name: 'Autre', pass })).json()) as VideoJoinInfo;
+    expect(join).toMatchObject({ isHost: false, identity: expect.stringMatching(/^suite-[0-9a-f]{12}$/) });
+    expect(verifyAccessToken(join.token, SECRET)).toMatchObject({ name: 'Léa Martin' });
+    // Même laissez-passer, même identité (rechargement de la page).
+    const again = (await (await ctx.json(`/api/public/video/rooms/${slug}/join`, 'POST', { pass })).json()) as VideoJoinInfo;
+    expect(again.identity).toBe(join.identity);
+
+    // Sans laissez-passer, ou avec celui d'une autre salle : la salle d'attente comme d'habitude.
+    expect(await (await ctx.json(`/api/public/video/rooms/${slug}/join`, 'POST', { name: 'Inconnu' })).json()).toMatchObject({ waiting: true });
+    const other = slugOf((await (await suite('/api/v1/video/rooms', 'POST', {})).json()) as VideoRoom);
+    expect(await (await ctx.json(`/api/public/video/rooms/${other}/join`, 'POST', { name: 'X', pass })).json()).toMatchObject({ waiting: true });
+
+    // Le laissez-passer expire.
+    ctx.clock.now = new Date(Date.parse(NOW) + 13 * 3_600_000);
+    expect(((await (await ctx.json(`/api/public/video/rooms/${slug}?pass=${pass}`)).json()) as PublicVideoRoom).passName).toBeUndefined();
+  });
+
+  it('un jeton de lecture ne crée pas de salle ; un nom invalide est refusé', async () => {
+    const ctx = await setup();
+    const reader = ((await (await ctx.admin('/api/tokens', 'POST', { name: 'Suite' })).json()) as { token: string }).token;
+    const res = await ctx.app.request('/api/v1/video/rooms', { method: 'POST', headers: { authorization: `Bearer ${reader}`, 'content-type': 'application/json' }, body: '{}' });
+    expect(res.status).toBe(405);
+    const room = (await (await ctx.admin('/api/v1/video/rooms', 'POST', {})).json()) as VideoRoom;
+    expect((await ctx.admin(`/api/v1/video/rooms/${slugOf(room)}/passes`, 'POST', { name: '<b>' })).status).toBe(400);
+    expect((await ctx.admin('/api/v1/video/rooms/inconnue-0000/passes', 'POST', { name: 'Léa' })).status).toBe(404);
+  });
+
+  it('se laisse afficher dans le cadre de Lamio, et seulement de lui', async () => {
+    const store = new Store(openDb(':memory:'));
+    const service = new CalendarService(store, null, 'Europe/Zurich');
+    const plain = createApp({ store, service, caldav: null, passwordHash, secureCookies: false, sessionDays: 30 });
+    const shown = createApp({ store, service, caldav: null, passwordHash, secureCookies: false, sessionDays: 30, embedOrigins: ['https://lamio.postmelo.ch'] });
+    const a = await plain.request('/healthz');
+    expect(a.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
+    expect(a.headers.get('x-frame-options')).toBe('SAMEORIGIN');
+    const b = await shown.request('/healthz');
+    expect(b.headers.get('content-security-policy')).toContain('frame-ancestors https://lamio.postmelo.ch');
+    expect(b.headers.get('x-frame-options')).toBeNull();
+    expect(b.headers.get('permissions-policy')).toContain('camera=(self "https://lamio.postmelo.ch")');
+  });
+});

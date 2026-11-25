@@ -19,7 +19,8 @@ Deux façons d'appeler `/api/v1` :
 
 Un **jeton d'écriture** (`alfw_…`, « API en lecture et écriture » dans les Réglages) lit comme
 un jeton d'API et peut en plus **créer, modifier et supprimer des événements**
-(`POST`, `PUT`, `DELETE /api/v1/events`), rien d'autre (ALFRED-312). Lamio s'en sert pour son
+(`POST`, `PUT`, `DELETE /api/v1/events`) et **créer les salles de visio des appels**
+(`POST /api/v1/video/rooms`, ALFRED-313), rien d'autre (ALFRED-312). Lamio s'en sert pour son
 onglet Calendrier. Ces requêtes viennent d'un autre serveur : la protection CSRF ne s'applique
 pas aux requêtes de `/api/v1` qui portent un jeton (un navigateur n'ajoute jamais cet en-tête).
 
@@ -121,6 +122,24 @@ Réservations qui chevauchent la période, annulées comprises, par date croissa
 ### `GET /api/v1/resolve?address=media://alfred/…`
 
 Ce que désigne une adresse (voir [DONNEES.md](DONNEES.md)).
+
+## Visio pour la suite (jeton d'écriture ou session, ALFRED-313)
+
+Pour les appels de Lamio : Alfred garde le moteur (LiveKit) et sa page de salle ; Lamio crée la
+salle et l'affiche dans sa propre fenêtre.
+
+- `POST /api/v1/video/rooms { title? }` → `201`, la salle (instantanée, 12 h) : `{ id, slug, url, title, … }`.
+- `GET /api/v1/video/rooms/:slug` → `{ slug, title, status, live }` (`live` : personnes connectées,
+  `null` si le serveur de visio ne répond pas).
+- `POST /api/v1/video/rooms/:slug/passes { name }` → `201 { url, expiresAt }` : un lien
+  `/v/<salle>?pass=…` pour une personne que Lamio a reconnue. Elle entre **sans salle d'attente**,
+  sous ce nom (celui envoyé par le navigateur est ignoré). Valable 12 h, en mémoire seulement :
+  Lamio en redemande un à chaque « Rejoindre ».
+
+Pour que la page de salle s'affiche dans un cadre de Lamio : `ALFRED_EMBED_ORIGINS=https://lamio.postmelo.ch`
+(plusieurs origines séparées par des virgules). Alfred envoie alors `frame-ancestors` avec ces
+origines (au lieu de `'none'`), plus de `X-Frame-Options`, et une `Permissions-Policy` qui leur
+ouvre caméra, micro, partage d'écran et plein écran. Sans la variable, rien ne change.
 
 ## Flux iCalendar d'un calendrier
 

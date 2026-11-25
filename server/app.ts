@@ -57,6 +57,11 @@ export interface AppDeps {
   people?: PeopleService;
   /** Jetons de l'API v1 et des flux iCalendar. Par défaut : sur la même base. */
   tokens?: ApiTokens;
+  /**
+   * Origines qui peuvent afficher Alfred dans un cadre (Lamio, pour ses appels : ALFRED-313).
+   * Vide : personne (frame-ancestors 'none').
+   */
+  embedOrigins?: string[];
 }
 
 /** Limite simple des tentatives de connexion (un seul utilisateur). */
@@ -105,8 +110,14 @@ export function createApp(deps: AppDeps): Hono {
       manifestSrc: ["'self'"],
       // blob: : le flou d'arrière-plan cadence ses images depuis un petit worker créé à la volée.
       workerSrc: ["'self'", 'blob:'],
-      frameAncestors: ["'none'"],
+      frameAncestors: deps.embedOrigins?.length ? deps.embedOrigins : ["'none'"],
     },
+    // Avec des origines permises, frame-ancestors suffit (X-Frame-Options ne sait pas en nommer).
+    xFrameOptions: deps.embedOrigins?.length ? false : 'SAMEORIGIN',
+    // La visio dans le cadre de la suite a besoin de la caméra, du micro et du partage d'écran.
+    permissionsPolicy: deps.embedOrigins?.length
+      ? { camera: ['self', ...deps.embedOrigins], microphone: ['self', ...deps.embedOrigins], displayCapture: ['self', ...deps.embedOrigins], fullscreen: ['self', ...deps.embedOrigins] }
+      : {},
   }));
   // Derrière Caddy, l'URL vue par le serveur est en http : on compare donc les hôtes.
   // Une requête de /api/v1 portant un jeton (« Authorization: Bearer ») vient d'un autre serveur
@@ -232,7 +243,7 @@ export function createApp(deps: AppDeps): Hono {
 
   // API v1 en lecture : session ou jeton d'API (server/api-v1.ts), flux iCalendar par jeton de flux.
   const tokens = deps.tokens ?? new ApiTokens(store.db);
-  const v1 = { store, booking, tokens, authed, service };
+  const v1 = { store, booking, tokens, authed, service, video };
   registerApiV1Guard(app, v1);
   registerApiV1Routes(app, v1);
 

@@ -583,6 +583,8 @@ export interface PublicVideoRoom {
   isHost: boolean;
   /** Le visiteur passera par la salle d'attente : l'hôte doit le faire entrer. */
   waitingRoom: boolean;
+  /** Entrée par un laissez-passer de la suite (Lamio) : le nom de la personne, déjà connu. */
+  passName?: string;
 }
 
 export interface VideoJoinInfo {
