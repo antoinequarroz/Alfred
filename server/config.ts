@@ -47,6 +47,8 @@ export const config = {
   /** Adresse publique d'Alfred, pour les liens dans les e-mails (sans barre finale). */
   publicUrl: (process.env.ALFRED_PUBLIC_URL || 'https://alfred.postmelo.ch').replace(/\/+$/, ''),
   /** Adresse de Cairn : ses liens de notes deviennent des adresses media://cairn/note/<id>. */
+  /** Origines qui affichent Alfred dans un cadre : Lamio pour ses appels (ALFRED-313). Séparées par des virgules. */
+  embedOrigins: (process.env.ALFRED_EMBED_ORIGINS || '').split(',').map((s) => s.trim().replace(/\/+$/, '')).filter((s) => /^https?:\/\/[^/\s'";]+$/.test(s)),
   cairnUrl: (process.env.CAIRN_URL || 'https://cairn.antoinequarroz.ch').replace(/\/+$/, ''),
 };
 

@@ -21,6 +21,17 @@ import './video.css';
 // La page de la salle n'appelle que /api/public/video/* (plus, pour l'hôte connecté, la fin de réunion).
 const BASE = '/api/public/video/rooms';
 const NAME_KEY = 'alfred:video-name';
+/** Laissez-passer de la suite (Lamio, ALFRED-313) : entrée sans salle d'attente, sous le nom donné par la suite. */
+const PASS = (() => {
+  try {
+    const p = new URLSearchParams(location.search).get('pass');
+    return p && /^[A-Za-z0-9_-]{20,100}$/.test(p) ? p : null;
+  } catch {
+    return null;
+  }
+})();
+const passQuery = PASS ? `?pass=${encodeURIComponent(PASS)}` : '';
+const passBody = PASS ? { pass: PASS } : {};
 
 // Un lien abîmé (mal encodé) doit mener à « lien introuvable », pas à une page blanche.
 const slug = (() => {
@@ -319,6 +330,7 @@ function Lobby({ room, onJoin, onPrefs, onCancel, waiting, busy, error }: {
   error: string | null;
 }) {
   const [name, setName] = useState(() => {
+    if (room.passName) return room.passName;
     try {
       return localStorage.getItem(NAME_KEY) ?? '';
     } catch {
@@ -498,7 +510,7 @@ function Lobby({ room, onJoin, onPrefs, onCancel, waiting, busy, error }: {
             ) : (
               <div className="fld">
                 <label htmlFor="vc-name">Votre nom</label>
-                <input id="vc-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={50} autoComplete="name" required autoFocus placeholder="Prénom Nom" disabled={Boolean(waiting)} />
+                <input id="vc-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={50} autoComplete="name" required autoFocus placeholder="Prénom Nom" disabled={Boolean(waiting)} readOnly={Boolean(room.passName)} />
               </div>
             )}
             {(devices.cams.length > 1 || devices.mics.length > 1) && (
@@ -955,7 +967,7 @@ export function VideoApp() {
 
   const load = useCallback(async () => {
     try {
-      const r = await requestJson<PublicVideoRoom>('GET', `${BASE}/${encodeURIComponent(slug || '-')}`);
+      const r = await requestJson<PublicVideoRoom>('GET', `${BASE}/${encodeURIComponent(slug || '-')}${passQuery}`);
       setPublicRoom(r);
       document.title = `${r.title} · Visio`;
       if (r.status === 'open') setPhase({ kind: 'lobby' });
@@ -1054,7 +1066,7 @@ export function VideoApp() {
     setJoinError(null);
     prefsRef.current = prefs;
     try {
-      const result = await requestJson<VideoJoinResult>('POST', `${BASE}/${encodeURIComponent(slug)}/join`, { name: prefs.name });
+      const result = await requestJson<VideoJoinResult>('POST', `${BASE}/${encodeURIComponent(slug)}/join`, { name: prefs.name, ...passBody });
       if ('waiting' in result) setWait({ ticket: result.ticket, hostPresent: result.hostPresent });
       else await connect(result, prefs);
     } catch (err) {
@@ -1105,7 +1117,7 @@ export function VideoApp() {
           // Page restée longtemps en arrière-plan : la demande est refaite sans rien redemander.
           stopped = true;
           try {
-            const again = await requestJson<VideoJoinResult>('POST', `${BASE}/${encodeURIComponent(slug)}/join`, { name: prefsRef.current.name });
+            const again = await requestJson<VideoJoinResult>('POST', `${BASE}/${encodeURIComponent(slug)}/join`, { name: prefsRef.current.name, ...passBody });
             if (cancelled) {
               if ('waiting' in again) leaveWait(again.ticket);
               return;

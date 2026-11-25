@@ -71,6 +71,7 @@ const app = createApp({
   store, service, caldav, passwordHash, booking, connections, video, push, people, compte, payments,
   secureCookies: config.production,
   sessionDays: config.sessionDays,
+  embedOrigins: config.embedOrigins,
 });
 
 // App web compilée (dist/web), avec repli sur index.html pour le routage côté client.

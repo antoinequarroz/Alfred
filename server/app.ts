@@ -4,7 +4,6 @@ import { bodyLimit } from 'hono/body-limit';
 import { csrf } from 'hono/csrf';
 import { HTTPException } from 'hono/http-exception';
 import { secureHeaders } from 'hono/secure-headers';
-import type { EditScope, EventInput, RepeatRule } from '../shared/types.js';
 import { DEFAULT_BOOKING_LIMITS, registerAdminBookingRoutes, registerPublicBookingRoutes, type BookingLimits } from './booking/routes.js';
 import { BookingError, BookingService } from './booking/service.js';
 import { ConflictError, RemoteError, type CaldavSync } from './caldav.js';
@@ -14,6 +13,7 @@ import { DEFAULT_CONNECTION_LIMITS, registerConnectionRoutes, type ConnectionLim
 import { registerExportRoutes, IMPORT_MAX_BYTES } from './export-routes.js';
 import { ApiTokens, TokenError } from './api-tokens.js';
 import { registerApiV1Guard, registerApiV1Routes, registerTokenRoutes, V1Error } from './api-v1.js';
+import { BadRequest, parseInput, parseScope } from './event-input.js';
 import { IcsError } from './ics.js';
 import { verifyPassword } from './password.js';
 import { registerPushRoutes } from './push/routes.js';
@@ -29,7 +29,6 @@ import { VideoError, VideoService } from './video/service.js';
 
 const COOKIE = 'alfred_session';
 const MAX_RANGE_MS = 400 * 86_400_000;
-const REPEATS: RepeatRule[] = ['none', 'daily', 'weekly', 'monthly', 'yearly', 'custom'];
 
 export interface AppDeps {
   store: Store;
@@ -58,29 +57,11 @@ export interface AppDeps {
   people?: PeopleService;
   /** Jetons de l'API v1 et des flux iCalendar. Par défaut : sur la même base. */
   tokens?: ApiTokens;
-}
-
-class BadRequest extends Error {}
-
-function parseInput(body: unknown): EventInput {
-  if (!body || typeof body !== 'object') throw new BadRequest('Corps de requête invalide');
-  const b = body as Record<string, unknown>;
-  const str = (k: string) => (typeof b[k] === 'string' ? (b[k] as string) : undefined);
-  const calendarId = str('calendarId');
-  const title = str('title');
-  const start = str('start');
-  const end = str('end');
-  if (!calendarId || title === undefined || !start || !end) throw new BadRequest('Champs manquants');
-  const repeat = str('repeat') as RepeatRule | undefined;
-  if (repeat !== undefined && !REPEATS.includes(repeat)) throw new BadRequest('Répétition invalide');
-  if (title.length > 500 || (str('description')?.length ?? 0) > 20_000 || (str('location')?.length ?? 0) > 1000) {
-    throw new BadRequest('Texte trop long');
-  }
-  return { calendarId, title, start, end, allDay: b.allDay === true, location: str('location'), description: str('description'), repeat };
-}
-
-function parseScope(v: unknown): EditScope {
-  return v === 'this' ? 'this' : 'all';
+  /**
+   * Origines qui peuvent afficher Alfred dans un cadre (Lamio, pour ses appels : ALFRED-313).
+   * Vide : personne (frame-ancestors 'none').
+   */
+  embedOrigins?: string[];
 }
 
 /** Limite simple des tentatives de connexion (un seul utilisateur). */
@@ -129,11 +110,19 @@ export function createApp(deps: AppDeps): Hono {
       manifestSrc: ["'self'"],
       // blob: : le flou d'arrière-plan cadence ses images depuis un petit worker créé à la volée.
       workerSrc: ["'self'", 'blob:'],
-      frameAncestors: ["'none'"],
+      frameAncestors: deps.embedOrigins?.length ? deps.embedOrigins : ["'none'"],
     },
+    // Avec des origines permises, frame-ancestors suffit (X-Frame-Options ne sait pas en nommer).
+    xFrameOptions: deps.embedOrigins?.length ? false : 'SAMEORIGIN',
+    // La visio dans le cadre de la suite a besoin de la caméra, du micro et du partage d'écran.
+    permissionsPolicy: deps.embedOrigins?.length
+      ? { camera: ['self', ...deps.embedOrigins], microphone: ['self', ...deps.embedOrigins], displayCapture: ['self', ...deps.embedOrigins], fullscreen: ['self', ...deps.embedOrigins] }
+      : {},
   }));
   // Derrière Caddy, l'URL vue par le serveur est en http : on compare donc les hôtes.
-  app.use('/api/*', csrf({
+  // Une requête de /api/v1 portant un jeton (« Authorization: Bearer ») vient d'un autre serveur
+  // (Lamio) : un navigateur n'ajoute jamais cet en-tête de lui-même, elle n'a rien d'un CSRF.
+  const csrfGuard = csrf({
     origin: (origin, c) => {
       try {
         return new URL(origin).host === (c.req.header('x-forwarded-host') ?? c.req.header('host'));
@@ -141,7 +130,8 @@ export function createApp(deps: AppDeps): Hono {
         return false;
       }
     },
-  }));
+  });
+  app.use('/api/*', (c, next) => (c.req.path.startsWith('/api/v1/') && c.req.header('authorization') ? next() : csrfGuard(c, next)));
 
   // Import des données : un fichier d'export complet, bien plus gros qu'une requête ordinaire.
   const smallBody = bodyLimit({ maxSize: 128 * 1024 });
@@ -253,7 +243,7 @@ export function createApp(deps: AppDeps): Hono {
 
   // API v1 en lecture : session ou jeton d'API (server/api-v1.ts), flux iCalendar par jeton de flux.
   const tokens = deps.tokens ?? new ApiTokens(store.db);
-  const v1 = { store, booking, tokens, authed };
+  const v1 = { store, booking, tokens, authed, service, video };
   registerApiV1Guard(app, v1);
   registerApiV1Routes(app, v1);
 
