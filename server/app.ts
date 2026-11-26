@@ -9,6 +9,7 @@ import { BookingError, BookingService } from './booking/service.js';
 import { ConflictError, RemoteError, type CaldavSync } from './caldav.js';
 import { CALLBACK_PATH, finishSignIn, PENDING_COOKIE, PENDING_MAX_AGE, START_PATH, startSignIn, type Settings as CompteSettings } from './compte.js';
 import { ConnectionError, type ConnectionsService } from './connections.js';
+import { reportError } from './error-reporting.js';
 import { DEFAULT_CONNECTION_LIMITS, registerConnectionRoutes, type ConnectionLimits } from './connections-routes.js';
 import { registerExportRoutes, IMPORT_MAX_BYTES } from './export-routes.js';
 import { ApiTokens, TokenError } from './api-tokens.js';
@@ -160,6 +161,8 @@ export function createApp(deps: AppDeps): Hono {
     // Une erreur imprévue est journalisée sans ses éventuels secrets (mots de passe de connexion, identifiants dans une URL).
     const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
     console.error('[alfred]', deps.connections ? deps.connections.redact(detail) : detail);
+    // Envoyée aussi à Orbi (si SENTRY_DSN est réglé), expurgée de la même façon.
+    reportError(err, { method: c.req.method, path: c.req.path }, deps.connections ? (v) => deps.connections!.redact(v) : undefined);
     return c.json({ error: 'Erreur interne' }, 500);
   });
 

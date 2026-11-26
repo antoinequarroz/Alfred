@@ -10,6 +10,7 @@ import { settings as compteSettings } from './compte.js';
 import { allowPrivateHosts, config, connectionEnv, secretKeyEnv, videoEnv } from './config.js';
 import { ConnectionsService } from './connections.js';
 import { openDb } from './db.js';
+import { startErrorReporting } from './error-reporting.js';
 import { PaymentsService } from './payments/service.js';
 import { PeopleService } from './people.js';
 import { SecretBox } from './secrets.js';
@@ -18,6 +19,9 @@ import { CalendarService } from './service.js';
 import { Store } from './store.js';
 import { PushService } from './push/service.js';
 import { VideoService } from './video/service.js';
+
+// Erreurs imprévues du serveur envoyées à Orbi, seulement si SENTRY_DSN est réglé.
+await startErrorReporting();
 
 let passwordHash = config.passwordHash;
 if (!passwordHash) {
